@@ -6,14 +6,12 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::conversation::{
-    Conversation, ConversationEvent, ConversationEventId, ConversationEventKind, ConversationId,
+    Conversation, ConversationEvent, ConversationEventKind, ConversationId, ConversationRecordKind,
 };
-
-const SCHEMA_VERSION: u32 = 9;
+use crate::model_driver::DriverEvent;
 
 pub(crate) struct EventStore {
     root_directory: PathBuf,
@@ -47,7 +45,17 @@ impl EventStore {
         &self,
         conversation_id: ConversationId,
     ) -> io::Result<Conversation> {
-        let events = self.load_conversation_events(conversation_id)?;
+        let events = self
+            .load_conversation_log(conversation_id)?
+            .into_iter()
+            .filter_map(|mut event| match event.kind {
+                ConversationRecordKind::Event(kind) if !kind.is_command() => {
+                    event.kind = ConversationRecordKind::Event(kind);
+                    Some(event)
+                }
+                ConversationRecordKind::Event(_) | ConversationRecordKind::Driver(_) => None,
+            })
+            .collect();
         let conversation = Conversation::from_events(events).map_err(invalid_conversation_data)?;
         if conversation.id() != conversation_id {
             return Err(io::Error::new(
@@ -58,10 +66,34 @@ impl EventStore {
         Ok(conversation)
     }
 
-    pub(crate) fn append_conversation_event(
+    pub(crate) fn load_conversation_log(
+        &self,
+        conversation_id: ConversationId,
+    ) -> io::Result<Vec<ConversationEvent>> {
+        self.load_conversation_events(conversation_id)
+    }
+
+    pub(crate) fn append_new_conversation_event(
         &self,
         conversation_id: ConversationId,
         kind: ConversationEventKind,
+    ) -> io::Result<ConversationEvent> {
+        self.append_new_record(conversation_id, ConversationRecordKind::Event(kind))
+    }
+
+    pub(crate) fn append_driver_event(
+        &self,
+        conversation_id: ConversationId,
+        event: &dyn DriverEvent,
+    ) -> io::Result<ConversationEvent> {
+        let envelope = event.to_envelope().map_err(io::Error::other)?;
+        self.append_new_record(conversation_id, ConversationRecordKind::Driver(envelope))
+    }
+
+    fn append_new_record(
+        &self,
+        conversation_id: ConversationId,
+        kind: ConversationRecordKind,
     ) -> io::Result<ConversationEvent> {
         let conversation_directory = self.conversation_directory(conversation_id);
         create_private_directory(&conversation_directory)?;
@@ -81,13 +113,15 @@ impl EventStore {
             }
             conversation.events().last().map(|event| event.position)
         };
-        let conversation_event = ConversationEvent {
-            conversation_id,
-            position: next_position(previous_position)?,
-            id: ConversationEventId::new(),
-            timestamp: OffsetDateTime::now_utc(),
-            schema_version: SCHEMA_VERSION,
-            kind,
+        let conversation_event = match kind {
+            ConversationRecordKind::Event(kind) => {
+                ConversationEvent::new(conversation_id, next_position(previous_position)?, kind)
+            }
+            ConversationRecordKind::Driver(event) => ConversationEvent::new_driver(
+                conversation_id,
+                next_position(previous_position)?,
+                event,
+            ),
         };
         write_json_atomically(
             &event_path(
@@ -178,10 +212,16 @@ fn invalid_conversation_data(error: impl Error + Send + Sync + 'static) -> io::E
 
 #[cfg(test)]
 mod tests {
-    use time::OffsetDateTime;
+    use std::str::FromStr;
+
+    use serde_json::{Map, Value};
 
     use super::EventStore;
-    use crate::conversation::{ConversationEventKind, ConversationId, UserContent};
+    use crate::conversation::{
+        AssistantResponse, ConversationCommandId, ConversationEventKind, ConversationId,
+        ConversationTurnId, ModelData, ModelDetails, ModelId, ModelInvocationId, ModelSource,
+        ProviderId, UserContent,
+    };
 
     fn temporary_store() -> EventStore {
         let directory = std::env::temp_dir().join(format!("tog-test-{}", uuid::Uuid::now_v7()));
@@ -194,17 +234,19 @@ mod tests {
         let conversation_id = ConversationId::new();
 
         let first_event = store
-            .append_conversation_event(
+            .append_new_conversation_event(
                 conversation_id,
                 ConversationEventKind::User {
+                    caused_by: Some(ConversationCommandId::new()),
                     content: vec![UserContent::Text("first".to_owned())],
                 },
             )
             .expect("the first event should be persisted");
         let second_event = store
-            .append_conversation_event(
+            .append_new_conversation_event(
                 conversation_id,
                 ConversationEventKind::User {
+                    caused_by: Some(ConversationCommandId::new()),
                     content: vec![UserContent::Text("second".to_owned())],
                 },
             )
@@ -212,12 +254,12 @@ mod tests {
 
         assert_eq!(first_event.conversation_id, conversation_id);
         assert_eq!(first_event.position, 0);
-        assert_eq!(first_event.schema_version, 9);
-        assert_ne!(first_event.timestamp, OffsetDateTime::UNIX_EPOCH);
+        assert_eq!(first_event.schema_version, 11);
+        assert_ne!(first_event.timestamp, time::OffsetDateTime::UNIX_EPOCH);
         assert_eq!(second_event.conversation_id, conversation_id);
         assert_eq!(second_event.position, 1);
-        assert_eq!(second_event.schema_version, 9);
-        assert_ne!(second_event.timestamp, OffsetDateTime::UNIX_EPOCH);
+        assert_eq!(second_event.schema_version, 11);
+        assert_ne!(second_event.timestamp, time::OffsetDateTime::UNIX_EPOCH);
         assert_ne!(second_event.id, first_event.id);
 
         let conversation = store
@@ -237,5 +279,39 @@ mod tests {
                 .join("conversation.json")
                 .exists()
         );
+    }
+
+    #[test]
+    fn event_store_persists_model_data_on_the_event_envelope() {
+        let store = temporary_store();
+        let conversation_id = ConversationId::new();
+        let source = ModelSource::new(
+            ProviderId::from_str("openai").expect("the provider identifier should be valid"),
+            ModelId::from_str("gpt-5.6").expect("the model identifier should be valid"),
+        );
+        let model_data = ModelData::new(Map::from_iter([(
+            "response_id".to_owned(),
+            Value::String("resp_1".to_owned()),
+        )]))
+        .expect("the model data should be valid");
+
+        let model_event = store
+            .append_new_conversation_event(
+                conversation_id,
+                ConversationEventKind::Assistant {
+                    turn_id: ConversationTurnId::new(),
+                    invocation_id: ModelInvocationId::new(),
+                    model: ModelDetails::new(source, Some(model_data))
+                        .expect("the model details should be valid"),
+                    response: AssistantResponse::new("The answer is 42.".to_owned())
+                        .expect("the assistant response should be valid"),
+                },
+            )
+            .expect("the model event should be persisted");
+
+        let conversation = store
+            .load_conversation(conversation_id)
+            .expect("the conversation should load");
+        assert_eq!(conversation.events()[0], model_event);
     }
 }

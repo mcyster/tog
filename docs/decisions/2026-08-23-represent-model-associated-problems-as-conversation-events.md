@@ -1,5 +1,7 @@
 # Represent Model-Associated Problems as Conversation Events
 
+> Superseded by [Record Commands And Turn Lifecycle](../notes/2026-09-05-record-commands-and-turn-lifecycle.md) for event taxonomy and turn completion. The distinction between semantic problems and operational errors remains current.
+
 ## Why
 
 Model limitations and invocation failures both need a portable, sanitized durable representation. They remain distinct from detailed Rust control-flow errors, but both are facts associated with a selected model invocation and therefore have a meaningful `ModelSource`.
@@ -8,11 +10,13 @@ Introducing a broad conversation-problem hierarchy or separate top-level event v
 
 ## Decision
 
-Use `ConversationEventKind::Problem { source, problem }` as the one durable problem surface. `ModelProblem::Issue(ModelIssue)` represents a meaningful limitation or unsuccessful model outcome, and `ModelProblem::Invocation(InvocationError)` represents a sanitized invocation failure. `ConversationEventKind::Model` remains limited to successful semantic `ModelEvent` output.
+Use `ConversationEventKind::Problem { model, problem }` as the one durable problem surface. A model-associated problem carries `Some(ModelDetails)`; a future unrelated problem may carry `None`. `ConversationProblem::Issue(ModelIssue)` represents a meaningful limitation or unsuccessful model outcome, and `ConversationProblem::Invocation(InvocationError)` represents a sanitized invocation failure. `ConversationEventKind::Model` remains limited to successful semantic `ModelEvent` output.
 
-`ModelProblem` is a closed serializable enum. Every concrete variant provides one meaningful sanitized message. The parent delegates common `message` and `retryable` behavior to its categories without introducing a trait. The conversation event does not duplicate the message and does not add generic severity or impact fields.
+`ConversationProblem` is a closed serializable enum. Every concrete variant provides one meaningful sanitized message. The parent delegates common `message` and `retryable` behavior to its categories without introducing a trait. The conversation event does not duplicate the message and does not add generic severity or impact fields.
 
-A concrete driver yields `ModelDriverOutput::Issue` when it can translate provider-specific information into portable semantics. The turn service wraps it as `ModelProblem::Issue`. `ModelDriverError` remains the detailed error returned by the invocation future or stream. The turn service converts that error into a sanitized invocation problem, appends it under the invoked driver's source, and then returns the original error for Rust control flow.
+A concrete driver translates provider-specific information into a complete `ConversationEventKind::Problem` with `ConversationProblem::Issue` and returns it on the conversation-event stream. `ModelDriverError` remains the detailed error returned by the invocation future or stream. The turn service converts that error into a sanitized invocation problem with `Some(ModelDetails)` and `data: None`, persists it, and then returns the original error for Rust control flow.
+
+The decision in [Separate Portable Conversation Meaning from Model Data](2026-08-29-separate-portable-conversation-meaning-from-model-data.md) supersedes the `ModelSource` on the problem kind, the `ModelIssue::Other` extension channel, and the earlier driver-output shape: problems are now stream events named `ConversationProblem`, and model-specific data lives in `ModelDetails`. [Make ModelDrivers Return Conversation Events](2026-08-29-model-drivers-return-conversation-events.md) further makes the public stream return complete `ConversationEvent`s rather than an intermediate driver-event type.
 
 Durable problem messages must not contain credentials, authorization headers, raw provider bodies, stack traces, sensitive request data, or diagnostics without portable conversational meaning. Detailed diagnostics may remain in `ModelDriverError` and application logging.
 

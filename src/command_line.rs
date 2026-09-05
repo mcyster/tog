@@ -4,7 +4,7 @@ use std::io::{self, Write};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use crate::conversation::{
-    ConversationId, ModelEvent, ModelEventImportance, ModelId, ModelProblem,
+    ConversationEventKind, ConversationId, ConversationProblem, ModelEventImportance, ModelId,
 };
 use crate::openai::OpenAiModelDriver;
 use crate::persistence::EventStore;
@@ -58,12 +58,9 @@ impl CommandLine {
                                 TurnProgress::InvocationStarted { model } => {
                                     eprintln!("## waiting for model {model}");
                                 }
-                                TurnProgress::EventCompleted { event }
-                                    if verbosity.includes(event.importance()) =>
-                                {
-                                    render_model_event(&event)?;
+                                TurnProgress::EventCompleted { event } => {
+                                    render_model_event(&event, verbosity)?;
                                 }
-                                TurnProgress::EventCompleted { .. } => {}
                                 TurnProgress::ProblemCompleted { problem } => {
                                     render_model_problem(&problem)?;
                                 }
@@ -77,17 +74,25 @@ impl CommandLine {
     }
 }
 
-fn render_model_event(model_event: &ModelEvent) -> io::Result<()> {
-    let prefix = match model_event {
-        ModelEvent::AssistantResponse(_) => "",
-        ModelEvent::Communication(_) => "### ",
+fn render_model_event(event: &ConversationEventKind, verbosity: Verbosity) -> io::Result<()> {
+    let (message, importance, prefix) = match event {
+        ConversationEventKind::Assistant { response, .. } => {
+            (response.message(), ModelEventImportance::Important, "")
+        }
+        ConversationEventKind::Communication { communication, .. } => {
+            (communication.message(), communication.importance(), "### ")
+        }
+        _ => return Ok(()),
+    };
+    if !verbosity.includes(importance) {
+        return Ok(());
     };
     let mut standard_output = io::stdout().lock();
-    writeln!(standard_output, "{prefix}{}", model_event.message())?;
+    writeln!(standard_output, "{prefix}{message}")?;
     standard_output.flush()
 }
 
-fn render_model_problem(problem: &ModelProblem) -> io::Result<()> {
+fn render_model_problem(problem: &ConversationProblem) -> io::Result<()> {
     let mut standard_output = io::stdout().lock();
     writeln!(standard_output, "### {}", problem.message())?;
     standard_output.flush()

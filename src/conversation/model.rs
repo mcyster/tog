@@ -5,6 +5,43 @@ use std::str::FromStr;
 use serde::de::Error as DeserializeError;
 use serde::{Deserialize, Deserializer, Serialize};
 
+use super::{InvalidModelData, ModelData};
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct ModelDetails {
+    source: ModelSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    data: Option<ModelData>,
+}
+
+impl ModelDetails {
+    pub(crate) fn new(
+        source: ModelSource,
+        data: Option<ModelData>,
+    ) -> Result<Self, InvalidModelData> {
+        let model_details = Self { source, data };
+        model_details.ensure_valid()?;
+        Ok(model_details)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn source(&self) -> &ModelSource {
+        &self.source
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn data(&self) -> Option<&ModelData> {
+        self.data.as_ref()
+    }
+
+    pub(super) fn ensure_valid(&self) -> Result<(), InvalidModelData> {
+        if let Some(data) = &self.data {
+            data.ensure_valid()?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct ModelSource {
     provider: ProviderId,

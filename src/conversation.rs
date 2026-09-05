@@ -1,19 +1,27 @@
 mod event;
 mod id;
 mod model;
-mod model_problem;
+mod model_data;
+mod problem;
 
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::str::FromStr;
 
 pub(crate) use event::{
-    AssistantResponse, ConversationEvent, ConversationEventKind, InvalidAssistantResponse,
-    InvalidModelCommunication, ModelCommunication, ModelEvent, ModelEventImportance, UserContent,
+    AssistantResponse, ConversationEvent, ConversationEventKind, ConversationRecordKind,
+    DriverEventEnvelope, InvalidAssistantResponse, InvalidModelCommunication, ModelCommunication,
+    ModelEvent, ModelEventImportance, TurnOutcome, UserContent,
 };
-pub(crate) use id::{ConversationEventId, ConversationId};
-pub(crate) use model::{ModelId, ModelSource, ProviderId};
-pub(crate) use model_problem::{InvalidModelProblem, InvocationError, ModelIssue, ModelProblem};
+pub(crate) use id::{
+    ConversationCommandId, ConversationEventId, ConversationId, ConversationTurnId,
+    ModelInvocationId,
+};
+pub(crate) use model::{ModelDetails, ModelId, ModelSource, ProviderId};
+pub(crate) use model_data::{InvalidModelData, ModelData};
+pub(crate) use problem::{
+    ConversationProblem, InvalidConversationProblem, InvocationError, ModelIssue,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Conversation {
@@ -28,7 +36,8 @@ impl Conversation {
             .map(|event| event.conversation_id)
             .ok_or(InvalidConversation::Empty)?;
 
-        for (expected_position, event) in events.iter().enumerate() {
+        let mut previous_position = None;
+        for event in &events {
             if event.conversation_id != conversation_id {
                 return Err(InvalidConversation::MixedConversationIds {
                     expected: conversation_id,
@@ -36,17 +45,19 @@ impl Conversation {
                 });
             }
 
-            let expected_position =
-                u64::try_from(expected_position).map_err(|_| InvalidConversation::TooManyEvents)?;
-            if event.position != expected_position {
+            if let Some(previous_position) = previous_position
+                && event.position <= previous_position
+            {
                 return Err(InvalidConversation::InvalidPosition {
-                    expected: expected_position,
+                    expected: previous_position
+                        .checked_add(1)
+                        .ok_or(InvalidConversation::TooManyEvents)?,
                     found: event.position,
                 });
             }
+            previous_position = Some(event.position);
 
             event
-                .kind
                 .ensure_valid()
                 .map_err(|error| InvalidConversation::InvalidEvent {
                     position: event.position,
@@ -156,8 +167,9 @@ mod tests {
     use time::OffsetDateTime;
 
     use super::{
-        Conversation, ConversationEvent, ConversationEventId, ConversationEventKind,
-        ConversationId, InvalidConversation, InvalidUserPrompt, UserContent, UserPrompt,
+        Conversation, ConversationCommandId, ConversationEvent, ConversationEventId,
+        ConversationEventKind, ConversationId, ConversationRecordKind, ConversationTurnId,
+        InvalidConversation, InvalidUserPrompt, UserContent, UserPrompt,
     };
 
     fn user_event(conversation_id: ConversationId, position: u64) -> ConversationEvent {
@@ -167,9 +179,10 @@ mod tests {
             id: ConversationEventId::new(),
             timestamp: OffsetDateTime::UNIX_EPOCH,
             schema_version: 7,
-            kind: ConversationEventKind::User {
+            kind: ConversationRecordKind::Event(ConversationEventKind::User {
+                caused_by: Some(ConversationCommandId::new()),
                 content: vec![UserContent::Text(format!("event {position}"))],
-            },
+            }),
         }
     }
 
@@ -204,12 +217,15 @@ mod tests {
     fn conversation_rejects_invalid_event_order() {
         let conversation_id = ConversationId::new();
 
-        let result = Conversation::from_events(vec![user_event(conversation_id, 1)]);
+        let result = Conversation::from_events(vec![
+            user_event(conversation_id, 1),
+            user_event(conversation_id, 1),
+        ]);
 
         assert_eq!(
             result,
             Err(InvalidConversation::InvalidPosition {
-                expected: 0,
+                expected: 2,
                 found: 1,
             })
         );
@@ -232,6 +248,19 @@ mod tests {
     }
 
     #[test]
+    fn conversation_accepts_gaps_left_by_command_records() {
+        let conversation_id = ConversationId::new();
+
+        let conversation = Conversation::from_events(vec![
+            user_event(conversation_id, 1),
+            user_event(conversation_id, 3),
+        ])
+        .expect("the conversation should allow command positions between events");
+
+        assert_eq!(conversation.events()[1].position, 3);
+    }
+
+    #[test]
     fn conversation_rejects_invalid_deserialized_model_events() {
         let conversation_id = ConversationId::new();
         let event_id = ConversationEventId::new();
@@ -240,17 +269,17 @@ mod tests {
             "position": 0,
             "id": event_id,
             "timestamp": "2026-08-22T18:42:31.482Z",
-            "schema_version": 7,
-            "type": "model",
-            "source": {
-                "provider": "openai",
-                "model": "gpt-5.6"
+            "schema_version": 11,
+            "type": "assistant",
+            "turn_id": ConversationTurnId::new(),
+            "invocation_id": crate::conversation::ModelInvocationId::new(),
+            "model": {
+                "source": {
+                    "provider": "openai",
+                    "model": "gpt-5.6"
+                }
             },
-            "event": {
-                "type": "assistant_response",
-                "message": "   ",
-                "extensions": {}
-            }
+            "response": { "message": "   " }
         }))
         .expect("derived deserialization should construct the conversation event");
 
@@ -272,18 +301,20 @@ mod tests {
             "position": 0,
             "id": event_id,
             "timestamp": "2026-08-22T18:42:31.482Z",
-            "schema_version": 7,
-            "type": "model",
-            "source": {
-                "provider": "openai",
-                "model": "gpt-5.6"
+            "schema_version": 11,
+            "type": "communication",
+            "turn_id": ConversationTurnId::new(),
+            "invocation_id": crate::conversation::ModelInvocationId::new(),
+            "model": {
+                "source": {
+                    "provider": "openai",
+                    "model": "gpt-5.6"
+                }
             },
-            "event": {
-                "type": "communication",
+            "communication": {
                 "message": "reasoning",
                 "importance": "detailed",
-                "subtype": "   ",
-                "extensions": {}
+                "subtype": "   "
             }
         }))
         .expect("derived deserialization should construct the conversation event");
@@ -308,9 +339,13 @@ mod tests {
             "timestamp": "2026-08-22T18:42:31.482Z",
             "schema_version": 8,
             "type": "problem",
-            "source": {
-                "provider": "openai",
-                "model": "gpt-5.6"
+            "turn_id": null,
+            "invocation_id": null,
+            "model": {
+                "source": {
+                    "provider": "openai",
+                    "model": "gpt-5.6"
+                }
             },
             "problem": {
                 "category": "issue",
@@ -326,9 +361,76 @@ mod tests {
             Conversation::from_events(vec![conversation_event]),
             Err(InvalidConversation::InvalidEvent {
                 position: 0,
-                reason: "model problem message must not be empty".to_owned(),
+                reason: "conversation problem message must not be empty".to_owned(),
             })
         );
+    }
+
+    #[test]
+    fn conversation_rejects_empty_deserialized_model_data() {
+        let conversation_id = ConversationId::new();
+        let event_id = ConversationEventId::new();
+        let conversation_event: ConversationEvent = serde_json::from_value(json!({
+            "conversation_id": conversation_id,
+            "position": 0,
+            "id": event_id,
+            "timestamp": "2026-08-22T18:42:31.482Z",
+            "schema_version": 10,
+            "type": "assistant",
+            "turn_id": ConversationTurnId::new(),
+            "invocation_id": crate::conversation::ModelInvocationId::new(),
+            "model": {
+                "source": {
+                    "provider": "openai",
+                    "model": "gpt-5.6"
+                },
+                "data": {}
+            },
+            "response": { "message": "The answer is 42." }
+        }))
+        .expect("derived deserialization should construct the conversation event");
+
+        assert_eq!(
+            Conversation::from_events(vec![conversation_event]),
+            Err(InvalidConversation::InvalidEvent {
+                position: 0,
+                reason: "model data content must not be empty".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn conversation_loads_problem_events_from_earlier_schema_versions() {
+        let conversation_id = ConversationId::new();
+        let event_id = ConversationEventId::new();
+        let conversation_event: ConversationEvent = serde_json::from_value(json!({
+            "conversation_id": conversation_id,
+            "position": 0,
+            "id": event_id,
+            "timestamp": "2026-08-22T18:42:31.482Z",
+            "schema_version": 9,
+            "type": "problem",
+            "source": {
+                "provider": "openai",
+                "model": "gpt-5.6"
+            },
+            "problem": {
+                "category": "invocation",
+                "detail": {
+                    "type": "transport",
+                    "message": "The model provider could not be reached."
+                }
+            }
+        }))
+        .expect("the earlier problem event should deserialize");
+
+        let conversation = Conversation::from_events(vec![conversation_event])
+            .expect("the conversation should be valid");
+
+        assert!(matches!(
+            conversation.events()[0].kind,
+            ConversationRecordKind::Event(ConversationEventKind::Problem { .. })
+        ));
     }
 
     #[test]

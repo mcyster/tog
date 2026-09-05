@@ -6,22 +6,65 @@ use futures_util::stream::{self, BoxStream};
 use futures_util::{FutureExt, StreamExt};
 use reqwest::Client;
 use reqwest::StatusCode;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use crate::conversation::{
-    AssistantResponse, Conversation, ConversationEventKind, InvalidAssistantResponse,
-    InvalidModelCommunication, InvalidModelProblem, ModelCommunication, ModelEvent,
-    ModelEventImportance, ModelId, ModelIssue, ModelSource, ProviderId, UserContent,
+    AssistantResponse, Conversation, ConversationEventKind, ConversationProblem,
+    ConversationRecordKind, ConversationTurnId, DriverEventEnvelope, InvalidAssistantResponse,
+    InvalidConversationProblem, InvalidModelCommunication, InvalidModelData, ModelCommunication,
+    ModelData, ModelDetails, ModelEvent, ModelEventImportance, ModelId, ModelInvocationId,
+    ModelIssue, ModelSource, ProviderId, TurnOutcome, UserContent,
 };
-use crate::model_driver::{ModelDriver, ModelDriverError, ModelDriverOutput, ModelOutputStream};
+use crate::model_driver::{
+    DriverEvent, DriverEventDecodeError, DriverEventDecoder, ModelDriver, ModelDriverError,
+    ModelDriverOutput, ModelOutputStream,
+};
 
 type ResponseByteStream = BoxStream<'static, Result<Vec<u8>, ModelDriverError>>;
+type ProviderOutputStream = BoxStream<'static, Result<ModelDriverEvent, ModelDriverError>>;
+
+const OPEN_AI_DRIVER_VERSION: &str = "1";
+
+enum ModelDriverEvent {
+    Model {
+        event: ModelEvent,
+        data: Option<ModelData>,
+    },
+    Problem {
+        problem: ModelIssue,
+        data: Option<ModelData>,
+    },
+}
 
 pub(crate) struct OpenAiModelDriver {
     http_client: Client,
     api_key: String,
     responses_url: String,
     source: ModelSource,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct OpenAiInvocationRequested {
+    invocation_id: ModelInvocationId,
+    turn_id: ConversationTurnId,
+    model: ModelSource,
+}
+
+impl DriverEvent for OpenAiInvocationRequested {
+    fn to_envelope(&self) -> Result<DriverEventEnvelope, ModelDriverError> {
+        let payload = serde_json::to_value(self)
+            .map_err(|error| ModelDriverError::InvalidResponse(error.to_string()))?;
+        DriverEventEnvelope::new(
+            "openai".to_owned(),
+            OPEN_AI_DRIVER_VERSION.to_owned(),
+            "model_invocation_requested".to_owned(),
+            1,
+            "OpenAI model invocation was requested.".to_owned(),
+            payload,
+        )
+        .map_err(|error| ModelDriverError::InvalidResponse(error.to_string()))
+    }
 }
 
 impl OpenAiModelDriver {
@@ -52,7 +95,14 @@ impl ModelDriver for OpenAiModelDriver {
     fn invoke<'invoke>(
         &'invoke self,
         conversation: &'invoke Conversation,
+        turn_id: ConversationTurnId,
     ) -> BoxFuture<'invoke, Result<ModelOutputStream, ModelDriverError>> {
+        let invocation_id = ModelInvocationId::new();
+        let invocation_event = OpenAiInvocationRequested {
+            invocation_id,
+            turn_id,
+            model: self.source.clone(),
+        };
         let mut request_body = Map::new();
         request_body.insert(
             "model".to_owned(),
@@ -70,14 +120,25 @@ impl ModelDriver for OpenAiModelDriver {
             .json(&request_body)
             .build();
         let http_client = self.http_client.clone();
+        let source = self.source.clone();
 
         async move {
-            let request =
-                request.map_err(|error| ModelDriverError::InvalidRequest(error.to_string()))?;
-            let response = http_client
-                .execute(request)
-                .await
-                .map_err(|error| ModelDriverError::Transport(error.to_string()))?;
+            let request = match request {
+                Ok(request) => request,
+                Err(error) => {
+                    let error = ModelDriverError::InvalidRequest(error.to_string());
+                    return Ok(invocation_error_stream(invocation_event, error));
+                }
+            };
+            let response = match http_client.execute(request).await {
+                Ok(response) => response,
+                Err(error) => {
+                    return Ok(invocation_error_stream(
+                        invocation_event,
+                        ModelDriverError::Transport(error.to_string()),
+                    ));
+                }
+            };
             let response_status = response.status();
             if !response_status.is_success() {
                 let response_body = response
@@ -85,8 +146,14 @@ impl ModelDriver for OpenAiModelDriver {
                     .await
                     .map_err(|error| ModelDriverError::Transport(error.to_string()))?;
                 return match classify_response_failure(response_status, response_body) {
-                    Ok(issue) => Ok(model_issue_stream(issue)),
-                    Err(error) => Err(error),
+                    Ok(issue) => Ok(conversation_event_stream(
+                        model_issue_stream(issue),
+                        turn_id,
+                        invocation_id,
+                        source,
+                        Box::new(invocation_event),
+                    )),
+                    Err(error) => Ok(invocation_error_stream(invocation_event, error)),
                 };
             }
 
@@ -98,9 +165,34 @@ impl ModelDriver for OpenAiModelDriver {
                         .map_err(|error| ModelDriverError::Transport(error.to_string()))
                 })
                 .boxed();
-            Ok(model_output_stream(response_bytes))
+            Ok(conversation_event_stream(
+                model_output_stream(response_bytes),
+                turn_id,
+                invocation_id,
+                source,
+                Box::new(invocation_event),
+            ))
         }
         .boxed()
+    }
+}
+
+impl DriverEventDecoder for OpenAiModelDriver {
+    fn decode_event(
+        &self,
+        envelope: &DriverEventEnvelope,
+    ) -> Result<Box<dyn DriverEvent>, DriverEventDecodeError> {
+        if envelope.driver() != "openai" || envelope.driver_version() != OPEN_AI_DRIVER_VERSION {
+            return Err(DriverEventDecodeError::UnsupportedDriver);
+        }
+        if envelope.event_type() != "model_invocation_requested"
+            || envelope.event_schema_version() != 1
+        {
+            return Err(DriverEventDecodeError::UnsupportedEvent);
+        }
+        serde_json::from_value::<OpenAiInvocationRequested>(envelope.payload().clone())
+            .map(|event| Box::new(event) as Box<dyn DriverEvent>)
+            .map_err(|error| DriverEventDecodeError::InvalidPayload(error.to_string()))
     }
 }
 
@@ -110,7 +202,7 @@ fn semantic_input(conversation: &Conversation) -> Value {
             .events()
             .iter()
             .filter_map(|conversation_event| match &conversation_event.kind {
-                ConversationEventKind::User { content } => {
+                ConversationRecordKind::Event(ConversationEventKind::User { content, .. }) => {
                     let text = content
                         .iter()
                         .map(|content| match content {
@@ -120,12 +212,18 @@ fn semantic_input(conversation: &Conversation) -> Value {
                         .join("\n");
                     Some(json!({ "role": "user", "content": text }))
                 }
-                ConversationEventKind::Model {
-                    event: ModelEvent::AssistantResponse(response),
+                ConversationRecordKind::Event(ConversationEventKind::Assistant {
+                    response,
                     ..
-                } => Some(json!({ "role": "assistant", "content": response.message() })),
-                ConversationEventKind::Model { .. } => None,
-                ConversationEventKind::Problem { .. } => None,
+                }) => Some(json!({ "role": "assistant", "content": response.message() })),
+                ConversationRecordKind::Event(
+                    ConversationEventKind::UserMessageRequested { .. }
+                    | ConversationEventKind::TurnRequested { .. }
+                    | ConversationEventKind::Communication { .. }
+                    | ConversationEventKind::Problem { .. }
+                    | ConversationEventKind::TurnCompleted { .. },
+                )
+                | ConversationRecordKind::Driver(_) => None,
             })
             .collect(),
     )
@@ -139,7 +237,7 @@ fn classify_response_failure(
         return ModelIssue::try_context_limit_exceeded(
             "The model context limit was exceeded.".to_owned(),
         )
-        .map_err(invalid_model_problem);
+        .map_err(invalid_conversation_problem);
     }
 
     Err(match status {
@@ -165,8 +263,141 @@ fn is_context_limit_payload(payload: &Value) -> bool {
         .any(|code| matches!(code, "context_length_exceeded" | "context_window_exceeded"))
 }
 
-fn model_issue_stream(issue: ModelIssue) -> ModelOutputStream {
-    stream::once(async move { Ok(ModelDriverOutput::Issue(issue)) }).boxed()
+fn model_issue_stream(issue: ModelIssue) -> ProviderOutputStream {
+    stream::once(async move {
+        Ok(ModelDriverEvent::Problem {
+            problem: issue,
+            data: None,
+        })
+    })
+    .boxed()
+}
+
+struct ConversationEventStreamState {
+    provider_events: ProviderOutputStream,
+    turn_id: ConversationTurnId,
+    invocation_id: ModelInvocationId,
+    source: ModelSource,
+    invocation_event: Option<Box<dyn DriverEvent>>,
+    turn_failed: bool,
+    terminated: bool,
+}
+
+fn invocation_error_stream(
+    invocation_event: OpenAiInvocationRequested,
+    error: ModelDriverError,
+) -> ModelOutputStream {
+    stream::iter([
+        Ok(ModelDriverOutput::Driver(
+            Box::new(invocation_event) as Box<dyn DriverEvent>
+        )),
+        Err(error),
+    ])
+    .boxed()
+}
+
+fn conversation_event_stream(
+    provider_events: ProviderOutputStream,
+    turn_id: ConversationTurnId,
+    invocation_id: ModelInvocationId,
+    source: ModelSource,
+    invocation_event: Box<dyn DriverEvent>,
+) -> ModelOutputStream {
+    stream::unfold(
+        ConversationEventStreamState {
+            provider_events,
+            turn_id,
+            invocation_id,
+            source,
+            invocation_event: Some(invocation_event),
+            turn_failed: false,
+            terminated: false,
+        },
+        |mut state| async move {
+            if state.terminated {
+                return None;
+            }
+            if let Some(invocation_event) = state.invocation_event.take() {
+                return Some((Ok(ModelDriverOutput::Driver(invocation_event)), state));
+            }
+            match state.provider_events.next().await {
+                Some(Ok(driver_event)) => {
+                    let driver_output = translate_model_driver_event(
+                        driver_event,
+                        state.turn_id,
+                        state.invocation_id,
+                        &state.source,
+                    );
+                    let driver_output = match driver_output {
+                        Ok(driver_output) => driver_output,
+                        Err(error) => {
+                            state.terminated = true;
+                            return Some((Err(error), state));
+                        }
+                    };
+                    if matches!(
+                        &driver_output,
+                        ModelDriverOutput::Event(ConversationEventKind::Problem { .. })
+                    ) {
+                        state.turn_failed = true;
+                    }
+                    Some((Ok(driver_output), state))
+                }
+                Some(Err(error)) => {
+                    state.terminated = true;
+                    Some((Err(error), state))
+                }
+                None => {
+                    state.terminated = true;
+                    Some((
+                        Ok(ModelDriverOutput::Event(
+                            ConversationEventKind::TurnCompleted {
+                                turn_id: state.turn_id,
+                                outcome: if state.turn_failed {
+                                    TurnOutcome::Failed
+                                } else {
+                                    TurnOutcome::Succeeded
+                                },
+                            },
+                        )),
+                        state,
+                    ))
+                }
+            }
+        },
+    )
+    .boxed()
+}
+
+fn translate_model_driver_event(
+    driver_event: ModelDriverEvent,
+    turn_id: ConversationTurnId,
+    invocation_id: ModelInvocationId,
+    source: &ModelSource,
+) -> Result<ModelDriverOutput, ModelDriverError> {
+    let kind = match driver_event {
+        ModelDriverEvent::Model { event, data } => match event {
+            ModelEvent::Assistant(response) => ConversationEventKind::Assistant {
+                turn_id,
+                invocation_id,
+                model: ModelDetails::new(source.clone(), data).map_err(invalid_model_data)?,
+                response,
+            },
+            ModelEvent::Communication(communication) => ConversationEventKind::Communication {
+                turn_id,
+                invocation_id,
+                model: ModelDetails::new(source.clone(), data).map_err(invalid_model_data)?,
+                communication,
+            },
+        },
+        ModelDriverEvent::Problem { problem, data } => ConversationEventKind::Problem {
+            turn_id: Some(turn_id),
+            invocation_id: Some(invocation_id),
+            model: Some(ModelDetails::new(source.clone(), data).map_err(invalid_model_data)?),
+            problem: ConversationProblem::Issue(problem),
+        },
+    };
+    Ok(ModelDriverOutput::Event(kind))
 }
 
 #[derive(Default)]
@@ -265,7 +496,7 @@ struct OpenAiStreamState {
     response_bytes: ResponseByteStream,
     decoder: ServerSentEventDecoder,
     response: ResponseState,
-    model_outputs: VecDeque<ModelDriverOutput>,
+    model_outputs: VecDeque<ModelDriverEvent>,
     response_end: Option<ResponseEnd>,
     terminated: bool,
 }
@@ -276,7 +507,7 @@ enum ResponseEnd {
     DoneSentinel,
 }
 
-fn model_output_stream(response_bytes: ResponseByteStream) -> ModelOutputStream {
+fn model_output_stream(response_bytes: ResponseByteStream) -> ProviderOutputStream {
     let state = OpenAiStreamState {
         response_bytes,
         decoder: ServerSentEventDecoder::default(),
@@ -351,7 +582,7 @@ fn model_output_stream(response_bytes: ResponseByteStream) -> ModelOutputStream 
 }
 
 enum ProcessEventResult {
-    Outputs(Vec<ModelDriverOutput>),
+    Outputs(Vec<ModelDriverEvent>),
     Done,
 }
 
@@ -492,7 +723,7 @@ fn process_event(
 fn complete_response(
     response_state: &mut ResponseState,
     payload: &Value,
-) -> Result<Vec<ModelDriverOutput>, ModelDriverError> {
+) -> Result<Vec<ModelDriverEvent>, ModelDriverError> {
     if response_state.completed {
         return Err(ModelDriverError::InvalidResponse(
             "response.completed was received more than once".to_owned(),
@@ -542,8 +773,10 @@ fn complete_response(
         || model_events.iter().any(|event| {
             matches!(
                 event,
-                ModelDriverOutput::Event(ModelEvent::AssistantResponse(_))
-                    | ModelDriverOutput::Issue(_)
+                ModelDriverEvent::Model {
+                    event: ModelEvent::Assistant(_),
+                    ..
+                } | ModelDriverEvent::Problem { .. }
             )
         });
     if !has_completed_model_output {
@@ -558,7 +791,7 @@ fn complete_response(
 fn emit_reasoning(
     reasoning_outputs: &mut [AccumulatedText],
     key: &str,
-) -> Result<Option<ModelDriverOutput>, ModelDriverError> {
+) -> Result<Option<ModelDriverEvent>, ModelDriverError> {
     let output = un_emitted_text(reasoning_outputs, key)?;
     let Some(reasoning_text) = preferred_text(&output.streamed_text, &output.completed_text) else {
         return Ok(None);
@@ -572,7 +805,7 @@ fn emit_reasoning(
 fn emit_reasoning_summary(
     reasoning_summaries: &mut [AccumulatedText],
     key: &str,
-) -> Result<Option<ModelDriverOutput>, ModelDriverError> {
+) -> Result<Option<ModelDriverEvent>, ModelDriverError> {
     let output = un_emitted_text(reasoning_summaries, key)?;
     let Some(reasoning_summary) = preferred_text(&output.streamed_text, &output.completed_text)
     else {
@@ -590,7 +823,7 @@ fn emit_reasoning_summary(
 fn emit_assistant_response(
     assistant_outputs: &mut [AccumulatedText],
     key: &str,
-) -> Result<Option<ModelDriverOutput>, ModelDriverError> {
+) -> Result<Option<ModelDriverEvent>, ModelDriverError> {
     let output = un_emitted_text(assistant_outputs, key)?;
     let assistant_text = preferred_text(&output.streamed_text, &output.completed_text);
     let Some(assistant_text) = assistant_text else {
@@ -604,7 +837,7 @@ fn emit_assistant_response(
 fn emit_refusal(
     refusal_outputs: &mut [AccumulatedText],
     key: &str,
-) -> Result<Option<ModelDriverOutput>, ModelDriverError> {
+) -> Result<Option<ModelDriverEvent>, ModelDriverError> {
     let output = un_emitted_text(refusal_outputs, key)?;
     let refusal = preferred_text(&output.streamed_text, &output.completed_text);
     let Some(refusal) = refusal else {
@@ -617,7 +850,7 @@ fn emit_refusal(
 
 fn emit_remaining_reasoning(
     outputs: &mut [AccumulatedText],
-) -> Result<Vec<ModelDriverOutput>, ModelDriverError> {
+) -> Result<Vec<ModelDriverEvent>, ModelDriverError> {
     let keys = un_emitted_keys(outputs);
     keys.into_iter()
         .filter_map(|key| emit_reasoning(outputs, &key).transpose())
@@ -626,7 +859,7 @@ fn emit_remaining_reasoning(
 
 fn emit_remaining_reasoning_summaries(
     outputs: &mut [AccumulatedText],
-) -> Result<Vec<ModelDriverOutput>, ModelDriverError> {
+) -> Result<Vec<ModelDriverEvent>, ModelDriverError> {
     let keys = un_emitted_keys(outputs);
     keys.into_iter()
         .filter_map(|key| emit_reasoning_summary(outputs, &key).transpose())
@@ -635,7 +868,7 @@ fn emit_remaining_reasoning_summaries(
 
 fn emit_remaining_assistant_responses(
     outputs: &mut [AccumulatedText],
-) -> Result<Vec<ModelDriverOutput>, ModelDriverError> {
+) -> Result<Vec<ModelDriverEvent>, ModelDriverError> {
     let keys = un_emitted_keys(outputs);
     keys.into_iter()
         .filter_map(|key| emit_assistant_response(outputs, &key).transpose())
@@ -644,30 +877,36 @@ fn emit_remaining_assistant_responses(
 
 fn emit_remaining_refusals(
     outputs: &mut [AccumulatedText],
-) -> Result<Vec<ModelDriverOutput>, ModelDriverError> {
+) -> Result<Vec<ModelDriverEvent>, ModelDriverError> {
     let keys = un_emitted_keys(outputs);
     keys.into_iter()
         .filter_map(|key| emit_refusal(outputs, &key).transpose())
         .collect()
 }
 
-fn assistant_response(message: String) -> Result<ModelDriverOutput, ModelDriverError> {
-    AssistantResponse::new(message, Map::new())
-        .map(ModelEvent::AssistantResponse)
-        .map(ModelDriverOutput::Event)
+fn assistant_response(message: String) -> Result<ModelDriverEvent, ModelDriverError> {
+    AssistantResponse::new(message)
+        .map(ModelEvent::Assistant)
+        .map(|event| ModelDriverEvent::Model { event, data: None })
         .map_err(invalid_assistant_response)
 }
 
-fn model_refusal(message: String) -> Result<ModelDriverOutput, ModelDriverError> {
+fn model_refusal(message: String) -> Result<ModelDriverEvent, ModelDriverError> {
     ModelIssue::try_refusal(message)
-        .map(ModelDriverOutput::Issue)
-        .map_err(invalid_model_problem)
+        .map(|problem| ModelDriverEvent::Problem {
+            problem,
+            data: None,
+        })
+        .map_err(invalid_conversation_problem)
 }
 
-fn model_context_limit_exceeded() -> Result<ModelDriverOutput, ModelDriverError> {
+fn model_context_limit_exceeded() -> Result<ModelDriverEvent, ModelDriverError> {
     ModelIssue::try_context_limit_exceeded("The model context limit was exceeded.".to_owned())
-        .map(ModelDriverOutput::Issue)
-        .map_err(invalid_model_problem)
+        .map(|problem| ModelDriverEvent::Problem {
+            problem,
+            data: None,
+        })
+        .map_err(invalid_conversation_problem)
 }
 
 fn semantic_output_key(payload: &Value, indexes: &[&str]) -> Result<String, ModelDriverError> {
@@ -768,10 +1007,10 @@ fn model_communication(
     message: String,
     subtype: &str,
     importance: ModelEventImportance,
-) -> Result<ModelDriverOutput, ModelDriverError> {
-    ModelCommunication::new(message, importance, subtype.to_owned(), Map::new())
+) -> Result<ModelDriverEvent, ModelDriverError> {
+    ModelCommunication::new(message, importance, subtype.to_owned())
         .map(ModelEvent::Communication)
-        .map(ModelDriverOutput::Event)
+        .map(|event| ModelDriverEvent::Model { event, data: None })
         .map_err(invalid_model_communication)
 }
 
@@ -783,7 +1022,11 @@ fn invalid_model_communication(error: InvalidModelCommunication) -> ModelDriverE
     ModelDriverError::InvalidResponse(error.to_string())
 }
 
-fn invalid_model_problem(error: InvalidModelProblem) -> ModelDriverError {
+fn invalid_conversation_problem(error: InvalidConversationProblem) -> ModelDriverError {
+    ModelDriverError::InvalidResponse(error.to_string())
+}
+
+fn invalid_model_data(error: InvalidModelData) -> ModelDriverError {
     ModelDriverError::InvalidResponse(error.to_string())
 }
 
@@ -924,14 +1167,16 @@ mod tests {
 
     use crate::conversation::{
         AssistantResponse, Conversation, ConversationEvent, ConversationEventId,
-        ConversationEventKind, ConversationId, ModelCommunication, ModelEvent,
-        ModelEventImportance, ModelId, ModelIssue, ModelSource, ProviderId, UserContent,
+        ConversationEventKind, ConversationId, ConversationProblem, ConversationRecordKind,
+        ConversationTurnId, ModelCommunication, ModelData, ModelDetails, ModelEvent,
+        ModelEventImportance, ModelId, ModelInvocationId, ModelIssue, ModelSource, ProviderId,
+        UserContent,
     };
     use crate::model_driver::{ModelDriver, ModelDriverError, ModelDriverOutput};
 
     use super::{
-        OpenAiModelDriver, ResponseByteStream, classify_response_failure, model_communication,
-        model_output_stream, semantic_input,
+        ModelDriverEvent, OpenAiModelDriver, ResponseByteStream, classify_response_failure,
+        model_communication, model_output_stream, semantic_input,
     };
 
     fn conversation_event(
@@ -945,54 +1190,59 @@ mod tests {
             id: ConversationEventId::new(),
             timestamp: OffsetDateTime::UNIX_EPOCH,
             schema_version: 7,
-            kind,
+            kind: ConversationRecordKind::Event(kind),
         }
     }
 
     #[test]
-    fn semantic_input_projects_canonical_events_and_ignores_extensions() {
+    fn semantic_input_projects_canonical_events_and_ignores_model_data() {
         let conversation_id = ConversationId::new();
         let source = ModelSource::new(
             ProviderId::from_str("openai").expect("the provider identifier should be valid"),
             ModelId::from_str("gpt-5.6").expect("the model identifier should be valid"),
         );
-        let extensions = Map::from_iter([(
-            "unknown.extension".to_owned(),
+        let model_data = ModelData::new(Map::from_iter([(
+            "native".to_owned(),
             Value::String("ignored".to_owned()),
-        )]);
+        )]))
+        .expect("the model data should be valid");
+        let turn_id = ConversationTurnId::new();
+        let invocation_id = ModelInvocationId::new();
         let conversation = Conversation::from_events(vec![
             conversation_event(
                 conversation_id,
                 0,
                 ConversationEventKind::User {
+                    caused_by: None,
                     content: vec![UserContent::Text("Hello".to_owned())],
                 },
             ),
             conversation_event(
                 conversation_id,
                 1,
-                ConversationEventKind::Model {
-                    source: source.clone(),
-                    event: ModelEvent::Communication(
-                        ModelCommunication::new(
-                            "Reasoning".to_owned(),
-                            ModelEventImportance::Detailed,
-                            "reasoning".to_owned(),
-                            extensions.clone(),
-                        )
-                        .expect("the model communication should be valid"),
-                    ),
+                ConversationEventKind::Communication {
+                    turn_id,
+                    invocation_id,
+                    model: ModelDetails::new(source.clone(), Some(model_data.clone()))
+                        .expect("the model details should be valid"),
+                    communication: ModelCommunication::new(
+                        "Reasoning".to_owned(),
+                        ModelEventImportance::Detailed,
+                        "reasoning".to_owned(),
+                    )
+                    .expect("the model communication should be valid"),
                 },
             ),
             conversation_event(
                 conversation_id,
                 2,
-                ConversationEventKind::Model {
-                    source,
-                    event: ModelEvent::AssistantResponse(
-                        AssistantResponse::new("Hello.".to_owned(), extensions)
-                            .expect("the assistant response should be valid"),
-                    ),
+                ConversationEventKind::Assistant {
+                    turn_id,
+                    invocation_id,
+                    model: ModelDetails::new(source, Some(model_data))
+                        .expect("the model details should be valid"),
+                    response: AssistantResponse::new("Hello.".to_owned())
+                        .expect("the assistant response should be valid"),
                 },
             ),
         ])
@@ -1018,10 +1268,10 @@ mod tests {
     async fn collect_events(input: &str) -> Vec<Result<ModelEvent, ModelDriverError>> {
         model_output_stream(response_byte_stream(vec![input.as_bytes().to_vec()]))
             .map(|result| {
-                result.and_then(|output| match output {
-                    ModelDriverOutput::Event(event) => Ok(event),
-                    ModelDriverOutput::Issue(_) => Err(ModelDriverError::InvalidResponse(
-                        "the test expected a model event, not a model issue".to_owned(),
+                result.and_then(|driver_event| match driver_event {
+                    ModelDriverEvent::Model { event, .. } => Ok(event),
+                    ModelDriverEvent::Problem { .. } => Err(ModelDriverError::InvalidResponse(
+                        "the test expected a model event, not a model problem".to_owned(),
                     )),
                 })
             })
@@ -1029,16 +1279,23 @@ mod tests {
             .await
     }
 
-    async fn collect_outputs(input: &str) -> Vec<Result<ModelDriverOutput, ModelDriverError>> {
+    async fn collect_outputs(input: &str) -> Vec<Result<ModelDriverEvent, ModelDriverError>> {
         model_output_stream(response_byte_stream(vec![input.as_bytes().to_vec()]))
             .collect()
             .await
     }
 
-    fn expect_model_event(output: ModelDriverOutput) -> ModelEvent {
+    fn expect_model_event(driver_event: ModelDriverEvent) -> ModelEvent {
+        match driver_event {
+            ModelDriverEvent::Model { event, .. } => event,
+            ModelDriverEvent::Problem { .. } => panic!("the output should be a model event"),
+        }
+    }
+
+    fn expect_event(output: ModelDriverOutput) -> ConversationEventKind {
         match output {
             ModelDriverOutput::Event(event) => event,
-            ModelDriverOutput::Issue(_) => panic!("the output should be a model event"),
+            ModelDriverOutput::Driver(_) => panic!("the output should be a conversation event"),
         }
     }
 
@@ -1048,6 +1305,7 @@ mod tests {
             conversation_id,
             0,
             ConversationEventKind::User {
+                caused_by: None,
                 content: vec![UserContent::Text("Hello".to_owned())],
             },
         )])
@@ -1062,7 +1320,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn invoke_returns_a_future_that_establishes_one_model_event_stream() {
+    async fn invoke_returns_a_future_that_establishes_one_conversation_event_stream() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("the mock server should bind");
         let address = listener
             .local_addr()
@@ -1091,27 +1349,59 @@ mod tests {
         };
 
         let mut model_events = driver
-            .invoke(&test_conversation())
+            .invoke(&test_conversation(), ConversationTurnId::new())
             .await
             .expect("the invocation should establish its stream");
-        let first_event = model_events
+        let invocation = model_events
             .next()
             .await
-            .expect("the stream should yield reasoning")
-            .expect("the reasoning should be valid");
-        let second_event = model_events
-            .next()
-            .await
-            .expect("the stream should yield an answer")
-            .expect("the answer should be valid");
+            .expect("the stream should yield an invocation event")
+            .expect("the invocation event should be valid");
+        assert!(matches!(invocation, ModelDriverOutput::Driver(_)));
+        let first_event = expect_event(
+            model_events
+                .next()
+                .await
+                .expect("the stream should yield reasoning")
+                .expect("the reasoning should be valid"),
+        );
+        let second_event = expect_event(
+            model_events
+                .next()
+                .await
+                .expect("the stream should yield an answer")
+                .expect("the answer should be valid"),
+        );
 
         assert!(matches!(
-            first_event,
-            ModelDriverOutput::Event(ModelEvent::Communication(_))
+            &first_event,
+            ConversationEventKind::Communication { .. }
         ));
         assert!(matches!(
-            second_event,
-            ModelDriverOutput::Event(ModelEvent::AssistantResponse(_))
+            &second_event,
+            ConversationEventKind::Assistant { .. }
+        ));
+        let ConversationEventKind::Communication { model, .. } = &first_event else {
+            panic!("the first event should be a model event");
+        };
+        assert_eq!(model.source(), &source());
+        let ConversationEventKind::Assistant { model, .. } = &second_event else {
+            panic!("the second event should be a model event");
+        };
+        assert_eq!(model.source(), &source());
+        assert!(matches!(
+            &first_event,
+            ConversationEventKind::Communication { model, .. } if model.data().is_none()
+        ));
+        assert!(matches!(
+            &second_event,
+            ConversationEventKind::Assistant { model, .. } if model.data().is_none()
+        ));
+        assert!(matches!(
+            model_events.next().await,
+            Some(Ok(ModelDriverOutput::Event(
+                ConversationEventKind::TurnCompleted { .. }
+            )))
         ));
         assert!(model_events.next().await.is_none());
         server.join().expect("the mock server should stop");
@@ -1141,9 +1431,19 @@ mod tests {
             source: source(),
         };
 
-        let result = driver.invoke(&test_conversation()).await;
+        let result = driver
+            .invoke(&test_conversation(), ConversationTurnId::new())
+            .await;
 
-        assert!(matches!(result, Err(ModelDriverError::Authentication(_))));
+        let mut model_events = result.expect("the invocation should establish a stream");
+        assert!(matches!(
+            model_events.next().await,
+            Some(Ok(ModelDriverOutput::Driver(_)))
+        ));
+        assert!(matches!(
+            model_events.next().await,
+            Some(Err(ModelDriverError::Authentication(_)))
+        ));
         server.join().expect("the mock server should stop");
     }
 
@@ -1178,23 +1478,38 @@ mod tests {
         };
 
         let mut model_events = driver
-            .invoke(&test_conversation())
+            .invoke(&test_conversation(), ConversationTurnId::new())
             .await
             .expect("the context-limit outcome should establish a semantic stream");
-        let model_event = model_events
-            .next()
-            .await
-            .expect("the stream should yield a context-limit issue")
-            .expect("the context-limit issue should be valid");
+        assert!(matches!(
+            model_events.next().await,
+            Some(Ok(ModelDriverOutput::Driver(_)))
+        ));
+        let model_event = expect_event(
+            model_events
+                .next()
+                .await
+                .expect("the stream should yield a context-limit issue")
+                .expect("the context-limit issue should be valid"),
+        );
 
         assert!(matches!(
             &model_event,
-            ModelDriverOutput::Issue(ModelIssue::ContextLimitExceeded { .. })
+            ConversationEventKind::Problem {
+                problem: ConversationProblem::Issue(ModelIssue::ContextLimitExceeded { .. }),
+                ..
+            }
         ));
-        let ModelDriverOutput::Issue(issue) = model_event else {
+        let ConversationEventKind::Problem { problem, .. } = &model_event else {
             panic!("the output should be a model issue");
         };
-        assert_eq!(issue.message(), "The model context limit was exceeded.");
+        assert_eq!(problem.message(), "The model context limit was exceeded.");
+        assert!(matches!(
+            model_events.next().await,
+            Some(Ok(ModelDriverOutput::Event(
+                ConversationEventKind::TurnCompleted { .. }
+            )))
+        ));
         assert!(model_events.next().await.is_none());
         server.join().expect("the mock server should stop");
     }
@@ -1240,9 +1555,12 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert!(matches!(
             &events[0],
-            ModelDriverOutput::Issue(ModelIssue::Refusal { .. })
+            ModelDriverEvent::Problem {
+                problem: ModelIssue::Refusal { .. },
+                ..
+            }
         ));
-        let ModelDriverOutput::Issue(issue) = &events[0] else {
+        let ModelDriverEvent::Problem { problem: issue, .. } = &events[0] else {
             panic!("the output should be a refusal issue");
         };
         assert_eq!(issue.message(), "I cannot comply.");
@@ -1310,7 +1628,10 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert!(matches!(
             &events[0],
-            ModelDriverOutput::Issue(ModelIssue::ContextLimitExceeded { .. })
+            ModelDriverEvent::Problem {
+                problem: ModelIssue::ContextLimitExceeded { .. },
+                ..
+            }
         ));
     }
 
@@ -1322,9 +1643,10 @@ mod tests {
 
         assert!(matches!(
             model_events.next().await,
-            Some(Ok(ModelDriverOutput::Event(ModelEvent::AssistantResponse(
-                _
-            ))))
+            Some(Ok(ModelDriverEvent::Model {
+                event: ModelEvent::Assistant(_),
+                ..
+            }))
         ));
         assert!(matches!(
             model_events.next().await,
@@ -1343,9 +1665,10 @@ mod tests {
 
         assert!(matches!(
             model_events.next().await,
-            Some(Ok(ModelDriverOutput::Event(ModelEvent::AssistantResponse(
-                _
-            ))))
+            Some(Ok(ModelDriverEvent::Model {
+                event: ModelEvent::Assistant(_),
+                ..
+            }))
         ));
         assert!(matches!(
             model_events.next().await,
@@ -1418,9 +1741,10 @@ mod tests {
 
         assert!(matches!(
             events.next().await,
-            Some(Ok(ModelDriverOutput::Event(ModelEvent::AssistantResponse(
-                _
-            ))))
+            Some(Ok(ModelDriverEvent::Model {
+                event: ModelEvent::Assistant(_),
+                ..
+            }))
         ));
         assert!(matches!(
             events.next().await,
