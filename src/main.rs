@@ -1,9 +1,9 @@
 mod command_line;
 mod conversation;
+mod conversation_session;
 mod model_driver;
 mod openai;
 mod persistence;
-mod turn;
 
 use command_line::CommandLine;
 

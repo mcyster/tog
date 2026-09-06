@@ -4,52 +4,97 @@ use std::fmt::{Display, Formatter};
 use futures_util::future::BoxFuture;
 use futures_util::stream::BoxStream;
 
-use crate::conversation::{Conversation, ModelEvent, ModelIssue, ModelSource};
+use crate::conversation::{
+    Conversation, ConversationRequest, ConversationTurnId, DriverConversationEvent,
+    DriverEventReader, ModelSource,
+};
 
-pub(crate) type ModelOutputStream = BoxStream<'static, Result<ModelDriverOutput, ModelDriverError>>;
+pub(crate) type ModelOutputStream =
+    BoxStream<'static, Result<DriverConversationEvent, ModelDriverError>>;
 
-pub(crate) enum ModelDriverOutput {
-    Event(ModelEvent),
-    Issue(ModelIssue),
+pub(crate) struct ModelDriverRequest<'conversation> {
+    conversation: &'conversation Conversation,
+    pending_user_requests: Vec<ConversationRequest>,
+    turn_id: ConversationTurnId,
 }
 
-pub(crate) trait ModelDriver {
+impl<'conversation> ModelDriverRequest<'conversation> {
+    pub(crate) fn new(
+        conversation: &'conversation Conversation,
+        pending_user_requests: Vec<ConversationRequest>,
+        turn_id: ConversationTurnId,
+    ) -> Self {
+        Self {
+            conversation,
+            pending_user_requests,
+            turn_id,
+        }
+    }
+
+    pub(crate) fn conversation(&self) -> &'conversation Conversation {
+        self.conversation
+    }
+
+    pub(crate) fn pending_user_requests(&self) -> &[ConversationRequest] {
+        &self.pending_user_requests
+    }
+
+    pub(crate) fn turn_id(&self) -> ConversationTurnId {
+        self.turn_id
+    }
+}
+
+pub(crate) trait ModelDriver: DriverEventReader {
     fn source(&self) -> &ModelSource;
 
     fn invoke<'invoke>(
         &'invoke self,
-        conversation: &'invoke Conversation,
+        request: ModelDriverRequest<'invoke>,
     ) -> BoxFuture<'invoke, Result<ModelOutputStream, ModelDriverError>>;
 }
 
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum ModelDriverError {
-    Authentication(String),
-    RateLimited(String),
-    Transport(String),
-    InvalidRequest(String),
-    InvalidResponse(String),
-    StreamInterrupted(String),
-    Provider(String),
+    WrongTurnIdentity {
+        expected: ConversationTurnId,
+        actual: ConversationTurnId,
+    },
+    MissingTurnIdentity,
+    DisallowedEventKind {
+        event_type: String,
+    },
+    OutputAfterCompletion {
+        event_type: String,
+    },
+    IncompleteTurn,
 }
 
 impl Display for ModelDriverError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Authentication(message) => write!(formatter, "authentication failed: {message}"),
-            Self::RateLimited(message) => write!(formatter, "rate limited: {message}"),
-            Self::Transport(message) => write!(formatter, "model transport failed: {message}"),
-            Self::InvalidRequest(message) => write!(formatter, "invalid model request: {message}"),
-            Self::InvalidResponse(message) => {
-                write!(formatter, "invalid model response: {message}")
+            Self::WrongTurnIdentity { expected, actual } => write!(
+                formatter,
+                "model driver event belonged to turn {actual}, expected turn {expected}"
+            ),
+            Self::MissingTurnIdentity => {
+                write!(formatter, "model driver problem had no turn identity")
             }
-            Self::StreamInterrupted(message) => {
+            Self::DisallowedEventKind { event_type } => {
                 write!(
                     formatter,
-                    "model response stream was interrupted: {message}"
+                    "model driver emitted disallowed event kind {event_type}"
                 )
             }
-            Self::Provider(message) => write!(formatter, "model provider failed: {message}"),
+            Self::OutputAfterCompletion { event_type } => {
+                write!(
+                    formatter,
+                    "model driver emitted {event_type} after turn completion"
+                )
+            }
+            Self::IncompleteTurn => write!(
+                formatter,
+                "the model driver ended without completing the turn"
+            ),
         }
     }
 }

@@ -264,21 +264,49 @@ fn turn_persists_events_and_prints_semantic_output() {
             .replace('-', ""),
         conversation_id.trim_start_matches("conversation_")
     );
-    assert_eq!(first_event["schema_version"], 9);
-    assert_eq!(first_event["type"], "user");
-    assert_eq!(first_event["content"][0]["type"], "text");
-    assert_eq!(first_event["content"][0]["value"], "say hi");
+    assert_eq!(first_event["schema_version"], 11);
+    assert_eq!(first_event["class"], "command");
+    assert_eq!(first_event["event"]["type"], "user_message_requested");
+    assert_eq!(first_event["event"]["content"][0]["type"], "text");
+    assert_eq!(first_event["event"]["content"][0]["value"], "say hi");
     assert!(first_event.get("kind").is_none());
+    assert!(first_event.get("model").is_none());
+    let turn_request: Value = serde_json::from_reader(
+        fs::File::open(&event_paths[1]).expect("the persisted turn request should open"),
+    )
+    .expect("the persisted turn request should be JSON");
+    assert_eq!(turn_request["class"], "command");
+    assert_eq!(turn_request["event"]["type"], "turn_requested");
+    let user_event: Value = serde_json::from_reader(
+        fs::File::open(&event_paths[2]).expect("the persisted user event should open"),
+    )
+    .expect("the persisted user event should be JSON");
+    assert_eq!(user_event["schema_version"], 11);
+    assert_eq!(user_event["class"], "fact");
+    assert_eq!(user_event["event"]["type"], "user");
+    let invocation_event: Value = serde_json::from_reader(
+        fs::File::open(&event_paths[3]).expect("the invocation event should open"),
+    )
+    .expect("the invocation event should be JSON");
+    assert_eq!(invocation_event["class"], "command");
+    assert_eq!(invocation_event["driver"], "openai");
+    assert_eq!(invocation_event["driver_version"], "1");
+    assert_eq!(invocation_event["event_type"], "model_invocation_requested");
+    assert_eq!(invocation_event["event_schema_version"], 1);
+    assert!(invocation_event["description"].is_string());
+    assert!(invocation_event["payload"]["invocation_id"].is_string());
+    assert_eq!(invocation_event["payload"]["model"]["provider"], "openai");
+    assert_eq!(invocation_event["payload"]["model"]["model"], "gpt-5.6");
     let model_event: Value = serde_json::from_reader(
-        fs::File::open(&event_paths[1]).expect("the persisted model event should open"),
+        fs::File::open(&event_paths[4]).expect("the persisted model event should open"),
     )
     .expect("the persisted model event should be JSON");
-    assert_eq!(model_event["schema_version"], 9);
-    assert_eq!(model_event["type"], "model");
-    assert_eq!(model_event["source"]["provider"], "openai");
-    assert_eq!(model_event["source"]["model"], "gpt-5.6");
-    assert_eq!(model_event["event"]["type"], "assistant_response");
+    assert_eq!(model_event["schema_version"], 11);
+    assert_eq!(model_event["class"], "fact");
+    assert_eq!(model_event["event"]["type"], "assistant");
+    assert_eq!(model_event["event"]["response"]["message"], "Hello");
     assert!(model_event.get("kind").is_none());
+    assert!(model_event.get("data").is_none());
     let requests = server.finish();
     assert_eq!(requests[0]["model"], "gpt-5.6");
     assert_eq!(requests[0]["input"][0]["content"], "say hi");
@@ -390,13 +418,18 @@ fn model_issue_is_rendered_and_persisted_as_a_top_level_problem() {
         .collect::<Vec<_>>();
     event_paths.sort();
     let problem: Value = serde_json::from_reader(
-        fs::File::open(&event_paths[1]).expect("the problem event should open"),
+        fs::File::open(&event_paths[4]).expect("the problem event should open"),
     )
     .expect("the problem event should be JSON");
-    assert_eq!(problem["type"], "problem");
-    assert_eq!(problem["problem"]["category"], "issue");
-    assert_eq!(problem["problem"]["detail"]["type"], "refusal");
-    assert_eq!(problem["problem"]["detail"]["message"], "I cannot comply.");
+    assert_eq!(problem["class"], "fact");
+    assert_eq!(problem["event"]["type"], "problem");
+    assert_eq!(problem["event"]["problem"]["category"], "issue");
+    assert_eq!(problem["event"]["problem"]["detail"]["type"], "refusal");
+    assert_eq!(
+        problem["event"]["problem"]["detail"]["message"],
+        "I cannot comply."
+    );
+    assert!(problem["event"]["invocation_id"].is_string());
     assert!(problem.get("message").is_none());
     assert!(problem.get("severity").is_none());
     assert_eq!(server.finish().len(), 1);
@@ -470,12 +503,26 @@ fn reasoning_events_are_persisted_and_printed_but_not_replayed_as_assistant_mess
             .expect("the persisted event should be JSON")
         })
         .collect::<Vec<_>>();
-    assert_eq!(persisted_events[1]["event"]["type"], "communication");
-    assert_eq!(persisted_events[1]["event"]["subtype"], "reasoning");
-    assert_eq!(persisted_events[1]["event"]["message"], "Detailed thought");
-    assert_eq!(persisted_events[2]["event"]["type"], "communication");
-    assert_eq!(persisted_events[2]["event"]["subtype"], "reasoning_summary");
-    assert_eq!(persisted_events[2]["event"]["message"], "Reasoning summary");
+    assert_eq!(persisted_events[4]["class"], "fact");
+    assert_eq!(persisted_events[4]["event"]["type"], "communication");
+    assert_eq!(
+        persisted_events[4]["event"]["communication"]["subtype"],
+        "reasoning"
+    );
+    assert_eq!(
+        persisted_events[4]["event"]["communication"]["message"],
+        "Detailed thought"
+    );
+    assert_eq!(persisted_events[5]["class"], "fact");
+    assert_eq!(persisted_events[5]["event"]["type"], "communication");
+    assert_eq!(
+        persisted_events[5]["event"]["communication"]["subtype"],
+        "reasoning_summary"
+    );
+    assert_eq!(
+        persisted_events[5]["event"]["communication"]["message"],
+        "Reasoning summary"
+    );
 
     let second_output = configured_command(&server, &data_directory)
         .args([
@@ -591,7 +638,7 @@ fn failed_user_turn_is_included_in_the_next_local_reconstruction() {
         ])
         .output()
         .expect("the failed turn should run");
-    assert!(!failed_output.status.success());
+    assert!(failed_output.status.success());
     assert_eq!(
         reported_conversation_id(&failed_output.stderr),
         conversation_id
@@ -605,18 +652,28 @@ fn failed_user_turn_is_included_in_the_next_local_reconstruction() {
         .map(|entry| entry.expect("the event entry should be readable").path())
         .collect::<Vec<_>>();
     event_paths.sort();
-    let invocation_problem: Value = serde_json::from_reader(
-        fs::File::open(&event_paths[3]).expect("the invocation problem should open"),
-    )
-    .expect("the invocation problem should be JSON");
-    assert_eq!(invocation_problem["type"], "problem");
-    assert_eq!(invocation_problem["problem"]["category"], "invocation");
+    let invocation_problem = event_paths
+        .iter()
+        .map(|path| {
+            serde_json::from_reader::<_, Value>(
+                fs::File::open(path).expect("the persisted event should open"),
+            )
+            .expect("the persisted event should be JSON")
+        })
+        .find(|event| event["class"] == "fact" && event["event"]["type"] == "problem")
+        .expect("the invocation problem should be persisted");
+    assert_eq!(invocation_problem["class"], "fact");
+    assert_eq!(invocation_problem["event"]["type"], "problem");
     assert_eq!(
-        invocation_problem["problem"]["detail"]["type"],
+        invocation_problem["event"]["problem"]["category"],
+        "invocation"
+    );
+    assert_eq!(
+        invocation_problem["event"]["problem"]["detail"]["type"],
         "provider_failure"
     );
     assert_eq!(
-        invocation_problem["problem"]["detail"]["message"],
+        invocation_problem["event"]["problem"]["detail"]["message"],
         "The model provider failed the invocation."
     );
     assert!(invocation_problem.get("message").is_none());

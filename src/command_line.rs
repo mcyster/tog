@@ -4,11 +4,13 @@ use std::io::{self, Write};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use crate::conversation::{
-    ConversationId, ModelEvent, ModelEventImportance, ModelId, ModelProblem,
+    ConversationFact, ConversationId, ConversationProblem, ModelEventImportance, ModelId,
+};
+use crate::conversation_session::{
+    ConversationSession, ConversationSessionProgress, ConversationSessionResult,
 };
 use crate::openai::OpenAiModelDriver;
 use crate::persistence::EventStore;
-use crate::turn::{TurnProgress, TurnRequest, TurnResultValue, TurnService};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -37,57 +39,61 @@ impl CommandLine {
         Self::parse_from(arguments)
     }
 
-    pub(crate) async fn execute(self) -> TurnResultValue<()> {
+    pub(crate) async fn execute(self) -> ConversationSessionResult<()> {
         match self.command {
             Command::Turn(arguments) => {
                 let user_prompt = arguments.user_prompt_words.join(" ").parse()?;
                 let verbosity = arguments.verbosity;
-                let turn_service = TurnService::new(
-                    EventStore::from_environment()?,
-                    Box::new(OpenAiModelDriver::from_environment(arguments.model)?),
-                );
-                turn_service
-                    .execute(
-                        TurnRequest {
-                            conversation_id: arguments.conversation,
-                            user_prompt,
-                        },
-                        |conversation_id| eprintln!("#> conversation {conversation_id}"),
-                        |progress| {
-                            match progress {
-                                TurnProgress::InvocationStarted { model } => {
-                                    eprintln!("## waiting for model {model}");
-                                }
-                                TurnProgress::EventCompleted { event }
-                                    if verbosity.includes(event.importance()) =>
-                                {
-                                    render_model_event(&event)?;
-                                }
-                                TurnProgress::EventCompleted { .. } => {}
-                                TurnProgress::ProblemCompleted { problem } => {
-                                    render_model_problem(&problem)?;
-                                }
+                let event_store = EventStore::from_environment()?;
+                let model_driver = Box::new(OpenAiModelDriver::from_environment(arguments.model)?);
+                let conversation_session = match arguments.conversation {
+                    Some(conversation_id) => {
+                        ConversationSession::open(conversation_id, event_store, model_driver)?
+                    }
+                    None => ConversationSession::create(event_store, model_driver),
+                };
+                conversation_session.add_user_request(user_prompt)?;
+                eprintln!("#> conversation {}", conversation_session.id());
+                conversation_session
+                    .invoke(|progress| {
+                        match progress {
+                            ConversationSessionProgress::InvocationStarted { model } => {
+                                eprintln!("## waiting for model {model}");
                             }
-                            Ok(())
-                        },
-                    )
+                            ConversationSessionProgress::EventCompleted { event } => {
+                                render_model_event(&event, verbosity)?;
+                            }
+                            ConversationSessionProgress::ProblemCompleted { problem } => {
+                                render_model_problem(&problem)?;
+                            }
+                        }
+                        Ok(())
+                    })
                     .await
             }
         }
     }
 }
 
-fn render_model_event(model_event: &ModelEvent) -> io::Result<()> {
-    let prefix = match model_event {
-        ModelEvent::AssistantResponse(_) => "",
-        ModelEvent::Communication(_) => "### ",
+fn render_model_event(event: &ConversationFact, verbosity: Verbosity) -> io::Result<()> {
+    let (message, importance, prefix) = match event {
+        ConversationFact::Assistant { response, .. } => {
+            (response.message(), ModelEventImportance::Important, "")
+        }
+        ConversationFact::Communication { communication, .. } => {
+            (communication.message(), communication.importance(), "### ")
+        }
+        _ => return Ok(()),
+    };
+    if !verbosity.includes(importance) {
+        return Ok(());
     };
     let mut standard_output = io::stdout().lock();
-    writeln!(standard_output, "{prefix}{}", model_event.message())?;
+    writeln!(standard_output, "{prefix}{message}")?;
     standard_output.flush()
 }
 
-fn render_model_problem(problem: &ModelProblem) -> io::Result<()> {
+fn render_model_problem(problem: &ConversationProblem) -> io::Result<()> {
     let mut standard_output = io::stdout().lock();
     writeln!(standard_output, "### {}", problem.message())?;
     standard_output.flush()

@@ -1,5 +1,7 @@
 # Conversation and ModelDriver
 
+The later [Record Commands And Turn Lifecycle](2026-09-05-record-commands-and-turn-lifecycle.md) note supersedes the driver-owned envelope and command-exclusion portions of this note.
+
 The central conclusion from the design discussions is that `tog` should preserve
 a portable semantic conversation before it preserves provider execution history.
 
@@ -20,12 +22,14 @@ immutably references everything made visible to a model. A `Conversation` is
 an immutable projection reconstructed from that log.
 
 A `ModelDriver` represents one provider/model invocation. It receives the
-portable conversation and yields completed semantic outputs. Provider request
-types, SSE events, raw deltas, response identifiers, and transport diagnostics
-remain inside the concrete driver.
+portable conversation and yields completed semantic events, optionally
+accompanied by opaque `ModelData` it defines. Provider request types, SSE
+events, raw deltas, response identifiers, and transport diagnostics remain
+inside the concrete driver.
 
-The caller owns canonical `ConversationEvent` envelopes, persistence, tool
-execution, retries, cancellation, and the outer orchestration loop. A future
+The driver owns returned canonical `ConversationEvent` envelopes and their
+provenance. The caller owns persistence, tool execution, retries, cancellation,
+and the outer orchestration loop. A future
 `Agent` may coordinate multiple invocations, delegation, workflows, and
 approvals above this boundary; it is not the provider integration abstraction.
 
@@ -48,7 +52,8 @@ See [Conversation Is the Portable Model Input](../decisions/2026-08-22-use-conve
 
 A provider invocation may produce many protocol events, but the rest of `tog`
 consumes completed semantic outputs. The driver aggregates raw deltas privately
-and exposes an asynchronous stream of `ModelDriverOutput` values.
+and exposes an asynchronous stream of `ConversationEvent` values, where a
+model-reported problem is an event on the same stream as model output.
 
 This replaced the earlier batch interface. Completed outputs can be persisted
 immediately and remain valid if the provider stream later fails. Incomplete
@@ -59,8 +64,10 @@ See [Use Asynchronous Streaming ModelDriver Invocations](../decisions/2026-08-22
 ### Durable failed-turn semantics without rollback
 
 User input is durable before model invocation. A meaningful model limitation or
-a sanitized invocation failure becomes a `ConversationEventKind::Problem`
-associated with the selected `ModelSource`.
+a sanitized invocation failure becomes a top-level
+`ConversationEventKind::Problem`. The problem is not model output merely
+because it concerns a model invocation. Model-associated problems carry
+`Some(ModelDetails)`; a future unrelated problem may carry `None`.
 
 Already appended facts are never rolled back. Detailed transport errors remain
 control-flow errors and diagnostics; sensitive provider bodies and credentials

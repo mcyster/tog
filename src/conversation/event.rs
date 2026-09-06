@@ -1,65 +1,241 @@
+mod extension;
+mod record;
+
+pub(crate) use extension::{
+    ConversationEventError, ConversationEventExtension, DriverEventEnvelope, DriverEventReadError,
+    DriverEventReader, InvalidDriverEventEnvelope,
+};
+pub(crate) use record::{ConversationEventRecord, StoredConversationEventKind};
+
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
-use time::OffsetDateTime;
 
-use super::{ConversationEventId, ConversationId, InvalidModelProblem, ModelProblem, ModelSource};
+use super::{
+    ConversationCommandId, ConversationProblem, ConversationTurnId, InvalidConversationProblem,
+    InvalidModelData, ModelData, ModelInvocationId,
+};
+
+pub(crate) enum ConversationEvent {
+    Request(ConversationRequest),
+    Driver(DriverConversationEvent),
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ConversationEventClass {
+    Command,
+    Fact,
+}
+
+impl ConversationEvent {
+    #[allow(dead_code)]
+    #[allow(dead_code)]
+    pub(crate) fn class(&self) -> ConversationEventClass {
+        match self {
+            Self::Request(request) => request.class(),
+            Self::Driver(event) => event.class(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum ConversationRequest {
+    UserMessageRequested {
+        command_id: ConversationCommandId,
+        content: Vec<UserContent>,
+    },
+    TurnRequested {
+        command_id: ConversationCommandId,
+        turn_id: ConversationTurnId,
+    },
+}
+
+impl ConversationRequest {
+    pub(crate) fn user_message(&self) -> Option<(ConversationCommandId, &[UserContent])> {
+        match self {
+            Self::UserMessageRequested {
+                command_id,
+                content,
+            } => Some((*command_id, content.as_slice())),
+            Self::TurnRequested { .. } => None,
+        }
+    }
+
+    pub(crate) fn command(&self) -> ConversationCommand {
+        match self {
+            Self::UserMessageRequested {
+                command_id,
+                content,
+            } => ConversationCommand::UserMessageRequested {
+                command_id: *command_id,
+                content: content.clone(),
+            },
+            Self::TurnRequested {
+                command_id,
+                turn_id,
+            } => ConversationCommand::TurnRequested {
+                command_id: *command_id,
+                turn_id: *turn_id,
+            },
+        }
+    }
+
+    pub(crate) fn class(&self) -> ConversationEventClass {
+        ConversationEventClass::Command
+    }
+}
+
+pub(crate) enum DriverConversationEvent {
+    Command(Box<dyn ConversationEventExtension>),
+    Fact(DriverConversationFact),
+}
+
+#[allow(dead_code)]
+pub(crate) enum DriverConversationFact {
+    Shared(ConversationFact),
+    Extension(Box<dyn ConversationEventExtension>),
+}
+
+impl DriverConversationEvent {
+    pub(crate) fn class(&self) -> ConversationEventClass {
+        match self {
+            Self::Command(_) => ConversationEventClass::Command,
+            Self::Fact(_) => ConversationEventClass::Fact,
+        }
+    }
+}
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub(crate) struct ConversationEvent {
-    pub(crate) conversation_id: ConversationId,
-    pub(crate) position: u64,
-    pub(crate) id: ConversationEventId,
-    #[serde(with = "time::serde::rfc3339")]
-    pub(crate) timestamp: OffsetDateTime,
-    pub(crate) schema_version: u32,
-    #[serde(flatten)]
-    pub(crate) kind: ConversationEventKind,
+#[serde(tag = "class", content = "event", rename_all = "snake_case")]
+pub(crate) enum ConversationEventKind {
+    Command(ConversationCommand),
+    Fact(ConversationFact),
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub(crate) enum ConversationEventKind {
-    User {
+pub(crate) enum ConversationCommand {
+    UserMessageRequested {
+        command_id: ConversationCommandId,
         content: Vec<UserContent>,
     },
-    Model {
-        source: ModelSource,
-        event: ModelEvent,
+    TurnRequested {
+        command_id: ConversationCommandId,
+        turn_id: ConversationTurnId,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub(crate) enum ConversationFact {
+    User {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        caused_by: Option<ConversationCommandId>,
+        content: Vec<UserContent>,
+    },
+    Assistant {
+        turn_id: ConversationTurnId,
+        invocation_id: ModelInvocationId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        data: Option<ModelData>,
+        response: AssistantResponse,
+    },
+    Communication {
+        turn_id: ConversationTurnId,
+        invocation_id: ModelInvocationId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        data: Option<ModelData>,
+        communication: ModelCommunication,
     },
     Problem {
-        source: ModelSource,
-        problem: ModelProblem,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        turn_id: Option<ConversationTurnId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        invocation_id: Option<ModelInvocationId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        data: Option<ModelData>,
+        problem: ConversationProblem,
+    },
+    TurnCompleted {
+        turn_id: ConversationTurnId,
+        outcome: TurnOutcome,
     },
 }
 
 impl ConversationEventKind {
     pub(super) fn ensure_valid(&self) -> Result<(), InvalidConversationEventKind> {
         match self {
-            Self::User { .. } => Ok(()),
-            Self::Model { event, .. } => event
-                .ensure_valid()
-                .map_err(InvalidConversationEventKind::InvalidModelEvent),
-            Self::Problem { problem, .. } => problem
-                .ensure_valid()
-                .map_err(InvalidConversationEventKind::InvalidModelProblem),
+            Self::Command(_) => Ok(()),
+            Self::Fact(ConversationFact::Assistant { data, response, .. }) => {
+                if let Some(data) = data {
+                    data.ensure_valid()
+                        .map_err(InvalidConversationEventKind::ModelData)?;
+                }
+                response
+                    .ensure_valid()
+                    .map_err(InvalidConversationEventKind::Assistant)
+            }
+            Self::Fact(ConversationFact::Communication {
+                data,
+                communication,
+                ..
+            }) => {
+                if let Some(data) = data {
+                    data.ensure_valid()
+                        .map_err(InvalidConversationEventKind::ModelData)?;
+                }
+                communication
+                    .ensure_valid()
+                    .map_err(InvalidConversationEventKind::ModelCommunication)
+            }
+            Self::Fact(ConversationFact::Problem { data, problem, .. }) => {
+                if let Some(data) = data {
+                    data.ensure_valid()
+                        .map_err(InvalidConversationEventKind::ModelData)?;
+                }
+                problem
+                    .ensure_valid()
+                    .map_err(InvalidConversationEventKind::ConversationProblem)
+            }
+            Self::Fact(ConversationFact::User { .. })
+            | Self::Fact(ConversationFact::TurnCompleted { .. }) => Ok(()),
+        }
+    }
+
+    pub(crate) fn class(&self) -> ConversationEventClass {
+        match self {
+            Self::Command(_) => ConversationEventClass::Command,
+            Self::Fact(_) => ConversationEventClass::Fact,
         }
     }
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum TurnOutcome {
+    Succeeded,
+    Failed,
+}
+
 #[derive(Debug)]
-pub(super) enum InvalidConversationEventKind {
-    InvalidModelEvent(InvalidModelEvent),
-    InvalidModelProblem(InvalidModelProblem),
+pub(crate) enum InvalidConversationEventKind {
+    Assistant(InvalidAssistantResponse),
+    ModelCommunication(InvalidModelCommunication),
+    ConversationProblem(InvalidConversationProblem),
+    ModelData(InvalidModelData),
+    DriverEvent(InvalidDriverEventEnvelope),
 }
 
 impl Display for InvalidConversationEventKind {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::InvalidModelEvent(error) => Display::fmt(error, formatter),
-            Self::InvalidModelProblem(error) => Display::fmt(error, formatter),
+            Self::Assistant(error) => Display::fmt(error, formatter),
+            Self::ModelCommunication(error) => Display::fmt(error, formatter),
+            Self::ConversationProblem(error) => Display::fmt(error, formatter),
+            Self::ModelData(error) => Display::fmt(error, formatter),
+            Self::DriverEvent(error) => Display::fmt(error, formatter),
         }
     }
 }
@@ -69,48 +245,23 @@ impl Error for InvalidConversationEventKind {}
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum ModelEvent {
-    AssistantResponse(AssistantResponse),
+    Assistant(AssistantResponse),
     Communication(ModelCommunication),
 }
 
+#[cfg(test)]
 impl ModelEvent {
     pub(crate) fn message(&self) -> &str {
         match self {
-            Self::AssistantResponse(response) => response.message(),
+            Self::Assistant(response) => response.message(),
             Self::Communication(communication) => communication.message(),
         }
     }
 
     pub(crate) fn importance(&self) -> ModelEventImportance {
         match self {
-            Self::AssistantResponse(_) => ModelEventImportance::Important,
+            Self::Assistant(_) => ModelEventImportance::Important,
             Self::Communication(communication) => communication.importance(),
-        }
-    }
-
-    fn ensure_valid(&self) -> Result<(), InvalidModelEvent> {
-        match self {
-            Self::AssistantResponse(response) => response
-                .ensure_valid()
-                .map_err(InvalidModelEvent::AssistantResponse),
-            Self::Communication(communication) => communication
-                .ensure_valid()
-                .map_err(InvalidModelEvent::ModelCommunication),
-        }
-    }
-}
-
-#[derive(Debug)]
-pub(super) enum InvalidModelEvent {
-    AssistantResponse(InvalidAssistantResponse),
-    ModelCommunication(InvalidModelCommunication),
-}
-
-impl Display for InvalidModelEvent {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::AssistantResponse(error) => Display::fmt(error, formatter),
-            Self::ModelCommunication(error) => Display::fmt(error, formatter),
         }
     }
 }
@@ -118,29 +269,17 @@ impl Display for InvalidModelEvent {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct AssistantResponse {
     message: String,
-    extensions: Map<String, Value>,
 }
 
 impl AssistantResponse {
-    pub(crate) fn new(
-        message: String,
-        extensions: Map<String, Value>,
-    ) -> Result<Self, InvalidAssistantResponse> {
-        let response = Self {
-            message,
-            extensions,
-        };
+    pub(crate) fn new(message: String) -> Result<Self, InvalidAssistantResponse> {
+        let response = Self { message };
         response.ensure_valid()?;
         Ok(response)
     }
 
     pub(crate) fn message(&self) -> &str {
         &self.message
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn extensions(&self) -> &Map<String, Value> {
-        &self.extensions
     }
 
     fn ensure_valid(&self) -> Result<(), InvalidAssistantResponse> {
@@ -171,7 +310,6 @@ pub(crate) struct ModelCommunication {
     message: String,
     importance: ModelEventImportance,
     subtype: String,
-    extensions: Map<String, Value>,
 }
 
 impl ModelCommunication {
@@ -179,13 +317,11 @@ impl ModelCommunication {
         message: String,
         importance: ModelEventImportance,
         subtype: String,
-        extensions: Map<String, Value>,
     ) -> Result<Self, InvalidModelCommunication> {
         let communication = Self {
             message,
             importance,
             subtype,
-            extensions,
         };
         communication.ensure_valid()?;
         Ok(communication)
@@ -201,11 +337,6 @@ impl ModelCommunication {
 
     pub(crate) fn subtype(&self) -> &str {
         &self.subtype
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn extensions(&self) -> &Map<String, Value> {
-        &self.extensions
     }
 
     fn ensure_valid(&self) -> Result<(), InvalidModelCommunication> {
@@ -256,302 +387,127 @@ pub(crate) enum UserContent {
 
 #[cfg(test)]
 mod tests {
-    use std::str::FromStr;
-
-    use serde_json::{Map, Value, json};
-    use time::{Date, Month, OffsetDateTime};
+    use serde_json::json;
 
     use super::{
-        AssistantResponse, ConversationEvent, ConversationEventKind, InvalidAssistantResponse,
-        InvalidModelCommunication, ModelCommunication, ModelEvent, ModelEventImportance,
+        AssistantResponse, ConversationCommand, ConversationEventClass, ConversationEventKind,
+        ConversationFact, DriverEventEnvelope, InvalidAssistantResponse, InvalidModelCommunication,
+        ModelCommunication, ModelEventImportance, TurnOutcome,
     };
     use crate::conversation::{
-        ConversationEventId, ConversationId, ModelId, ModelIssue, ModelProblem, ModelSource,
-        ProviderId, UserContent,
+        ConversationCommandId, ConversationProblem, ConversationTurnId, ModelInvocationId,
+        ModelIssue,
     };
 
-    fn extensions() -> Map<String, Value> {
-        Map::from_iter([(
-            "openai.item_id".to_owned(),
-            Value::String("item_1".to_owned()),
-        )])
-    }
-
-    fn source() -> ModelSource {
-        ModelSource::new(
-            ProviderId::from_str("openai").expect("the provider identifier should be valid"),
-            ModelId::from_str("gpt-5.6").expect("the model identifier should be valid"),
-        )
-    }
-
-    fn fixed_timestamp() -> OffsetDateTime {
-        Date::from_calendar_date(2026, Month::August, 22)
-            .expect("the date should be valid")
-            .with_hms_milli(18, 42, 31, 482)
-            .expect("the time should be valid")
-            .assume_utc()
-    }
-
     #[test]
-    fn canonical_user_event_round_trips_with_flattened_kind() {
-        let conversation_id = ConversationId::new();
-        let event_id = ConversationEventId::new();
-        let conversation_event = ConversationEvent {
-            conversation_id,
-            position: 0,
-            id: event_id,
-            timestamp: fixed_timestamp(),
-            schema_version: 7,
-            kind: ConversationEventKind::User {
-                content: vec![UserContent::Text("Hello".to_owned())],
-            },
-        };
-
-        let json = serde_json::to_value(&conversation_event)
-            .expect("the conversation event should serialize");
-        let deserialized_event: ConversationEvent = serde_json::from_value(json.clone())
-            .expect("the conversation event should deserialize");
-
-        assert_eq!(
-            json,
-            json!({
-                "conversation_id": conversation_id,
-                "position": 0,
-                "id": event_id,
-                "timestamp": "2026-08-22T18:42:31.482Z",
-                "schema_version": 7,
-                "type": "user",
-                "content": [{ "type": "text", "value": "Hello" }]
-            })
-        );
-        assert_eq!(deserialized_event, conversation_event);
-    }
-
-    #[test]
-    fn assistant_response_round_trips_through_json() {
-        let event = ModelEvent::AssistantResponse(
-            AssistantResponse::new("The answer is 42.".to_owned(), extensions())
+    fn assistant_is_a_top_level_event_with_model_provenance() {
+        let event = ConversationEventKind::Fact(ConversationFact::Assistant {
+            turn_id: ConversationTurnId::new(),
+            invocation_id: ModelInvocationId::new(),
+            data: None,
+            response: AssistantResponse::new("The answer is 42.".to_owned())
                 .expect("the assistant response should be valid"),
-        );
-
-        let json = serde_json::to_value(&event).expect("the assistant response should serialize");
-        let deserialized_event: ModelEvent = serde_json::from_value(json.clone())
-            .expect("the assistant response should deserialize");
+        });
 
         assert_eq!(
-            json,
-            json!({
-                "type": "assistant_response",
-                "message": "The answer is 42.",
-                "extensions": { "openai.item_id": "item_1" }
-            })
+            serde_json::to_value(&event).expect("the event should serialize")["class"],
+            "fact"
         );
-        assert_eq!(deserialized_event, event);
-        assert_eq!(event.message(), "The answer is 42.");
-        assert_eq!(event.importance(), ModelEventImportance::Important);
-        let ModelEvent::AssistantResponse(response) = &event else {
-            panic!("the event should be an assistant response");
-        };
-        assert_eq!(response.extensions(), &extensions());
+    }
+
+    #[test]
+    fn problem_can_have_model_provenance_without_being_a_model_event() {
+        let event = ConversationEventKind::Fact(ConversationFact::Problem {
+            turn_id: Some(ConversationTurnId::new()),
+            invocation_id: Some(ModelInvocationId::new()),
+            data: None,
+            problem: ConversationProblem::Issue(
+                ModelIssue::try_refusal("I cannot comply.".to_owned())
+                    .expect("the refusal should be valid"),
+            ),
+        });
+
+        let serialized = serde_json::to_value(&event).expect("the problem should serialize");
+        assert_eq!(serialized["class"], "fact");
+        assert_eq!(serialized["event"]["type"], "problem");
+    }
+
+    #[test]
+    fn commands_and_turn_completion_are_distinct_from_model_output() {
+        let command = ConversationEventKind::Command(ConversationCommand::TurnRequested {
+            command_id: ConversationCommandId::new(),
+            turn_id: ConversationTurnId::new(),
+        });
+        let completed = ConversationEventKind::Fact(ConversationFact::TurnCompleted {
+            turn_id: ConversationTurnId::new(),
+            outcome: TurnOutcome::Succeeded,
+        });
+
+        assert_eq!(command.class(), super::ConversationEventClass::Command);
+        assert_eq!(completed.class(), super::ConversationEventClass::Fact);
+    }
+
+    #[test]
+    fn driver_event_envelope_preserves_its_classification_and_payload() {
+        let envelope = DriverEventEnvelope::new(
+            ConversationEventClass::Command,
+            "test".to_owned(),
+            "1".to_owned(),
+            "invocation_requested".to_owned(),
+            1,
+            "An invocation was requested.".to_owned(),
+            json!({ "invocation_id": "invocation_1" }),
+        )
+        .expect("the driver event envelope should be valid");
+        let serialized = serde_json::to_value(&envelope).expect("the envelope should serialize");
+        let restored: DriverEventEnvelope =
+            serde_json::from_value(serialized).expect("the envelope should deserialize");
+
+        assert_eq!(restored.class(), ConversationEventClass::Command);
+        assert_eq!(restored.driver(), "test");
+        assert_eq!(restored.event_type(), "invocation_requested");
+        assert_eq!(restored.event_schema_version(), 1);
+        assert_eq!(restored.description(), "An invocation was requested.");
+        assert_eq!(restored.payload()["invocation_id"], "invocation_1");
+
+        let fact = DriverEventEnvelope::new(
+            ConversationEventClass::Fact,
+            "test".to_owned(),
+            "1".to_owned(),
+            "invocation_finished".to_owned(),
+            1,
+            "An invocation finished.".to_owned(),
+            json!({ "successful": true }),
+        )
+        .expect("the driver fact envelope should be valid");
+        assert_eq!(fact.class(), ConversationEventClass::Fact);
     }
 
     #[test]
     fn assistant_response_rejects_an_empty_message() {
         assert_eq!(
-            AssistantResponse::new(String::new(), Map::new()),
+            AssistantResponse::new(String::new()),
             Err(InvalidAssistantResponse::EmptyMessage)
         );
     }
 
     #[test]
-    fn model_problem_uses_one_authoritative_conversation_event_surface() {
-        let problem = ModelProblem::Issue(
-            ModelIssue::try_refusal("I cannot comply.".to_owned())
-                .expect("the refusal should be valid"),
-        );
-        let event = ConversationEventKind::Problem {
-            source: source(),
-            problem: problem.clone(),
-        };
-
-        let serialized = serde_json::to_value(&event).expect("the problem should serialize");
-        let deserialized: ConversationEventKind =
-            serde_json::from_value(serialized.clone()).expect("the problem should deserialize");
-
-        assert_eq!(
-            serialized,
-            json!({
-                "type": "problem",
-                "source": {
-                    "provider": "openai",
-                    "model": "gpt-5.6"
-                },
-                "problem": {
-                    "category": "issue",
-                    "detail": {
-                        "type": "refusal",
-                        "message": "I cannot comply."
-                    }
-                }
-            })
-        );
-        assert_eq!(deserialized, event);
-        assert_eq!(problem.message(), "I cannot comply.");
-        assert!(serialized.get("message").is_none());
-        assert!(serialized.get("severity").is_none());
-    }
-
-    #[test]
-    fn assistant_response_rejects_a_whitespace_only_message() {
-        assert_eq!(
-            AssistantResponse::new(" \n\t ".to_owned(), Map::new()),
-            Err(InvalidAssistantResponse::EmptyMessage)
-        );
-    }
-
-    #[test]
-    fn assistant_response_preserves_surrounding_whitespace() {
-        let response = AssistantResponse::new("  answer\n".to_owned(), Map::new())
-            .expect("the assistant response should be valid");
-
-        assert_eq!(response.message(), "  answer\n");
-    }
-
-    #[test]
-    fn model_communication_round_trips_through_json() {
-        let event = ModelEvent::Communication(
-            ModelCommunication::new(
-                "I compared the two approaches.".to_owned(),
-                ModelEventImportance::Detailed,
-                "reasoning".to_owned(),
-                extensions(),
-            )
-            .expect("the model communication should be valid"),
-        );
-
-        let json = serde_json::to_value(&event).expect("the communication should serialize");
-        let deserialized_event: ModelEvent =
-            serde_json::from_value(json.clone()).expect("the communication should deserialize");
-
-        assert_eq!(
-            json,
-            json!({
-                "type": "communication",
-                "message": "I compared the two approaches.",
-                "importance": "detailed",
-                "subtype": "reasoning",
-                "extensions": { "openai.item_id": "item_1" }
-            })
-        );
-        assert_eq!(deserialized_event, event);
-        assert_eq!(event.message(), "I compared the two approaches.");
-        assert_eq!(event.importance(), ModelEventImportance::Detailed);
-        let ModelEvent::Communication(communication) = &event else {
-            panic!("the event should be a model communication");
-        };
-        assert_eq!(communication.subtype(), "reasoning");
-        assert_eq!(communication.extensions(), &extensions());
-    }
-
-    #[test]
-    fn model_communication_rejects_an_empty_message() {
+    fn model_communication_validates_messages_and_subtypes() {
         assert_eq!(
             ModelCommunication::new(
                 String::new(),
                 ModelEventImportance::Detailed,
                 "reasoning".to_owned(),
-                Map::new(),
             ),
             Err(InvalidModelCommunication::EmptyMessage)
         );
-        assert_eq!(
-            ModelCommunication::new(
-                " \n ".to_owned(),
-                ModelEventImportance::Detailed,
-                "reasoning".to_owned(),
-                Map::new(),
-            ),
-            Err(InvalidModelCommunication::EmptyMessage)
-        );
-    }
-
-    #[test]
-    fn model_communication_rejects_an_empty_subtype() {
         assert_eq!(
             ModelCommunication::new(
                 "message".to_owned(),
                 ModelEventImportance::Detailed,
-                " \t ".to_owned(),
-                Map::new(),
+                " ".to_owned(),
             ),
             Err(InvalidModelCommunication::EmptySubtype)
-        );
-    }
-
-    #[test]
-    fn model_communication_preserves_its_message_and_subtype() {
-        let communication = ModelCommunication::new(
-            "  message\n".to_owned(),
-            ModelEventImportance::Interesting,
-            " reasoning_summary ".to_owned(),
-            Map::new(),
-        )
-        .expect("the model communication should be valid");
-
-        assert_eq!(communication.message(), "  message\n");
-        assert_eq!(communication.subtype(), " reasoning_summary ");
-    }
-
-    #[test]
-    fn canonical_model_event_round_trip_preserves_source_and_metadata() {
-        let conversation_id = ConversationId::new();
-        let event_id = ConversationEventId::new();
-        let source = source();
-        let model_event = ModelEvent::AssistantResponse(
-            AssistantResponse::new("The answer is 42.".to_owned(), Map::new())
-                .expect("the assistant response should be valid"),
-        );
-        let conversation_event = ConversationEvent {
-            conversation_id,
-            position: 1,
-            id: event_id,
-            timestamp: fixed_timestamp(),
-            schema_version: 7,
-            kind: ConversationEventKind::Model {
-                source: source.clone(),
-                event: model_event.clone(),
-            },
-        };
-
-        let json = serde_json::to_value(&conversation_event)
-            .expect("the conversation event should serialize");
-        let deserialized_event: ConversationEvent = serde_json::from_value(json.clone())
-            .expect("the conversation event should deserialize");
-
-        assert_eq!(
-            json,
-            json!({
-                "conversation_id": conversation_id,
-                "position": 1,
-                "id": event_id,
-                "timestamp": "2026-08-22T18:42:31.482Z",
-                "schema_version": 7,
-                "type": "model",
-                "source": { "provider": "openai", "model": "gpt-5.6" },
-                "event": {
-                    "type": "assistant_response",
-                    "message": "The answer is 42.",
-                    "extensions": {}
-                }
-            })
-        );
-        assert_eq!(deserialized_event, conversation_event);
-        assert_eq!(
-            conversation_event.kind,
-            ConversationEventKind::Model {
-                source,
-                event: model_event,
-            }
         );
     }
 }
