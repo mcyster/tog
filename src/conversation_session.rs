@@ -6,7 +6,8 @@ use futures_util::StreamExt;
 use crate::conversation::{
     ConversationCommandId, ConversationEvent, ConversationFact, ConversationId,
     ConversationProblem, ConversationRequest, ConversationTurnId, DriverConversationEvent,
-    DriverConversationFact, TurnOutcome, UserContent, UserMessageRequest, UserPrompt,
+    DriverConversationFact, DriverConversationMessage, TurnOutcome, UserContent,
+    UserMessageRequest, UserPrompt,
 };
 use crate::model_driver::{ModelDriver, ModelDriverError, TurnInput};
 use crate::persistence::EventStore;
@@ -81,6 +82,11 @@ impl ConversationSession {
             }),
         )?;
         let conversation = self.event_store.load_conversation(self.conversation_id)?;
+        let pending_request_ids = conversation
+            .pending_user_requests()
+            .into_iter()
+            .map(|request| request.command_id)
+            .collect::<HashSet<_>>();
         let source = self.model_driver.source().clone();
         report_progress(ConversationSessionProgress::InvocationStarted {
             model: source.model().as_str().to_owned(),
@@ -90,24 +96,83 @@ impl ConversationSession {
             .model_driver
             .invoke(TurnInput::new(&conversation, turn_id))
             .await?;
-        let mut completed_outcome = None;
         let mut accepted_request_ids = HashSet::new();
+        let mut assistant_responded = false;
+        let mut turn_failed = false;
 
         while let Some(output) = output_stream.next().await {
             let output = output?;
-            if completed_outcome.is_some() {
-                return Err(Box::new(ModelDriverError::OutputAfterCompletion {
-                    event_type: driver_event_type(&output),
-                }));
-            }
             match output {
-                DriverConversationEvent::Command(event) => {
+                DriverConversationMessage::User {
+                    command_id,
+                    content,
+                } => {
+                    if !pending_request_ids.contains(&command_id)
+                        || !accepted_request_ids.insert(command_id)
+                    {
+                        return Err(Box::new(ModelDriverError::UnexpectedUserRequest {
+                            command_id,
+                        }));
+                    }
+                    self.append_shared_fact(ConversationFact::User {
+                        caused_by: Some(command_id),
+                        content,
+                    })?;
+                }
+                DriverConversationMessage::AssistantResponse {
+                    invocation_id,
+                    data,
+                    response,
+                } => {
+                    assistant_responded = true;
+                    self.report_shared_fact(
+                        ConversationFact::Assistant {
+                            turn_id,
+                            invocation_id,
+                            data,
+                            response,
+                        },
+                        &mut report_progress,
+                    )?;
+                }
+                DriverConversationMessage::Communication {
+                    invocation_id,
+                    data,
+                    communication,
+                } => {
+                    self.report_shared_fact(
+                        ConversationFact::Communication {
+                            turn_id,
+                            invocation_id,
+                            data,
+                            communication,
+                        },
+                        &mut report_progress,
+                    )?;
+                }
+                DriverConversationMessage::Problem {
+                    invocation_id,
+                    data,
+                    problem,
+                } => {
+                    turn_failed = true;
+                    self.report_shared_fact(
+                        ConversationFact::Problem {
+                            turn_id: Some(turn_id),
+                            invocation_id,
+                            data,
+                            problem,
+                        },
+                        &mut report_progress,
+                    )?;
+                }
+                DriverConversationMessage::Command(event) => {
                     self.event_store.append_new_conversation_event(
                         self.conversation_id,
                         ConversationEvent::Driver(DriverConversationEvent::Command(event)),
                     )?;
                 }
-                DriverConversationEvent::Fact(DriverConversationFact::Extension(event)) => {
+                DriverConversationMessage::Extension(event) => {
                     self.event_store.append_new_conversation_event(
                         self.conversation_id,
                         ConversationEvent::Driver(DriverConversationEvent::Fact(
@@ -115,53 +180,19 @@ impl ConversationSession {
                         )),
                     )?;
                 }
-                DriverConversationEvent::Fact(DriverConversationFact::Shared(fact)) => {
-                    match &fact {
-                        ConversationFact::User { caused_by, .. } => {
-                            let Some(command_id) = caused_by else {
-                                return Err(Box::new(ModelDriverError::MissingTurnIdentity));
-                            };
-                            if !pending_request_ids(&conversation).contains(command_id)
-                                || !accepted_request_ids.insert(*command_id)
-                            {
-                                return Err(Box::new(ModelDriverError::DisallowedEventKind {
-                                    event_type: "user".to_owned(),
-                                }));
-                            }
-                            self.append_shared_fact(fact)?;
-                        }
-                        ConversationFact::Assistant {
-                            turn_id: fact_turn_id,
-                            ..
-                        }
-                        | ConversationFact::Communication {
-                            turn_id: fact_turn_id,
-                            ..
-                        } => {
-                            ensure_turn_id(*fact_turn_id, &turn_id)?;
-                            self.report_shared_fact(fact, &mut report_progress)?;
-                        }
-                        ConversationFact::TurnCompleted {
-                            turn_id: fact_turn_id,
-                            outcome,
-                        } => {
-                            ensure_turn_id(*fact_turn_id, &turn_id)?;
-                            completed_outcome = Some(*outcome);
-                            self.report_shared_fact(fact, &mut report_progress)?;
-                        }
-                        ConversationFact::Problem {
-                            turn_id: problem_turn_id,
-                            ..
-                        } => {
-                            ensure_optional_turn_id(*problem_turn_id, &turn_id)?;
-                            self.report_shared_fact(fact, &mut report_progress)?;
-                        }
-                    }
-                }
             }
         }
 
-        completed_outcome.ok_or_else(|| ModelDriverError::IncompleteTurn.into())
+        let outcome = match (turn_failed, assistant_responded) {
+            (true, _) => TurnOutcome::Failed,
+            (false, true) => TurnOutcome::Succeeded,
+            (false, false) => return Err(Box::new(ModelDriverError::IncompleteTurn)),
+        };
+        self.report_shared_fact(
+            ConversationFact::TurnCompleted { turn_id, outcome },
+            &mut report_progress,
+        )?;
+        Ok(outcome)
     }
 
     fn append_shared_fact(&self, fact: ConversationFact) -> ConversationSessionResult<()> {
@@ -202,54 +233,6 @@ impl ConversationSession {
     }
 }
 
-fn pending_request_ids(
-    conversation: &crate::conversation::Conversation,
-) -> HashSet<ConversationCommandId> {
-    conversation
-        .pending_user_requests()
-        .iter()
-        .map(|request| request.command_id)
-        .collect()
-}
-
-fn ensure_turn_id(
-    actual_turn_id: ConversationTurnId,
-    expected_turn_id: &ConversationTurnId,
-) -> Result<(), ModelDriverError> {
-    if actual_turn_id != *expected_turn_id {
-        return Err(ModelDriverError::WrongTurnIdentity {
-            expected: *expected_turn_id,
-            actual: actual_turn_id,
-        });
-    }
-    Ok(())
-}
-
-fn ensure_optional_turn_id(
-    actual_turn_id: Option<ConversationTurnId>,
-    expected_turn_id: &ConversationTurnId,
-) -> Result<(), ModelDriverError> {
-    actual_turn_id
-        .map(|actual_turn_id| ensure_turn_id(actual_turn_id, expected_turn_id))
-        .unwrap_or(Ok(()))
-}
-
-fn driver_event_type(event: &DriverConversationEvent) -> String {
-    match event {
-        DriverConversationEvent::Command(_) => "driver_command".to_owned(),
-        DriverConversationEvent::Fact(DriverConversationFact::Shared(fact)) => match fact {
-            ConversationFact::User { .. } => "user".to_owned(),
-            ConversationFact::Assistant { .. } => "assistant".to_owned(),
-            ConversationFact::Communication { .. } => "communication".to_owned(),
-            ConversationFact::Problem { .. } => "problem".to_owned(),
-            ConversationFact::TurnCompleted { .. } => "turn_completed".to_owned(),
-        },
-        DriverConversationEvent::Fact(DriverConversationFact::Extension(_)) => {
-            "driver_fact".to_owned()
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::str::FromStr;
@@ -261,17 +244,25 @@ mod tests {
 
     use super::{ConversationSession, ConversationSessionProgress};
     use crate::conversation::{
-        ConversationEventExtension, ConversationFact, DriverConversationEvent,
-        DriverConversationFact, DriverEventEnvelope, DriverEventReadError, DriverEventReader,
-        ModelId, ModelSource, ProviderId, TurnOutcome, UserPrompt,
+        AssistantResponse, ConversationEventExtension, ConversationEventKind, ConversationFact,
+        ConversationProblem, DriverConversationMessage, DriverEventEnvelope, DriverEventReadError,
+        DriverEventReader, InvocationError, ModelId, ModelInvocationId, ModelSource, ProviderId,
+        StoredConversationEventKind, TurnOutcome, UserPrompt,
     };
     use crate::model_driver::{ModelDriver, ModelDriverError, ModelOutputStream, TurnInput};
     use crate::persistence::EventStore;
 
+    enum RecordingResponse {
+        Assistant,
+        Problem,
+        AssistantThenProblem,
+        Nothing,
+    }
+
     struct RecordingDriver {
         source: ModelSource,
         pending_counts: Arc<Mutex<Vec<usize>>>,
-        outcome: TurnOutcome,
+        response: RecordingResponse,
     }
 
     impl DriverEventReader for RecordingDriver {
@@ -297,25 +288,45 @@ mod tests {
                 .lock()
                 .expect("the pending request list should lock")
                 .push(pending_requests.len());
-            let turn_id = input.turn_id();
             let mut output = pending_requests
                 .into_iter()
                 .map(|request| {
-                    Ok(DriverConversationEvent::Fact(
-                        DriverConversationFact::Shared(ConversationFact::User {
-                            caused_by: Some(request.command_id),
-                            content: request.content,
-                        }),
-                    ))
+                    Ok(DriverConversationMessage::User {
+                        command_id: request.command_id,
+                        content: request.content,
+                    })
                 })
                 .collect::<Vec<_>>();
-            output.push(Ok(DriverConversationEvent::Fact(
-                DriverConversationFact::Shared(ConversationFact::TurnCompleted {
-                    turn_id,
-                    outcome: self.outcome,
-                }),
-            )));
+            match self.response {
+                RecordingResponse::Assistant => output.push(Ok(assistant_response())),
+                RecordingResponse::Problem => output.push(Ok(problem_message())),
+                RecordingResponse::AssistantThenProblem => {
+                    output.push(Ok(assistant_response()));
+                    output.push(Ok(problem_message()));
+                }
+                RecordingResponse::Nothing => {}
+            }
             async move { Ok(stream::iter(output).boxed()) }.boxed()
+        }
+    }
+
+    fn assistant_response() -> DriverConversationMessage {
+        DriverConversationMessage::AssistantResponse {
+            invocation_id: ModelInvocationId::new(),
+            data: None,
+            response: AssistantResponse::new("Hello.".to_owned())
+                .expect("the assistant response should be valid"),
+        }
+    }
+
+    fn problem_message() -> DriverConversationMessage {
+        DriverConversationMessage::Problem {
+            invocation_id: Some(ModelInvocationId::new()),
+            data: None,
+            problem: ConversationProblem::Invocation(
+                InvocationError::try_provider_failure("the provider failed".to_owned())
+                    .expect("the provider failure should be valid"),
+            ),
         }
     }
 
@@ -339,7 +350,7 @@ mod tests {
             Box::new(RecordingDriver {
                 source: source(),
                 pending_counts: Arc::clone(&pending_counts),
-                outcome: TurnOutcome::Succeeded,
+                response: RecordingResponse::Assistant,
             }),
         );
         let conversation_id = session.id();
@@ -360,7 +371,7 @@ mod tests {
             Box::new(RecordingDriver {
                 source: source(),
                 pending_counts: Arc::clone(&pending_counts),
-                outcome: TurnOutcome::Succeeded,
+                response: RecordingResponse::Assistant,
             }),
         )
         .expect("the session should open");
@@ -393,7 +404,7 @@ mod tests {
             Box::new(RecordingDriver {
                 source: source(),
                 pending_counts: Arc::new(Mutex::new(Vec::new())),
-                outcome: TurnOutcome::Failed,
+                response: RecordingResponse::Problem,
             }),
         );
         session
@@ -406,6 +417,84 @@ mod tests {
                 .await
                 .expect("the failed invocation should still complete"),
             TurnOutcome::Failed
+        );
+    }
+
+    #[tokio::test]
+    async fn a_late_problem_fails_the_turn_but_preserves_earlier_output() {
+        let directory = temporary_directory();
+        let session = ConversationSession::create(
+            EventStore::new(directory.clone()).expect("the store should be created"),
+            Box::new(RecordingDriver {
+                source: source(),
+                pending_counts: Arc::new(Mutex::new(Vec::new())),
+                response: RecordingResponse::AssistantThenProblem,
+            }),
+        );
+        let conversation_id = session.id();
+        session
+            .add_user_request(UserPrompt::from_str("hello").expect("the prompt should be valid"))
+            .expect("the request should be recorded");
+
+        assert_eq!(
+            session
+                .invoke(|_| Ok(()))
+                .await
+                .expect("the invocation should complete"),
+            TurnOutcome::Failed
+        );
+
+        let conversation = EventStore::new(directory)
+            .expect("the store should reopen")
+            .load_conversation(conversation_id)
+            .expect("the conversation should load");
+        let facts = conversation
+            .events()
+            .iter()
+            .filter_map(|event| match &event.kind {
+                StoredConversationEventKind::Shared(ConversationEventKind::Fact(fact)) => {
+                    Some(fact.clone())
+                }
+                StoredConversationEventKind::Shared(ConversationEventKind::Command(_))
+                | StoredConversationEventKind::Extension(_) => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert!(matches!(
+            facts.as_slice(),
+            [
+                ConversationFact::User { .. },
+                ConversationFact::Assistant { .. },
+                ConversationFact::Problem { .. },
+                ConversationFact::TurnCompleted {
+                    outcome: TurnOutcome::Failed,
+                    ..
+                }
+            ]
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_driver_that_ends_without_output_is_an_incomplete_turn() {
+        let session = ConversationSession::create(
+            EventStore::new(temporary_directory()).expect("the store should be created"),
+            Box::new(RecordingDriver {
+                source: source(),
+                pending_counts: Arc::new(Mutex::new(Vec::new())),
+                response: RecordingResponse::Nothing,
+            }),
+        );
+        session
+            .add_user_request(UserPrompt::from_str("hello").expect("the prompt should be valid"))
+            .expect("the request should be recorded");
+
+        let error = session
+            .invoke(|_| Ok(()))
+            .await
+            .expect_err("an invocation without output should be rejected");
+        assert_eq!(
+            error.to_string(),
+            "the model driver ended without an assistant response or problem"
         );
     }
 }

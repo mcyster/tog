@@ -87,6 +87,31 @@ pub(crate) enum DriverConversationFact {
     Extension(Box<dyn ConversationEventExtension>),
 }
 
+pub(crate) enum DriverConversationMessage {
+    User {
+        command_id: ConversationCommandId,
+        content: Vec<UserContent>,
+    },
+    AssistantResponse {
+        invocation_id: ModelInvocationId,
+        data: Option<ModelData>,
+        response: AssistantResponse,
+    },
+    Communication {
+        invocation_id: ModelInvocationId,
+        data: Option<ModelData>,
+        communication: ModelCommunication,
+    },
+    Problem {
+        invocation_id: Option<ModelInvocationId>,
+        data: Option<ModelData>,
+        problem: ConversationProblem,
+    },
+    Command(Box<dyn ConversationEventExtension>),
+    #[allow(dead_code)]
+    Extension(Box<dyn ConversationEventExtension>),
+}
+
 impl DriverConversationEvent {
     pub(crate) fn class(&self) -> ConversationEventClass {
         match self {

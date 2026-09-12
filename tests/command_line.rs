@@ -307,6 +307,13 @@ fn turn_persists_events_and_prints_semantic_output() {
     assert_eq!(model_event["event"]["response"]["message"], "Hello");
     assert!(model_event.get("kind").is_none());
     assert!(model_event.get("data").is_none());
+    let completion: Value = serde_json::from_reader(
+        fs::File::open(&event_paths[5]).expect("the persisted completion should open"),
+    )
+    .expect("the persisted completion should be JSON");
+    assert_eq!(completion["class"], "fact");
+    assert_eq!(completion["event"]["type"], "turn_completed");
+    assert_eq!(completion["event"]["outcome"], "succeeded");
     let requests = server.finish();
     assert_eq!(requests[0]["model"], "gpt-5.6");
     assert_eq!(requests[0]["input"][0]["content"], "say hi");

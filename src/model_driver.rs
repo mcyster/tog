@@ -5,12 +5,12 @@ use futures_util::future::BoxFuture;
 use futures_util::stream::BoxStream;
 
 use crate::conversation::{
-    Conversation, ConversationTurnId, DriverConversationEvent, DriverEventReader, ModelSource,
-    UserMessageRequest,
+    Conversation, ConversationCommandId, ConversationTurnId, DriverConversationMessage,
+    DriverEventReader, ModelSource, UserMessageRequest,
 };
 
 pub(crate) type ModelOutputStream =
-    BoxStream<'static, Result<DriverConversationEvent, ModelDriverError>>;
+    BoxStream<'static, Result<DriverConversationMessage, ModelDriverError>>;
 
 pub(crate) struct TurnInput<'conversation> {
     conversation: &'conversation Conversation,
@@ -54,45 +54,20 @@ pub(crate) trait ModelDriver: DriverEventReader {
 
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum ModelDriverError {
-    WrongTurnIdentity {
-        expected: ConversationTurnId,
-        actual: ConversationTurnId,
-    },
-    MissingTurnIdentity,
-    DisallowedEventKind {
-        event_type: String,
-    },
-    OutputAfterCompletion {
-        event_type: String,
-    },
+    UnexpectedUserRequest { command_id: ConversationCommandId },
     IncompleteTurn,
 }
 
 impl Display for ModelDriverError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::WrongTurnIdentity { expected, actual } => write!(
+            Self::UnexpectedUserRequest { command_id } => write!(
                 formatter,
-                "model driver event belonged to turn {actual}, expected turn {expected}"
+                "model driver accepted unexpected user request {command_id}"
             ),
-            Self::MissingTurnIdentity => {
-                write!(formatter, "model driver problem had no turn identity")
-            }
-            Self::DisallowedEventKind { event_type } => {
-                write!(
-                    formatter,
-                    "model driver emitted disallowed event kind {event_type}"
-                )
-            }
-            Self::OutputAfterCompletion { event_type } => {
-                write!(
-                    formatter,
-                    "model driver emitted {event_type} after turn completion"
-                )
-            }
             Self::IncompleteTurn => write!(
                 formatter,
-                "the model driver ended without completing the turn"
+                "the model driver ended without an assistant response or problem"
             ),
         }
     }

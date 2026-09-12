@@ -14,9 +14,9 @@ pub(crate) use event::{
     AssistantResponse, ConversationCommand, ConversationEvent, ConversationEventClass,
     ConversationEventError, ConversationEventExtension, ConversationEventKind,
     ConversationEventRecord, ConversationFact, ConversationRequest, DriverConversationEvent,
-    DriverConversationFact, DriverEventEnvelope, DriverEventReadError, DriverEventReader,
-    InvalidAssistantResponse, InvalidModelCommunication, ModelCommunication, ModelEvent,
-    ModelEventImportance, StoredConversationEventKind, TurnOutcome, UserContent,
+    DriverConversationFact, DriverConversationMessage, DriverEventEnvelope, DriverEventReadError,
+    DriverEventReader, InvalidAssistantResponse, InvalidModelCommunication, ModelCommunication,
+    ModelEvent, ModelEventImportance, StoredConversationEventKind, TurnOutcome, UserContent,
     UserMessageRequest,
 };
 pub(crate) use id::{
