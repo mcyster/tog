@@ -194,7 +194,7 @@ naturally involve streaming, failures, and incremental output.
 The caller-facing API is `ConversationSession`:
 
 ```rust
-struct ConversationRequest { /* UserMessageRequested or TurnRequested */ }
+enum ConversationCommand { /* UserMessageRequested or TurnRequested */ }
 
 impl ConversationSession {
     fn add_user_request(...) -> Result<ConversationCommandId, _>;
@@ -210,7 +210,7 @@ impl ConversationSession {
 and turn identity. `TurnInput` derives the pending user requests from that same
 snapshot. Its output stream returns `ModelDriverOutput` values: shared
 `ConversationMessage` content or driver-defined invocation and extension events.
-It cannot return session-owned requests or turn lifecycle facts. The session
+It cannot return session-owned commands or turn lifecycle facts. The session
 converts those outputs into the persisted event vocabulary and records
 `TurnCompleted` from its completion policy.
 

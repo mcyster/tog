@@ -4,8 +4,8 @@ use std::error::Error;
 use futures_util::StreamExt;
 
 use crate::conversation::{
-    ConversationCommandId, ConversationEvent, ConversationFact, ConversationId,
-    ConversationLifecycle, ConversationMessage, ConversationProblem, ConversationRequest,
+    ConversationCommand, ConversationCommandId, ConversationEvent, ConversationFact,
+    ConversationId, ConversationLifecycle, ConversationMessage, ConversationProblem,
     ConversationTurnId, TurnOutcome, UserContent, UserMessageRequest, UserPrompt,
 };
 use crate::model_driver::{ModelDriver, ModelDriverError, ModelDriverOutput, TurnInput};
@@ -58,7 +58,7 @@ impl ConversationSession {
         let command_id = ConversationCommandId::new();
         self.event_store.append_new_conversation_event(
             self.conversation_id,
-            ConversationEvent::Request(ConversationRequest::UserMessageRequested(
+            ConversationEvent::Command(ConversationCommand::UserMessageRequested(
                 UserMessageRequest {
                     content: vec![UserContent::Text(user_prompt.text().to_owned())],
                     command_id,
@@ -75,7 +75,7 @@ impl ConversationSession {
         let turn_id = ConversationTurnId::new();
         self.event_store.append_new_conversation_event(
             self.conversation_id,
-            ConversationEvent::Request(ConversationRequest::TurnRequested {
+            ConversationEvent::Command(ConversationCommand::TurnRequested {
                 command_id: ConversationCommandId::new(),
                 turn_id,
             }),

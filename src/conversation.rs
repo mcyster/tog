@@ -15,9 +15,9 @@ pub(crate) use event::{
     ConversationEventEnvelope, ConversationEventError, ConversationEventExtension,
     ConversationEventKind, ConversationEventReadError, ConversationEventReader,
     ConversationEventRecord, ConversationFact, ConversationLifecycle, ConversationMessage,
-    ConversationRequest, InvalidAssistantResponse, InvalidConversationEventEnvelope,
-    InvalidModelCommunication, ModelCommunication, ModelEvent, ModelEventImportance,
-    StoredConversationEventKind, TurnOutcome, UserContent, UserMessageRequest,
+    InvalidAssistantResponse, InvalidConversationEventEnvelope, InvalidModelCommunication,
+    ModelCommunication, ModelEvent, ModelEventImportance, StoredConversationEventKind, TurnOutcome,
+    UserContent, UserMessageRequest,
 };
 pub(crate) use id::{
     ConversationCommandId, ConversationEventId, ConversationId, ConversationTurnId,

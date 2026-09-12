@@ -69,9 +69,9 @@ impl EventStore {
         event: ConversationEvent,
     ) -> io::Result<ConversationEventRecord> {
         let kind = match event {
-            ConversationEvent::Request(request) => StoredConversationEventKind::Shared(
-                ConversationEventKind::Command(request.command()),
-            ),
+            ConversationEvent::Command(command) => {
+                StoredConversationEventKind::Shared(ConversationEventKind::Command(command))
+            }
             ConversationEvent::Fact(fact) => {
                 StoredConversationEventKind::Shared(ConversationEventKind::Fact(fact))
             }

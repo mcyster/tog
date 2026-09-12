@@ -18,7 +18,7 @@ use super::{
 };
 
 pub(crate) enum ConversationEvent {
-    Request(ConversationRequest),
+    Command(ConversationCommand),
     Fact(ConversationFact),
     Extension(Box<dyn ConversationEventExtension>),
 }
@@ -34,40 +34,10 @@ impl ConversationEvent {
     #[allow(dead_code)]
     pub(crate) fn class(&self) -> ConversationEventClass {
         match self {
-            Self::Request(request) => request.class(),
+            Self::Command(_) => ConversationEventClass::Command,
             Self::Fact(_) => ConversationEventClass::Fact,
             Self::Extension(event) => event.class(),
         }
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum ConversationRequest {
-    UserMessageRequested(UserMessageRequest),
-    TurnRequested {
-        command_id: ConversationCommandId,
-        turn_id: ConversationTurnId,
-    },
-}
-
-impl ConversationRequest {
-    pub(crate) fn command(&self) -> ConversationCommand {
-        match self {
-            Self::UserMessageRequested(request) => {
-                ConversationCommand::UserMessageRequested(request.clone())
-            }
-            Self::TurnRequested {
-                command_id,
-                turn_id,
-            } => ConversationCommand::TurnRequested {
-                command_id: *command_id,
-                turn_id: *turn_id,
-            },
-        }
-    }
-
-    pub(crate) fn class(&self) -> ConversationEventClass {
-        ConversationEventClass::Command
     }
 }
 
