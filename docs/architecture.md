@@ -89,18 +89,19 @@ representation.
 
 The configured `ModelDriver` receives a typed `TurnInput` containing an immutable
 `Conversation`, pending user-message requests derived from that snapshot, and a
-`ConversationTurnId`. It emits only permitted conversation messages: accepted
-user content, assistant responses, communications, problems, and driver-defined
-invocation or extension events. It creates invocation identities and
-invocation-specific data. It cannot emit session-owned user requests or turn
-lifecycle facts, and it does not allocate durable record positions, timestamps,
-or record identifiers. The event store assigns that envelope metadata at the
-shared append boundary.
+`ConversationTurnId`. Conversation defines `ConversationMessage` for accepted
+user content, assistant responses, communications, and problems. The
+model-driver API selects the outputs a driver may return through
+`ModelDriverOutput`: a shared conversation message or a driver-defined invocation
+or extension event. It creates invocation identities and invocation-specific
+data. It cannot emit session-owned user requests or turn lifecycle facts, and it
+does not allocate durable record positions, timestamps, or record identifiers.
+The event store assigns that envelope metadata at the shared append boundary.
 
 ```text
 immutable Conversation
     -> ModelDriver invocation
-    -> permitted conversation messages
+    -> permitted conversation messages and driver events
     -> session appends facts and records the turn outcome
     -> append boundary assigns record metadata
     -> log and presentation projections

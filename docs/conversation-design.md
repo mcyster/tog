@@ -112,17 +112,25 @@ enum ConversationCommand {
     TurnRequested { ... },
 }
 
-enum ConversationFact {
+enum ConversationMessage {
     User { ... },
-    Assistant { ... },
+    AssistantResponse { ... },
     Communication { ... },
     Problem { ... },
-    TurnCompleted { ... },
+}
+
+enum ConversationFact {
+    Message { message: ConversationMessage, turn_id: Option<ConversationTurnId> },
+    Lifecycle(ConversationLifecycle),
     ToolRequest(...),
     ToolResponse(...),
     Context(...),
     Automation(...),
     Data(...),
+}
+
+enum ConversationLifecycle {
+    TurnCompleted { ... },
 }
 ```
 
@@ -200,11 +208,11 @@ impl ConversationSession {
 
 `ModelDriver` receives a `TurnInput` constructed from the immutable conversation
 and turn identity. `TurnInput` derives the pending user requests from that same
-snapshot. Its output stream returns `DriverConversationMessage` values: accepted
-user content, assistant responses, communications, problems, and driver-defined
-invocation events. It cannot return session-owned requests or turn lifecycle
-facts. The session converts those messages into the persisted event vocabulary
-and records `TurnCompleted` from its completion policy.
+snapshot. Its output stream returns `ModelDriverOutput` values: shared
+`ConversationMessage` content or driver-defined invocation and extension events.
+It cannot return session-owned requests or turn lifecycle facts. The session
+converts those outputs into the persisted event vocabulary and records
+`TurnCompleted` from its completion policy.
 
 ---
 
@@ -707,7 +715,7 @@ use futures_util::future::BoxFuture;
 use futures_util::stream::BoxStream;
 
 type ModelOutputStream =
-    BoxStream<'static, Result<DriverConversationMessage, ModelDriverError>>;
+    BoxStream<'static, Result<ModelDriverOutput, ModelDriverError>>;
 
 struct TurnInput<'conversation> {
     conversation: &'conversation Conversation,
@@ -721,11 +729,15 @@ impl<'conversation> TurnInput<'conversation> {
     fn pending_user_requests(&self) -> &[UserMessageRequest];
 }
 
-enum DriverConversationMessage {
+enum ConversationMessage {
     User { ... },
     AssistantResponse { ... },
     Communication { ... },
     Problem { ... },
+}
+
+enum ModelDriverOutput {
+    Message(ConversationMessage),
     Command(Box<dyn ConversationEventExtension>),
     Extension(Box<dyn ConversationEventExtension>),
 }
@@ -759,12 +771,13 @@ trait ModelDriver: DriverEventReader {
 }
 
 enum ModelDriverError {
+    UnassociatedUserMessage,
     UnexpectedUserRequest { command_id: ConversationCommandId },
     IncompleteTurn,
 }
 ```
 
-This is conceptually `Future<Stream<DriverConversationMessage>>`, or `Mono<Flux<DriverConversationMessage>>` in Reactor terminology. The caller supplies only the immutable conversation and turn identity. The driver creates invocation identities, driver events, and invocation-specific data. Shared messages remain concrete and portable. Every output is converted into a durable event and persisted through the shared record boundary.
+This is conceptually `Future<Stream<ModelDriverOutput>>`, or `Mono<Flux<ModelDriverOutput>>` in Reactor terminology. The caller supplies only the immutable conversation and turn identity. The driver creates invocation identities, driver events, and invocation-specific data. Shared messages remain concrete and portable and are defined by the conversation vocabulary. Every output is converted into a durable event and persisted through the shared record boundary.
 
 `ModelDriverError` describes only failures of this shared contract. Provider
 failures that the driver can describe are emitted as portable `Problem` messages.
@@ -834,7 +847,7 @@ This supersedes the previous batch contract, which returned all model events onl
 An established invocation yields permitted conversation messages incrementally:
 
 ```rust
-Result<DriverConversationMessage, ModelDriverError>
+Result<ModelDriverOutput, ModelDriverError>
 ```
 
 This supports assistant responses, auxiliary communications, model-reported problems, and driver-defined invocation events. The session converts those messages into durable events, and the append boundary owns durable envelope construction. Stored driver envelopes remain opaque when their decoder is unavailable. Stream polling supplies demand and natural backpressure at this boundary. The session records `TurnCompleted` after the stream ends; stream exhaustion without an assistant response or problem is incomplete execution, not success.
@@ -848,13 +861,14 @@ Contract failures are explicit both while establishing the invocation and while 
 ```rust
 BoxFuture<'invoke, Result<ModelOutputStream, ModelDriverError>>
 
-BoxStream<'static, Result<DriverConversationMessage, ModelDriverError>>
+BoxStream<'static, Result<ModelDriverOutput, ModelDriverError>>
 ```
 
 The shared contract error model is:
 
 ```rust
 enum ModelDriverError {
+    UnassociatedUserMessage,
     UnexpectedUserRequest { command_id: ConversationCommandId },
     IncompleteTurn,
 }
