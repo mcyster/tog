@@ -1,6 +1,6 @@
 # Separate Portable Conversation Meaning from Model Data
 
-> Superseded by [Record Commands And Turn Lifecycle](../notes/2026-09-05-record-commands-and-turn-lifecycle.md) and the current conversation record implementation. This file remains historical context for the model-data separation.
+> Superseded by [Record Commands And Turn Lifecycle](../notes/2026-09-05-record-commands-and-turn-lifecycle.md), [Drivers Emit Restricted Conversation Messages](2026-09-12-drivers-emit-restricted-conversation-messages.md), and the current conversation record implementation. This file remains historical context for the model-data separation.
 
 ## Why
 

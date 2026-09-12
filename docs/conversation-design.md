@@ -169,8 +169,9 @@ Fact record
 ```
 
 Commands remain in the ordered log for input visibility and future replay. The
-model-facing projection excludes them. `TurnCompleted` is an explicit fact and
-does not need to be inferred from an assistant response or a problem.
+model-facing projection excludes them. `TurnCompleted` is an explicit fact
+recorded by the session after the driver stream ends, using the session's
+completion policy rather than a driver lifecycle event.
 
 Do not force every command into:
 
@@ -193,15 +194,17 @@ impl ConversationSession {
     async fn invoke(
         &self,
         report_progress: impl FnMut(ConversationSessionProgress) -> Result<(), _>,
-    ) -> Result<(), _>;
+    ) -> Result<TurnOutcome, _>;
 }
 ```
 
 `ModelDriver` receives a `TurnInput` constructed from the immutable conversation
 and turn identity. `TurnInput` derives the pending user requests from that same
-snapshot. Its output stream returns
-`DriverConversationEvent`, which has explicit command and fact branches and
-cannot return `ConversationRequest` values.
+snapshot. Its output stream returns `DriverConversationMessage` values: accepted
+user content, assistant responses, communications, problems, and driver-defined
+invocation events. It cannot return session-owned requests or turn lifecycle
+facts. The session converts those messages into the persisted event vocabulary
+and records `TurnCompleted` from its completion policy.
 
 ---
 
@@ -414,16 +417,16 @@ Assistant / Communication / Problem
 TurnCompleted
 ```
 
-An assistant response does not complete a turn by itself. A problem may be
-recoverable, so it does not necessarily complete a turn either. `TurnCompleted`
-records the terminal outcome after orchestration has finished or given up.
+An assistant response and a problem are meaningful output, but the driver does
+not decide the turn's terminal state. `TurnCompleted` records that outcome once
+the driver stream ends and the session applies its completion policy: an
+assistant response ends a successful turn, while any problem fails the turn.
+Output already persisted remains valid when a later problem fails the turn.
 
 The driver invocation event has a stable `ModelInvocationId`. Every model fact
 produced by that invocation references the identifier. A retry may use another
-invocation identifier while remaining part of the same turn. A recoverable
-problem does not automatically fail the turn; only the driver's explicit
-`TurnCompleted` outcome does that. Stream exhaustion without completion means
-incomplete execution.
+invocation identifier while remaining part of the same turn. Stream exhaustion
+without an assistant response or problem is incomplete execution.
 
 ---
 
@@ -572,7 +575,7 @@ Cross-driver replay must continue to work from portable fields when model data i
 
 `ConversationProblem::Issue` means the driver understood a meaningful limitation, decision, or unsuccessful model outcome. OpenAI refusals and recognized context-limit responses are model issues. A context-limit issue may arrive through an HTTP error response before an SSE stream exists; the driver represents it as a problem event on its semantic stream rather than a control-flow error. There is no `Other` issue kind: a newly understood semantic problem receives a specific shared kind, while unusable provider output and unclassified invocation failure retain their distinct invocation meanings.
 
-`ConversationProblem::Invocation` means the invocation machinery failed. `ModelDriverError` remains the detailed control-flow error. The turn service sanitizes it, appends the invocation problem, and returns the original error.
+`ConversationProblem::Invocation` means the invocation machinery failed. The driver sanitizes provider failures into that problem on its message stream. `ModelDriverError` remains the detailed control-flow error for shared-contract violations.
 
 A `Problem` is a top-level conversation event. It may reference an invocation
 and carry event-specific `ModelData`, but does not repeat invocation provenance.
@@ -704,7 +707,7 @@ use futures_util::future::BoxFuture;
 use futures_util::stream::BoxStream;
 
 type ModelOutputStream =
-    BoxStream<'static, Result<ConversationEvent, ModelDriverError>>;
+    BoxStream<'static, Result<DriverConversationMessage, ModelDriverError>>;
 
 struct TurnInput<'conversation> {
     conversation: &'conversation Conversation,
@@ -716,6 +719,15 @@ impl<'conversation> TurnInput<'conversation> {
     fn conversation(&self) -> &'conversation Conversation;
     fn turn_id(&self) -> ConversationTurnId;
     fn pending_user_requests(&self) -> &[UserMessageRequest];
+}
+
+enum DriverConversationMessage {
+    User { ... },
+    AssistantResponse { ... },
+    Communication { ... },
+    Problem { ... },
+    Command(Box<dyn ConversationEventExtension>),
+    Extension(Box<dyn ConversationEventExtension>),
 }
 
 trait ConversationEventExtension: Send {
@@ -747,20 +759,17 @@ trait ModelDriver: DriverEventReader {
 }
 
 enum ModelDriverError {
-    WrongTurnIdentity { expected, actual },
-    MissingTurnIdentity,
-    DisallowedEventKind { event_type: String },
-    OutputAfterCompletion { event_type: String },
+    UnexpectedUserRequest { command_id: ConversationCommandId },
     IncompleteTurn,
 }
 ```
 
-This is conceptually `Future<Stream<ConversationEvent>>`, or `Mono<Flux<ConversationEvent>>` in Reactor terminology. The caller supplies only the immutable conversation and turn identity. The driver creates invocation identities, driver events, and invocation-specific data. Shared semantic events remain concrete and portable. Every output is a conversation event and is appended through the shared record boundary.
+This is conceptually `Future<Stream<DriverConversationMessage>>`, or `Mono<Flux<DriverConversationMessage>>` in Reactor terminology. The caller supplies only the immutable conversation and turn identity. The driver creates invocation identities, driver events, and invocation-specific data. Shared messages remain concrete and portable. Every output is converted into a durable event and persisted through the shared record boundary.
 
 `ModelDriverError` describes only failures of this shared contract. Provider
-failures that the driver can describe are emitted as portable `Problem` events;
-terminal provider failures are followed by the driver's explicit
-`TurnCompleted { outcome: failed }`.
+failures that the driver can describe are emitted as portable `Problem` messages.
+The session records the turn outcome after the stream ends; drivers do not emit
+turn lifecycle facts.
 
 The important Phase 1 properties are:
 
@@ -768,9 +777,9 @@ The important Phase 1 properties are:
 - input is a complete immutable conversation reconstructed from conversation events
 - the driver owns and exposes its stable provider/model source
 - invocation is asynchronous and stream-first
-- the stream yields driver-defined records, portable semantic events, and an explicit `TurnCompleted`
+- the stream yields only permitted conversation messages: accepted user content, assistant responses, communications, problems, and driver-defined events
 - the consumer controls demand by polling for the next event
-- the caller owns the outer model/tool loop and turn request
+- the caller owns the outer model/tool loop, the turn request, and the turn lifecycle
 - the driver owns invocation identities and invocation-specific records
 - expected failures are strongly typed
 - provider SDK types do not cross the boundary
@@ -781,12 +790,12 @@ A caller that wants batch behavior can collect the stream. No separate batch int
 
 ## 23. Returned event persistence
 
-User input and `TurnRequested` are appended before invocation. The driver maps provider-native activity to driver-defined records and semantic event kinds, including driver-created `ModelInvocationId` values and event-specific `ModelData` where applicable. The append boundary assigns canonical envelope metadata. The caller persists and may display each returned semantic event immediately while the invocation remains active.
+User input and `TurnRequested` are appended before invocation. The driver maps provider-native activity to driver-defined records and permitted conversation messages, including driver-created `ModelInvocationId` values and event-specific `ModelData` where applicable. The session converts those messages into the persisted event vocabulary. The append boundary assigns canonical envelope metadata. The caller persists and may display each returned semantic event immediately while the invocation remains active.
 
 Provider protocol events and raw text deltas remain internal to the driver. They
 are not conversation events and are not persisted merely because they arrived.
-The driver aggregates those deltas and yields shared semantic output such as an
-`AssistantResponse`, `ModelCommunication`, or `ModelIssue`, alongside any
+The driver aggregates those deltas and yields permitted conversation messages
+such as an `AssistantResponse`, `ModelCommunication`, or `Problem`, alongside any
 driver-defined conversation events.
 
 Conceptually:
@@ -797,8 +806,7 @@ User already durable
 await ModelDriver invocation
     ↓
 setup failure before stream
-    → append sanitized Problem(problem=Invocation(...))
-    → return detailed ModelDriverError
+    → driver yields sanitized Problem(problem=Invocation(...)) on its stream
 
 or
 
@@ -806,14 +814,15 @@ await ModelDriver invocation
     ↓
 poll stream
     ↓
-completed ConversationEvent
-    → display and append the returned semantic event
+permitted conversation message
+    → display and persist the converted event
     ↓
 later stream failure
     → completed events remain durable
     → incomplete provider deltas are discarded
-    → append sanitized Problem(problem=Invocation(...))
-    → return detailed ModelDriverError
+    → driver yields sanitized Problem(problem=Invocation(...)) on its stream
+    ↓
+session records TurnCompleted with the resulting outcome
 ```
 
 This supersedes the previous batch contract, which returned all model events only after the complete invocation succeeded and discarded every model event after a late provider failure. Incremental append does not imply rollback: already appended semantic facts remain durable.
@@ -822,41 +831,36 @@ This supersedes the previous batch contract, which returned all model events onl
 
 ## 24. ModelDriver stream
 
-An established invocation yields typed driver records and semantic facts incrementally:
+An established invocation yields permitted conversation messages incrementally:
 
 ```rust
-Result<ConversationEvent, ModelDriverError>
+Result<DriverConversationMessage, ModelDriverError>
 ```
 
-This supports assistant responses, auxiliary communications, model-reported problems, driver-defined invocation events, and explicit turn completion. The append boundary owns durable envelope construction. Stored driver envelopes remain opaque when their decoder is unavailable. Stream polling supplies demand and natural backpressure at this boundary. Stream exhaustion without `TurnCompleted` is incomplete execution, not success.
+This supports assistant responses, auxiliary communications, model-reported problems, and driver-defined invocation events. The session converts those messages into durable events, and the append boundary owns durable envelope construction. Stored driver envelopes remain opaque when their decoder is unavailable. Stream polling supplies demand and natural backpressure at this boundary. The session records `TurnCompleted` after the stream ends; stream exhaustion without an assistant response or problem is incomplete execution, not success.
 
 ---
 
 ## 25. ModelDriver errors
 
-Expected model failures are explicit both while establishing the invocation and while consuming it:
+Contract failures are explicit both while establishing the invocation and while consuming it:
 
 ```rust
 BoxFuture<'invoke, Result<ModelOutputStream, ModelDriverError>>
 
-BoxStream<'static, Result<ConversationEventKind, ModelDriverError>>
+BoxStream<'static, Result<DriverConversationMessage, ModelDriverError>>
 ```
 
-A small error model might begin with:
+The shared contract error model is:
 
 ```rust
 enum ModelDriverError {
-    Authentication(...),
-    RateLimited(...),
-    Transport(...),
-    InvalidRequest(...),
-    InvalidResponse(...),
-    StreamInterrupted(...),
-    Provider(...),
+    UnexpectedUserRequest { command_id: ConversationCommandId },
+    IncompleteTurn,
 }
 ```
 
-The exact taxonomy should remain small and implementation-driven.
+The exact taxonomy should remain small and implementation-driven. Provider authentication, rate limiting, transport, invalid-request, invalid-response, stream-interruption, and provider failures are represented as sanitized `ConversationProblem::Invocation` messages on the driver stream rather than contract errors.
 
 These errors are returned as values. ModelDriver does not decide whether they are written to standard error, sent to a remote logger, retried, or otherwise reported.
 
@@ -864,7 +868,7 @@ Rust does not use Java-style checked exceptions or `throws` declarations.
 
 Expected operational failures are represented through `Result<T, E>`.
 
-Unexpected programming failures may panic, but transport, provider, validation, and similar model failures should normally be represented by `ModelDriverError`. The turn service converts those errors into sanitized durable invocation problems before returning them. Conversation persistence errors belong to the caller.
+Unexpected programming failures may panic, but contract and validation failures should normally be represented by `ModelDriverError`; provider failures that the driver can describe stay on the message stream. The session records the turn outcome and returns it. Conversation persistence errors belong to the caller.
 
 ## Async ecosystem
 

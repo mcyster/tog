@@ -56,14 +56,15 @@ User
 The user fact is the portable conversation content. It may exist before a turn
 is requested, allowing messages to accumulate independently from agent work.
 
-`TurnRequested` starts a turn, and `TurnCompleted` records its terminal outcome.
-An assistant response is not a completion marker, and a problem does not always
-complete a turn because orchestration may recover or retry.
+`TurnRequested` starts a turn, and the session records `TurnCompleted` with its
+terminal outcome. An assistant response ends a successful turn; a problem fails
+the turn even when earlier output was already produced.
 
 `ConversationSession` is the caller-facing interface. `add_user_request` records
 and queues user input. `invoke` records a turn request, supplies the existing
-conversation and pending user requests to the driver, and persists driver
-output as it arrives. `Conversation` remains immutable history.
+conversation and pending user requests to the driver, persists permitted driver
+output as it arrives, and records the turn outcome after the driver stream ends.
+`Conversation` remains immutable history.
 
 The driver records its own invocation event, including a stable
 `ModelInvocationId`, as an opaque driver event. Returned model facts reference
@@ -88,24 +89,28 @@ representation.
 
 The configured `ModelDriver` receives a typed `TurnInput` containing an immutable
 `Conversation`, pending user-message requests derived from that snapshot, and a
-`ConversationTurnId`. It yields shared semantic events, driver-defined events,
-and an explicit `TurnCompleted` event. It creates invocation identities and
-invocation-specific data. It does not allocate durable record positions,
-timestamps, or record identifiers. The event store assigns that envelope
-metadata at the shared append boundary.
+`ConversationTurnId`. It emits only permitted conversation messages: accepted
+user content, assistant responses, communications, problems, and driver-defined
+invocation or extension events. It creates invocation identities and
+invocation-specific data. It cannot emit session-owned user requests or turn
+lifecycle facts, and it does not allocate durable record positions, timestamps,
+or record identifiers. The event store assigns that envelope metadata at the
+shared append boundary.
 
 ```text
 immutable Conversation
     -> ModelDriver invocation
-    -> driver events, semantic facts, and TurnCompleted
+    -> permitted conversation messages
+    -> session appends facts and records the turn outcome
     -> append boundary assigns record metadata
     -> log and presentation projections
 ```
 
 Provider-specific protocol events and raw deltas remain private to the driver.
 The caller owns command recording, persistence, retry policy, and the outer
-orchestration loop. The driver owns invocation identities and reports turn
-completion explicitly.
+orchestration loop. The session owns the turn lifecycle and records
+`TurnCompleted` from its own completion policy. The driver owns invocation
+identities and reports problems on its stream.
 
 The [Conversation Model](conversation.md) summarizes the stable vocabulary. The
 [Conversation and ModelDriver Architecture](conversation-design.md) contains

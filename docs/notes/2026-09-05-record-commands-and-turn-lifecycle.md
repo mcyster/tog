@@ -34,14 +34,14 @@ accepted contribution to portable conversation history. User content can exist
 before a turn is requested, so it does not need to belong to a turn.
 
 `TurnRequested` starts agent work. The driver creates a driver-defined invocation
-event and its `ModelInvocationId`. Assistant, communication, problem, and future
-model-produced tool facts reference that identifier.
+event and its `ModelInvocationId`. User acceptance, assistant, communication,
+problem, and future model-produced tool facts reference that identifier.
 
-`TurnCompleted` is an explicit terminal fact. An assistant response and turn
-completion are independent: one invocation may produce multiple events, and a
-turn may finish with a problem without producing an assistant response. A
-problem does not necessarily complete a turn because orchestration may recover
-or retry.
+`TurnCompleted` is an explicit terminal fact recorded by the session. The driver
+does not emit lifecycle facts. The session applies its completion policy after
+the driver stream ends: an assistant response ends a successful turn, while any
+problem fails the turn even when earlier output was produced. Stream exhaustion
+without an assistant response or problem is incomplete execution.
 
 ## Replay And Ordering
 
