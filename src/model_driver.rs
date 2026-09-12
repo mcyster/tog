@@ -5,12 +5,38 @@ use futures_util::future::BoxFuture;
 use futures_util::stream::BoxStream;
 
 use crate::conversation::{
-    Conversation, ConversationCommandId, ConversationTurnId, DriverConversationMessage,
-    DriverEventReader, ModelSource, UserMessageRequest,
+    AssistantResponse, Conversation, ConversationCommandId, ConversationEventExtension,
+    ConversationProblem, ConversationTurnId, DriverEventReader, ModelCommunication, ModelData,
+    ModelInvocationId, ModelSource, UserContent, UserMessageRequest,
 };
 
 pub(crate) type ModelOutputStream =
     BoxStream<'static, Result<DriverConversationMessage, ModelDriverError>>;
+
+pub(crate) enum DriverConversationMessage {
+    User {
+        command_id: ConversationCommandId,
+        content: Vec<UserContent>,
+    },
+    AssistantResponse {
+        invocation_id: ModelInvocationId,
+        data: Option<ModelData>,
+        response: AssistantResponse,
+    },
+    Communication {
+        invocation_id: ModelInvocationId,
+        data: Option<ModelData>,
+        communication: ModelCommunication,
+    },
+    Problem {
+        invocation_id: Option<ModelInvocationId>,
+        data: Option<ModelData>,
+        problem: ConversationProblem,
+    },
+    Command(Box<dyn ConversationEventExtension>),
+    #[allow(dead_code)]
+    Extension(Box<dyn ConversationEventExtension>),
+}
 
 pub(crate) struct TurnInput<'conversation> {
     conversation: &'conversation Conversation,

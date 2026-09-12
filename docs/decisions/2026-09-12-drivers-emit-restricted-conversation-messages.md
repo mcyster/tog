@@ -15,8 +15,9 @@ type system did not express the ownership boundary described in
 
 ## Decision
 
-`ModelDriver::invoke` returns a stream of `DriverConversationMessage` values
-containing only permitted variants:
+The model-driver API defines `DriverConversationMessage`, referencing only
+permitted conversation types. `ModelDriver::invoke` returns a stream of those
+values containing only permitted variants:
 
 ```rust
 enum DriverConversationMessage {

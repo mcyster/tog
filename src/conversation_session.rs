@@ -6,10 +6,9 @@ use futures_util::StreamExt;
 use crate::conversation::{
     ConversationCommandId, ConversationEvent, ConversationFact, ConversationId,
     ConversationProblem, ConversationRequest, ConversationTurnId, DriverConversationEvent,
-    DriverConversationFact, DriverConversationMessage, TurnOutcome, UserContent,
-    UserMessageRequest, UserPrompt,
+    DriverConversationFact, TurnOutcome, UserContent, UserMessageRequest, UserPrompt,
 };
-use crate::model_driver::{ModelDriver, ModelDriverError, TurnInput};
+use crate::model_driver::{DriverConversationMessage, ModelDriver, ModelDriverError, TurnInput};
 use crate::persistence::EventStore;
 
 pub(crate) type ConversationSessionResult<T> = Result<T, Box<dyn Error>>;
@@ -245,11 +244,13 @@ mod tests {
     use super::{ConversationSession, ConversationSessionProgress};
     use crate::conversation::{
         AssistantResponse, ConversationEventExtension, ConversationEventKind, ConversationFact,
-        ConversationProblem, DriverConversationMessage, DriverEventEnvelope, DriverEventReadError,
-        DriverEventReader, InvocationError, ModelId, ModelInvocationId, ModelSource, ProviderId,
+        ConversationProblem, DriverEventEnvelope, DriverEventReadError, DriverEventReader,
+        InvocationError, ModelId, ModelInvocationId, ModelSource, ProviderId,
         StoredConversationEventKind, TurnOutcome, UserPrompt,
     };
-    use crate::model_driver::{ModelDriver, ModelDriverError, ModelOutputStream, TurnInput};
+    use crate::model_driver::{
+        DriverConversationMessage, ModelDriver, ModelDriverError, ModelOutputStream, TurnInput,
+    };
     use crate::persistence::EventStore;
 
     enum RecordingResponse {

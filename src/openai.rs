@@ -13,13 +13,15 @@ use serde_json::{Map, Value, json};
 use crate::conversation::{
     AssistantResponse, Conversation, ConversationEventClass, ConversationEventError,
     ConversationEventExtension, ConversationEventKind, ConversationFact, ConversationProblem,
-    ConversationTurnId, DriverConversationMessage, DriverEventEnvelope, DriverEventReadError,
-    DriverEventReader, InvalidAssistantResponse, InvalidConversationProblem,
-    InvalidModelCommunication, InvocationError, ModelCommunication, ModelData, ModelEvent,
-    ModelEventImportance, ModelId, ModelInvocationId, ModelIssue, ModelSource, ProviderId,
-    StoredConversationEventKind, UserContent, UserMessageRequest,
+    ConversationTurnId, DriverEventEnvelope, DriverEventReadError, DriverEventReader,
+    InvalidAssistantResponse, InvalidConversationProblem, InvalidModelCommunication,
+    InvocationError, ModelCommunication, ModelData, ModelEvent, ModelEventImportance, ModelId,
+    ModelInvocationId, ModelIssue, ModelSource, ProviderId, StoredConversationEventKind,
+    UserContent, UserMessageRequest,
 };
-use crate::model_driver::{ModelDriver, ModelDriverError, ModelOutputStream, TurnInput};
+use crate::model_driver::{
+    DriverConversationMessage, ModelDriver, ModelDriverError, ModelOutputStream, TurnInput,
+};
 
 type ResponseByteStream = BoxStream<'static, Result<Vec<u8>, OpenAiError>>;
 type ProviderOutputStream = BoxStream<'static, Result<ModelDriverEvent, OpenAiError>>;
@@ -1291,11 +1293,11 @@ mod tests {
     use crate::conversation::{
         AssistantResponse, Conversation, ConversationEventId, ConversationEventKind,
         ConversationEventRecord, ConversationFact, ConversationId, ConversationProblem,
-        ConversationTurnId, DriverConversationMessage, ModelCommunication, ModelData, ModelEvent,
-        ModelEventImportance, ModelId, ModelInvocationId, ModelIssue, ModelSource, ProviderId,
+        ConversationTurnId, ModelCommunication, ModelData, ModelEvent, ModelEventImportance,
+        ModelId, ModelInvocationId, ModelIssue, ModelSource, ProviderId,
         StoredConversationEventKind, UserContent,
     };
-    use crate::model_driver::{ModelDriver, TurnInput};
+    use crate::model_driver::{DriverConversationMessage, ModelDriver, TurnInput};
 
     use super::{
         ModelDriverEvent, OpenAiError, OpenAiModelDriver, ResponseByteStream,
