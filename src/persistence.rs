@@ -155,6 +155,7 @@ impl EventStore {
         let mut events =
             read_json_directory(&self.conversation_directory(conversation_id).join("events"))?;
         events.sort_by_key(|event: &ConversationEventRecord| event.position);
+        ensure_contiguous_positions(&events)?;
         Ok(events)
     }
 
@@ -177,6 +178,21 @@ fn next_position(previous_position: Option<u64>) -> io::Result<u64> {
             .ok_or_else(|| io::Error::other("event position overflow")),
         None => Ok(0),
     }
+}
+
+fn ensure_contiguous_positions(events: &[ConversationEventRecord]) -> io::Result<()> {
+    for (expected_position, event) in (0_u64..).zip(events) {
+        if event.position != expected_position {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "expected conversation event position {expected_position}, found {}",
+                    event.position
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn event_path(directory: &Path, position: u64, identifier: &str) -> PathBuf {
@@ -327,5 +343,53 @@ mod tests {
             .load_conversation(conversation_id)
             .expect("the conversation should load");
         assert_eq!(conversation.events()[0], model_event);
+    }
+
+    #[test]
+    fn event_store_rejects_a_log_with_a_missing_middle_record() {
+        let store = temporary_store();
+        let conversation_id = ConversationId::new();
+        for content in ["first", "second", "third"] {
+            store
+                .append_new_conversation_event(
+                    conversation_id,
+                    ConversationEvent::Driver(DriverConversationEvent::Fact(
+                        DriverConversationFact::Shared(ConversationFact::User {
+                            caused_by: Some(ConversationCommandId::new()),
+                            content: vec![UserContent::Text(content.to_owned())],
+                        }),
+                    )),
+                )
+                .expect("the event should be persisted");
+        }
+        let events_directory = store.conversation_directory(conversation_id).join("events");
+        let mut event_paths = std::fs::read_dir(&events_directory)
+            .expect("the persisted events should be readable")
+            .map(|entry| entry.expect("the event entry should be readable").path())
+            .collect::<Vec<_>>();
+        event_paths.sort();
+        std::fs::remove_file(&event_paths[1]).expect("the middle event should be removed");
+
+        let error = store
+            .load_conversation(conversation_id)
+            .expect_err("the incomplete log should be rejected");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(
+            error.to_string(),
+            "expected conversation event position 1, found 2"
+        );
+        assert!(
+            store
+                .append_new_conversation_event(
+                    conversation_id,
+                    ConversationEvent::Driver(DriverConversationEvent::Fact(
+                        DriverConversationFact::Shared(ConversationFact::User {
+                            caused_by: Some(ConversationCommandId::new()),
+                            content: vec![UserContent::Text("fourth".to_owned())],
+                        }),
+                    )),
+                )
+                .is_err()
+        );
     }
 }
