@@ -5,34 +5,14 @@ use futures_util::future::BoxFuture;
 use futures_util::stream::BoxStream;
 
 use crate::conversation::{
-    AssistantResponse, Conversation, ConversationCommandId, ConversationEventExtension,
-    ConversationProblem, ConversationTurnId, DriverEventReader, ModelCommunication, ModelData,
-    ModelInvocationId, ModelSource, UserContent, UserMessageRequest,
+    Conversation, ConversationCommandId, ConversationEventExtension, ConversationMessage,
+    ConversationTurnId, DriverEventReader, ModelSource, UserMessageRequest,
 };
 
-pub(crate) type ModelOutputStream =
-    BoxStream<'static, Result<DriverConversationMessage, ModelDriverError>>;
+pub(crate) type ModelOutputStream = BoxStream<'static, Result<ModelDriverOutput, ModelDriverError>>;
 
-pub(crate) enum DriverConversationMessage {
-    User {
-        command_id: ConversationCommandId,
-        content: Vec<UserContent>,
-    },
-    AssistantResponse {
-        invocation_id: ModelInvocationId,
-        data: Option<ModelData>,
-        response: AssistantResponse,
-    },
-    Communication {
-        invocation_id: ModelInvocationId,
-        data: Option<ModelData>,
-        communication: ModelCommunication,
-    },
-    Problem {
-        invocation_id: Option<ModelInvocationId>,
-        data: Option<ModelData>,
-        problem: ConversationProblem,
-    },
+pub(crate) enum ModelDriverOutput {
+    Message(ConversationMessage),
     Command(Box<dyn ConversationEventExtension>),
     #[allow(dead_code)]
     Extension(Box<dyn ConversationEventExtension>),
@@ -80,6 +60,7 @@ pub(crate) trait ModelDriver: DriverEventReader {
 
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum ModelDriverError {
+    UnassociatedUserMessage,
     UnexpectedUserRequest { command_id: ConversationCommandId },
     IncompleteTurn,
 }
@@ -87,6 +68,10 @@ pub(crate) enum ModelDriverError {
 impl Display for ModelDriverError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::UnassociatedUserMessage => write!(
+                formatter,
+                "model driver emitted a user message without a request association"
+            ),
             Self::UnexpectedUserRequest { command_id } => write!(
                 formatter,
                 "model driver accepted unexpected user request {command_id}"

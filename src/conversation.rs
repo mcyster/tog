@@ -13,8 +13,8 @@ use std::str::FromStr;
 pub(crate) use event::{
     AssistantResponse, ConversationCommand, ConversationEvent, ConversationEventClass,
     ConversationEventError, ConversationEventExtension, ConversationEventKind,
-    ConversationEventRecord, ConversationFact, ConversationRequest, DriverConversationEvent,
-    DriverConversationFact, DriverEventEnvelope, DriverEventReadError, DriverEventReader,
+    ConversationEventRecord, ConversationFact, ConversationLifecycle, ConversationMessage,
+    ConversationRequest, DriverEventEnvelope, DriverEventReadError, DriverEventReader,
     InvalidAssistantResponse, InvalidModelCommunication, ModelCommunication, ModelEvent,
     ModelEventImportance, StoredConversationEventKind, TurnOutcome, UserContent,
     UserMessageRequest,
@@ -98,8 +98,12 @@ impl Conversation {
                 ConversationEventKind::Command(ConversationCommand::UserMessageRequested(
                     request,
                 )) => requests.push(request.clone()),
-                ConversationEventKind::Fact(ConversationFact::User {
-                    caused_by: Some(command_id),
+                ConversationEventKind::Fact(ConversationFact::Message {
+                    message:
+                        ConversationMessage::User {
+                            caused_by: Some(command_id),
+                            ..
+                        },
                     ..
                 }) => {
                     accepted_request_ids.insert(*command_id);
@@ -202,9 +206,9 @@ mod tests {
 
     use super::{
         Conversation, ConversationCommandId, ConversationEventId, ConversationEventKind,
-        ConversationEventRecord, ConversationFact, ConversationId, ConversationTurnId,
-        InvalidConversation, InvalidUserPrompt, StoredConversationEventKind, UserContent,
-        UserPrompt,
+        ConversationEventRecord, ConversationFact, ConversationId, ConversationMessage,
+        ConversationTurnId, InvalidConversation, InvalidUserPrompt, StoredConversationEventKind,
+        UserContent, UserPrompt,
     };
 
     fn user_event(conversation_id: ConversationId, position: u64) -> ConversationEventRecord {
@@ -215,9 +219,12 @@ mod tests {
             timestamp: OffsetDateTime::UNIX_EPOCH,
             schema_version: 7,
             kind: StoredConversationEventKind::Shared(ConversationEventKind::Fact(
-                ConversationFact::User {
-                    caused_by: Some(ConversationCommandId::new()),
-                    content: vec![UserContent::Text(format!("event {position}"))],
+                ConversationFact::Message {
+                    message: ConversationMessage::User {
+                        caused_by: Some(ConversationCommandId::new()),
+                        content: vec![UserContent::Text(format!("event {position}"))],
+                    },
+                    turn_id: None,
                 },
             )),
         }
@@ -454,7 +461,10 @@ mod tests {
         assert!(matches!(
             conversation.events()[0].kind,
             StoredConversationEventKind::Shared(ConversationEventKind::Fact(
-                ConversationFact::Problem { .. }
+                ConversationFact::Message {
+                    message: ConversationMessage::Problem { .. },
+                    ..
+                }
             ))
         ));
     }

@@ -4,8 +4,8 @@ use std::io::{self, Write};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use crate::conversation::{
-    ConversationFact, ConversationId, ConversationProblem, ModelEventImportance, ModelId,
-    TurnOutcome,
+    ConversationFact, ConversationId, ConversationMessage, ConversationProblem,
+    ModelEventImportance, ModelId, TurnOutcome,
 };
 use crate::conversation_session::{
     ConversationSession, ConversationSessionProgress, ConversationSessionResult,
@@ -78,12 +78,14 @@ impl CommandLine {
 
 fn render_model_event(event: &ConversationFact, verbosity: Verbosity) -> io::Result<()> {
     let (message, importance, prefix) = match event {
-        ConversationFact::Assistant { response, .. } => {
-            (response.message(), ModelEventImportance::Important, "")
-        }
-        ConversationFact::Communication { communication, .. } => {
-            (communication.message(), communication.importance(), "### ")
-        }
+        ConversationFact::Message {
+            message: ConversationMessage::AssistantResponse { response, .. },
+            ..
+        } => (response.message(), ModelEventImportance::Important, ""),
+        ConversationFact::Message {
+            message: ConversationMessage::Communication { communication, .. },
+            ..
+        } => (communication.message(), communication.importance(), "### "),
         _ => return Ok(()),
     };
     if !verbosity.includes(importance) {

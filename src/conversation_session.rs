@@ -5,10 +5,10 @@ use futures_util::StreamExt;
 
 use crate::conversation::{
     ConversationCommandId, ConversationEvent, ConversationFact, ConversationId,
-    ConversationProblem, ConversationRequest, ConversationTurnId, DriverConversationEvent,
-    DriverConversationFact, TurnOutcome, UserContent, UserMessageRequest, UserPrompt,
+    ConversationLifecycle, ConversationMessage, ConversationProblem, ConversationRequest,
+    ConversationTurnId, TurnOutcome, UserContent, UserMessageRequest, UserPrompt,
 };
-use crate::model_driver::{DriverConversationMessage, ModelDriver, ModelDriverError, TurnInput};
+use crate::model_driver::{ModelDriver, ModelDriverError, ModelDriverOutput, TurnInput};
 use crate::persistence::EventStore;
 
 pub(crate) type ConversationSessionResult<T> = Result<T, Box<dyn Error>>;
@@ -102,10 +102,10 @@ impl ConversationSession {
         while let Some(output) = output_stream.next().await {
             let output = output?;
             match output {
-                DriverConversationMessage::User {
-                    command_id,
-                    content,
-                } => {
+                ModelDriverOutput::Message(ConversationMessage::User { caused_by, content }) => {
+                    let Some(command_id) = caused_by else {
+                        return Err(Box::new(ModelDriverError::UnassociatedUserMessage));
+                    };
                     if !pending_request_ids.contains(&command_id)
                         || !accepted_request_ids.insert(command_id)
                     {
@@ -113,70 +113,71 @@ impl ConversationSession {
                             command_id,
                         }));
                     }
-                    self.append_shared_fact(ConversationFact::User {
-                        caused_by: Some(command_id),
-                        content,
+                    self.append_shared_fact(ConversationFact::Message {
+                        message: ConversationMessage::User {
+                            caused_by: Some(command_id),
+                            content,
+                        },
+                        turn_id: None,
                     })?;
                 }
-                DriverConversationMessage::AssistantResponse {
+                ModelDriverOutput::Message(ConversationMessage::AssistantResponse {
                     invocation_id,
                     data,
                     response,
-                } => {
+                }) => {
                     assistant_responded = true;
                     self.report_shared_fact(
-                        ConversationFact::Assistant {
-                            turn_id,
-                            invocation_id,
-                            data,
-                            response,
+                        ConversationFact::Message {
+                            message: ConversationMessage::AssistantResponse {
+                                invocation_id,
+                                data,
+                                response,
+                            },
+                            turn_id: Some(turn_id),
                         },
                         &mut report_progress,
                     )?;
                 }
-                DriverConversationMessage::Communication {
+                ModelDriverOutput::Message(ConversationMessage::Communication {
                     invocation_id,
                     data,
                     communication,
-                } => {
+                }) => {
                     self.report_shared_fact(
-                        ConversationFact::Communication {
-                            turn_id,
-                            invocation_id,
-                            data,
-                            communication,
+                        ConversationFact::Message {
+                            message: ConversationMessage::Communication {
+                                invocation_id,
+                                data,
+                                communication,
+                            },
+                            turn_id: Some(turn_id),
                         },
                         &mut report_progress,
                     )?;
                 }
-                DriverConversationMessage::Problem {
+                ModelDriverOutput::Message(ConversationMessage::Problem {
                     invocation_id,
                     data,
                     problem,
-                } => {
+                }) => {
                     turn_failed = true;
                     self.report_shared_fact(
-                        ConversationFact::Problem {
+                        ConversationFact::Message {
+                            message: ConversationMessage::Problem {
+                                invocation_id,
+                                data,
+                                problem,
+                            },
                             turn_id: Some(turn_id),
-                            invocation_id,
-                            data,
-                            problem,
                         },
                         &mut report_progress,
                     )?;
                 }
-                DriverConversationMessage::Command(event) => {
+                ModelDriverOutput::Command(event) | ModelDriverOutput::Extension(event) => {
                     self.event_store.append_new_conversation_event(
                         self.conversation_id,
-                        ConversationEvent::Driver(DriverConversationEvent::Command(event)),
-                    )?;
-                }
-                DriverConversationMessage::Extension(event) => {
-                    self.event_store.append_new_conversation_event(
-                        self.conversation_id,
-                        ConversationEvent::Driver(DriverConversationEvent::Fact(
-                            DriverConversationFact::Extension(event),
-                        )),
+                        ConversationEvent::Extension(event),
                     )?;
                 }
             }
@@ -188,19 +189,15 @@ impl ConversationSession {
             (false, false) => return Err(Box::new(ModelDriverError::IncompleteTurn)),
         };
         self.report_shared_fact(
-            ConversationFact::TurnCompleted { turn_id, outcome },
+            ConversationFact::Lifecycle(ConversationLifecycle::TurnCompleted { turn_id, outcome }),
             &mut report_progress,
         )?;
         Ok(outcome)
     }
 
     fn append_shared_fact(&self, fact: ConversationFact) -> ConversationSessionResult<()> {
-        self.event_store.append_new_conversation_event(
-            self.conversation_id,
-            ConversationEvent::Driver(DriverConversationEvent::Fact(
-                DriverConversationFact::Shared(fact),
-            )),
-        )?;
+        self.event_store
+            .append_new_conversation_event(self.conversation_id, ConversationEvent::Fact(fact))?;
         Ok(())
     }
 
@@ -210,21 +207,33 @@ impl ConversationSession {
         report_progress: &mut impl FnMut(ConversationSessionProgress) -> ConversationSessionResult<()>,
     ) -> ConversationSessionResult<()> {
         match &fact {
-            ConversationFact::Assistant { .. } | ConversationFact::Communication { .. } => {
+            ConversationFact::Message {
+                message:
+                    ConversationMessage::AssistantResponse { .. }
+                    | ConversationMessage::Communication { .. },
+                ..
+            } => {
                 let progress = ConversationSessionProgress::EventCompleted {
                     event: fact.clone(),
                 };
                 self.append_shared_fact(fact)?;
                 report_progress(progress)?;
             }
-            ConversationFact::Problem { problem, .. } => {
+            ConversationFact::Message {
+                message: ConversationMessage::Problem { problem, .. },
+                ..
+            } => {
                 let progress = ConversationSessionProgress::ProblemCompleted {
                     problem: problem.clone(),
                 };
                 self.append_shared_fact(fact)?;
                 report_progress(progress)?;
             }
-            ConversationFact::User { .. } | ConversationFact::TurnCompleted { .. } => {
+            ConversationFact::Message {
+                message: ConversationMessage::User { .. },
+                ..
+            }
+            | ConversationFact::Lifecycle(_) => {
                 self.append_shared_fact(fact)?;
             }
         }
@@ -244,12 +253,12 @@ mod tests {
     use super::{ConversationSession, ConversationSessionProgress};
     use crate::conversation::{
         AssistantResponse, ConversationEventExtension, ConversationEventKind, ConversationFact,
-        ConversationProblem, DriverEventEnvelope, DriverEventReadError, DriverEventReader,
-        InvocationError, ModelId, ModelInvocationId, ModelSource, ProviderId,
-        StoredConversationEventKind, TurnOutcome, UserPrompt,
+        ConversationLifecycle, ConversationMessage, ConversationProblem, DriverEventEnvelope,
+        DriverEventReadError, DriverEventReader, InvocationError, ModelId, ModelInvocationId,
+        ModelSource, ProviderId, StoredConversationEventKind, TurnOutcome, UserPrompt,
     };
     use crate::model_driver::{
-        DriverConversationMessage, ModelDriver, ModelDriverError, ModelOutputStream, TurnInput,
+        ModelDriver, ModelDriverError, ModelDriverOutput, ModelOutputStream, TurnInput,
     };
     use crate::persistence::EventStore;
 
@@ -292,10 +301,10 @@ mod tests {
             let mut output = pending_requests
                 .into_iter()
                 .map(|request| {
-                    Ok(DriverConversationMessage::User {
-                        command_id: request.command_id,
+                    Ok(ModelDriverOutput::Message(ConversationMessage::User {
+                        caused_by: Some(request.command_id),
                         content: request.content,
-                    })
+                    }))
                 })
                 .collect::<Vec<_>>();
             match self.response {
@@ -311,24 +320,24 @@ mod tests {
         }
     }
 
-    fn assistant_response() -> DriverConversationMessage {
-        DriverConversationMessage::AssistantResponse {
+    fn assistant_response() -> ModelDriverOutput {
+        ModelDriverOutput::Message(ConversationMessage::AssistantResponse {
             invocation_id: ModelInvocationId::new(),
             data: None,
             response: AssistantResponse::new("Hello.".to_owned())
                 .expect("the assistant response should be valid"),
-        }
+        })
     }
 
-    fn problem_message() -> DriverConversationMessage {
-        DriverConversationMessage::Problem {
+    fn problem_message() -> ModelDriverOutput {
+        ModelDriverOutput::Message(ConversationMessage::Problem {
             invocation_id: Some(ModelInvocationId::new()),
             data: None,
             problem: ConversationProblem::Invocation(
                 InvocationError::try_provider_failure("the provider failed".to_owned())
                     .expect("the provider failure should be valid"),
             ),
-        }
+        })
     }
 
     fn source() -> ModelSource {
@@ -464,13 +473,22 @@ mod tests {
         assert!(matches!(
             facts.as_slice(),
             [
-                ConversationFact::User { .. },
-                ConversationFact::Assistant { .. },
-                ConversationFact::Problem { .. },
-                ConversationFact::TurnCompleted {
+                ConversationFact::Message {
+                    message: ConversationMessage::User { .. },
+                    ..
+                },
+                ConversationFact::Message {
+                    message: ConversationMessage::AssistantResponse { .. },
+                    ..
+                },
+                ConversationFact::Message {
+                    message: ConversationMessage::Problem { .. },
+                    ..
+                },
+                ConversationFact::Lifecycle(ConversationLifecycle::TurnCompleted {
                     outcome: TurnOutcome::Failed,
                     ..
-                }
+                })
             ]
         ));
     }

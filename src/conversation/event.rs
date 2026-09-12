@@ -19,7 +19,8 @@ use super::{
 
 pub(crate) enum ConversationEvent {
     Request(ConversationRequest),
-    Driver(DriverConversationEvent),
+    Fact(ConversationFact),
+    Extension(Box<dyn ConversationEventExtension>),
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -31,11 +32,11 @@ pub(crate) enum ConversationEventClass {
 
 impl ConversationEvent {
     #[allow(dead_code)]
-    #[allow(dead_code)]
     pub(crate) fn class(&self) -> ConversationEventClass {
         match self {
             Self::Request(request) => request.class(),
-            Self::Driver(event) => event.class(),
+            Self::Fact(_) => ConversationEventClass::Fact,
+            Self::Extension(event) => event.class(),
         }
     }
 }
@@ -76,26 +77,6 @@ pub(crate) struct UserMessageRequest {
     pub(crate) content: Vec<UserContent>,
 }
 
-pub(crate) enum DriverConversationEvent {
-    Command(Box<dyn ConversationEventExtension>),
-    Fact(DriverConversationFact),
-}
-
-#[allow(dead_code)]
-pub(crate) enum DriverConversationFact {
-    Shared(ConversationFact),
-    Extension(Box<dyn ConversationEventExtension>),
-}
-
-impl DriverConversationEvent {
-    pub(crate) fn class(&self) -> ConversationEventClass {
-        match self {
-            Self::Command(_) => ConversationEventClass::Command,
-            Self::Fact(_) => ConversationEventClass::Fact,
-        }
-    }
-}
-
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "class", content = "event", rename_all = "snake_case")]
 pub(crate) enum ConversationEventKind {
@@ -115,21 +96,20 @@ pub(crate) enum ConversationCommand {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub(crate) enum ConversationFact {
+pub(crate) enum ConversationMessage {
     User {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         caused_by: Option<ConversationCommandId>,
         content: Vec<UserContent>,
     },
-    Assistant {
-        turn_id: ConversationTurnId,
+    #[serde(rename = "assistant")]
+    AssistantResponse {
         invocation_id: ModelInvocationId,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         data: Option<ModelData>,
         response: AssistantResponse,
     },
     Communication {
-        turn_id: ConversationTurnId,
         invocation_id: ModelInvocationId,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         data: Option<ModelData>,
@@ -137,13 +117,67 @@ pub(crate) enum ConversationFact {
     },
     Problem {
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        turn_id: Option<ConversationTurnId>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         invocation_id: Option<ModelInvocationId>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         data: Option<ModelData>,
         problem: ConversationProblem,
     },
+}
+
+impl ConversationMessage {
+    fn ensure_valid(&self) -> Result<(), InvalidConversationEventKind> {
+        match self {
+            Self::User { .. } => Ok(()),
+            Self::AssistantResponse { data, response, .. } => {
+                if let Some(data) = data {
+                    data.ensure_valid()
+                        .map_err(InvalidConversationEventKind::ModelData)?;
+                }
+                response
+                    .ensure_valid()
+                    .map_err(InvalidConversationEventKind::Assistant)
+            }
+            Self::Communication {
+                data,
+                communication,
+                ..
+            } => {
+                if let Some(data) = data {
+                    data.ensure_valid()
+                        .map_err(InvalidConversationEventKind::ModelData)?;
+                }
+                communication
+                    .ensure_valid()
+                    .map_err(InvalidConversationEventKind::ModelCommunication)
+            }
+            Self::Problem { data, problem, .. } => {
+                if let Some(data) = data {
+                    data.ensure_valid()
+                        .map_err(InvalidConversationEventKind::ModelData)?;
+                }
+                problem
+                    .ensure_valid()
+                    .map_err(InvalidConversationEventKind::ConversationProblem)
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(untagged)]
+pub(crate) enum ConversationFact {
+    Message {
+        #[serde(flatten)]
+        message: ConversationMessage,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        turn_id: Option<ConversationTurnId>,
+    },
+    Lifecycle(ConversationLifecycle),
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub(crate) enum ConversationLifecycle {
     TurnCompleted {
         turn_id: ConversationTurnId,
         outcome: TurnOutcome,
@@ -154,39 +188,8 @@ impl ConversationEventKind {
     pub(super) fn ensure_valid(&self) -> Result<(), InvalidConversationEventKind> {
         match self {
             Self::Command(_) => Ok(()),
-            Self::Fact(ConversationFact::Assistant { data, response, .. }) => {
-                if let Some(data) = data {
-                    data.ensure_valid()
-                        .map_err(InvalidConversationEventKind::ModelData)?;
-                }
-                response
-                    .ensure_valid()
-                    .map_err(InvalidConversationEventKind::Assistant)
-            }
-            Self::Fact(ConversationFact::Communication {
-                data,
-                communication,
-                ..
-            }) => {
-                if let Some(data) = data {
-                    data.ensure_valid()
-                        .map_err(InvalidConversationEventKind::ModelData)?;
-                }
-                communication
-                    .ensure_valid()
-                    .map_err(InvalidConversationEventKind::ModelCommunication)
-            }
-            Self::Fact(ConversationFact::Problem { data, problem, .. }) => {
-                if let Some(data) = data {
-                    data.ensure_valid()
-                        .map_err(InvalidConversationEventKind::ModelData)?;
-                }
-                problem
-                    .ensure_valid()
-                    .map_err(InvalidConversationEventKind::ConversationProblem)
-            }
-            Self::Fact(ConversationFact::User { .. })
-            | Self::Fact(ConversationFact::TurnCompleted { .. }) => Ok(()),
+            Self::Fact(ConversationFact::Message { message, .. }) => message.ensure_valid(),
+            Self::Fact(ConversationFact::Lifecycle(_)) => Ok(()),
         }
     }
 
@@ -377,8 +380,9 @@ mod tests {
 
     use super::{
         AssistantResponse, ConversationCommand, ConversationEventClass, ConversationEventKind,
-        ConversationFact, DriverEventEnvelope, InvalidAssistantResponse, InvalidModelCommunication,
-        ModelCommunication, ModelEventImportance, TurnOutcome,
+        ConversationFact, ConversationLifecycle, ConversationMessage, DriverEventEnvelope,
+        InvalidAssistantResponse, InvalidModelCommunication, ModelCommunication,
+        ModelEventImportance, TurnOutcome,
     };
     use crate::conversation::{
         ConversationCommandId, ConversationProblem, ConversationTurnId, ModelInvocationId,
@@ -387,30 +391,33 @@ mod tests {
 
     #[test]
     fn assistant_is_a_top_level_event_with_model_provenance() {
-        let event = ConversationEventKind::Fact(ConversationFact::Assistant {
-            turn_id: ConversationTurnId::new(),
-            invocation_id: ModelInvocationId::new(),
-            data: None,
-            response: AssistantResponse::new("The answer is 42.".to_owned())
-                .expect("the assistant response should be valid"),
+        let event = ConversationEventKind::Fact(ConversationFact::Message {
+            message: ConversationMessage::AssistantResponse {
+                invocation_id: ModelInvocationId::new(),
+                data: None,
+                response: AssistantResponse::new("The answer is 42.".to_owned())
+                    .expect("the assistant response should be valid"),
+            },
+            turn_id: Some(ConversationTurnId::new()),
         });
 
-        assert_eq!(
-            serde_json::to_value(&event).expect("the event should serialize")["class"],
-            "fact"
-        );
+        let serialized = serde_json::to_value(&event).expect("the event should serialize");
+        assert_eq!(serialized["class"], "fact");
+        assert_eq!(serialized["event"]["type"], "assistant");
     }
 
     #[test]
     fn problem_can_have_model_provenance_without_being_a_model_event() {
-        let event = ConversationEventKind::Fact(ConversationFact::Problem {
+        let event = ConversationEventKind::Fact(ConversationFact::Message {
+            message: ConversationMessage::Problem {
+                invocation_id: Some(ModelInvocationId::new()),
+                data: None,
+                problem: ConversationProblem::Issue(
+                    ModelIssue::try_refusal("I cannot comply.".to_owned())
+                        .expect("the refusal should be valid"),
+                ),
+            },
             turn_id: Some(ConversationTurnId::new()),
-            invocation_id: Some(ModelInvocationId::new()),
-            data: None,
-            problem: ConversationProblem::Issue(
-                ModelIssue::try_refusal("I cannot comply.".to_owned())
-                    .expect("the refusal should be valid"),
-            ),
         });
 
         let serialized = serde_json::to_value(&event).expect("the problem should serialize");
@@ -419,15 +426,42 @@ mod tests {
     }
 
     #[test]
+    fn conversation_fact_reuses_the_message_payload_with_turn_association() {
+        let turn_id = ConversationTurnId::new();
+        let event = ConversationEventKind::Fact(ConversationFact::Message {
+            message: ConversationMessage::AssistantResponse {
+                invocation_id: ModelInvocationId::new(),
+                data: None,
+                response: AssistantResponse::new("Hello.".to_owned())
+                    .expect("the assistant response should be valid"),
+            },
+            turn_id: Some(turn_id),
+        });
+
+        let serialized = serde_json::to_value(&event).expect("the event should serialize");
+        assert_eq!(serialized["event"]["type"], "assistant");
+        assert_eq!(
+            serialized["event"]["turn_id"],
+            serde_json::to_value(turn_id).expect("the turn identifier should serialize")
+        );
+
+        let restored: ConversationEventKind =
+            serde_json::from_value(serialized).expect("the event should deserialize");
+        assert_eq!(restored, event);
+    }
+
+    #[test]
     fn commands_and_turn_completion_are_distinct_from_model_output() {
         let command = ConversationEventKind::Command(ConversationCommand::TurnRequested {
             command_id: ConversationCommandId::new(),
             turn_id: ConversationTurnId::new(),
         });
-        let completed = ConversationEventKind::Fact(ConversationFact::TurnCompleted {
-            turn_id: ConversationTurnId::new(),
-            outcome: TurnOutcome::Succeeded,
-        });
+        let completed = ConversationEventKind::Fact(ConversationFact::Lifecycle(
+            ConversationLifecycle::TurnCompleted {
+                turn_id: ConversationTurnId::new(),
+                outcome: TurnOutcome::Succeeded,
+            },
+        ));
 
         assert_eq!(command.class(), super::ConversationEventClass::Command);
         assert_eq!(completed.class(), super::ConversationEventClass::Fact);

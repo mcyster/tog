@@ -9,9 +9,8 @@ use serde::de::DeserializeOwned;
 use uuid::Uuid;
 
 use crate::conversation::{
-    Conversation, ConversationEvent, ConversationEventClass, ConversationEventKind,
-    ConversationEventRecord, ConversationId, DriverConversationEvent, DriverConversationFact,
-    StoredConversationEventKind,
+    Conversation, ConversationEvent, ConversationEventKind, ConversationEventRecord,
+    ConversationId, StoredConversationEventKind,
 };
 
 pub(crate) struct EventStore {
@@ -73,31 +72,12 @@ impl EventStore {
             ConversationEvent::Request(request) => StoredConversationEventKind::Shared(
                 ConversationEventKind::Command(request.command()),
             ),
-            ConversationEvent::Driver(DriverConversationEvent::Command(event)) => {
-                let envelope = event.to_envelope().map_err(io::Error::other)?;
-                if envelope.class() != ConversationEventClass::Command {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "driver command event declared fact classification",
-                    ));
-                }
-                StoredConversationEventKind::Extension(envelope)
+            ConversationEvent::Fact(fact) => {
+                StoredConversationEventKind::Shared(ConversationEventKind::Fact(fact))
             }
-            ConversationEvent::Driver(DriverConversationEvent::Fact(
-                DriverConversationFact::Shared(fact),
-            )) => StoredConversationEventKind::Shared(ConversationEventKind::Fact(fact)),
-            ConversationEvent::Driver(DriverConversationEvent::Fact(
-                DriverConversationFact::Extension(event),
-            )) => {
-                let envelope = event.to_envelope().map_err(io::Error::other)?;
-                if envelope.class() != ConversationEventClass::Fact {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "driver fact event declared command classification",
-                    ));
-                }
-                StoredConversationEventKind::Extension(envelope)
-            }
+            ConversationEvent::Extension(event) => StoredConversationEventKind::Extension(
+                event.to_envelope().map_err(io::Error::other)?,
+            ),
         };
         self.append_new_record(conversation_id, kind)
     }
@@ -247,13 +227,23 @@ mod tests {
     use super::EventStore;
     use crate::conversation::{
         AssistantResponse, ConversationCommandId, ConversationEvent, ConversationFact,
-        ConversationId, ConversationTurnId, DriverConversationEvent, DriverConversationFact,
-        ModelData, ModelInvocationId, UserContent,
+        ConversationId, ConversationMessage, ConversationTurnId, ModelData, ModelInvocationId,
+        UserContent,
     };
 
     fn temporary_store() -> EventStore {
         let directory = std::env::temp_dir().join(format!("tog-test-{}", uuid::Uuid::now_v7()));
         EventStore::new(directory).expect("the event store should be created")
+    }
+
+    fn user_fact(content: &str) -> ConversationEvent {
+        ConversationEvent::Fact(ConversationFact::Message {
+            message: ConversationMessage::User {
+                caused_by: Some(ConversationCommandId::new()),
+                content: vec![UserContent::Text(content.to_owned())],
+            },
+            turn_id: None,
+        })
     }
 
     #[test]
@@ -262,26 +252,10 @@ mod tests {
         let conversation_id = ConversationId::new();
 
         let first_event = store
-            .append_new_conversation_event(
-                conversation_id,
-                ConversationEvent::Driver(DriverConversationEvent::Fact(
-                    DriverConversationFact::Shared(ConversationFact::User {
-                        caused_by: Some(ConversationCommandId::new()),
-                        content: vec![UserContent::Text("first".to_owned())],
-                    }),
-                )),
-            )
+            .append_new_conversation_event(conversation_id, user_fact("first"))
             .expect("the first event should be persisted");
         let second_event = store
-            .append_new_conversation_event(
-                conversation_id,
-                ConversationEvent::Driver(DriverConversationEvent::Fact(
-                    DriverConversationFact::Shared(ConversationFact::User {
-                        caused_by: Some(ConversationCommandId::new()),
-                        content: vec![UserContent::Text("second".to_owned())],
-                    }),
-                )),
-            )
+            .append_new_conversation_event(conversation_id, user_fact("second"))
             .expect("the second event should be persisted");
 
         assert_eq!(first_event.conversation_id, conversation_id);
@@ -323,20 +297,17 @@ mod tests {
         )]))
         .expect("the model data should be valid");
 
-        let assistant = ConversationFact::Assistant {
-            turn_id: ConversationTurnId::new(),
-            invocation_id: ModelInvocationId::new(),
-            data: Some(model_data),
-            response: AssistantResponse::new("The answer is 42.".to_owned())
-                .expect("the assistant response should be valid"),
-        };
+        let assistant = ConversationEvent::Fact(ConversationFact::Message {
+            message: ConversationMessage::AssistantResponse {
+                invocation_id: ModelInvocationId::new(),
+                data: Some(model_data),
+                response: AssistantResponse::new("The answer is 42.".to_owned())
+                    .expect("the assistant response should be valid"),
+            },
+            turn_id: Some(ConversationTurnId::new()),
+        });
         let model_event = store
-            .append_new_conversation_event(
-                conversation_id,
-                ConversationEvent::Driver(DriverConversationEvent::Fact(
-                    DriverConversationFact::Shared(assistant),
-                )),
-            )
+            .append_new_conversation_event(conversation_id, assistant)
             .expect("the model event should be persisted");
 
         let conversation = store
@@ -351,15 +322,7 @@ mod tests {
         let conversation_id = ConversationId::new();
         for content in ["first", "second", "third"] {
             store
-                .append_new_conversation_event(
-                    conversation_id,
-                    ConversationEvent::Driver(DriverConversationEvent::Fact(
-                        DriverConversationFact::Shared(ConversationFact::User {
-                            caused_by: Some(ConversationCommandId::new()),
-                            content: vec![UserContent::Text(content.to_owned())],
-                        }),
-                    )),
-                )
+                .append_new_conversation_event(conversation_id, user_fact(content))
                 .expect("the event should be persisted");
         }
         let events_directory = store.conversation_directory(conversation_id).join("events");
@@ -380,15 +343,7 @@ mod tests {
         );
         assert!(
             store
-                .append_new_conversation_event(
-                    conversation_id,
-                    ConversationEvent::Driver(DriverConversationEvent::Fact(
-                        DriverConversationFact::Shared(ConversationFact::User {
-                            caused_by: Some(ConversationCommandId::new()),
-                            content: vec![UserContent::Text("fourth".to_owned())],
-                        }),
-                    )),
-                )
+                .append_new_conversation_event(conversation_id, user_fact("fourth"))
                 .is_err()
         );
     }
