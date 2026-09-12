@@ -1,0 +1,75 @@
+# Record Commands And Turn Lifecycle
+
+This note captures the direction following the review of PR #5. It records
+design guidance and unresolved questions; the implementation remains the
+authoritative source for exact field names and serialization.
+
+## Direction
+
+The durable history explains both what was requested and what happened. Command
+records and semantic facts share one ordered append-only log. This keeps intent
+visible for future replay without making commands part of model-visible history.
+
+Semantic event kinds remain readable. `User`, `Assistant`, `Communication`, and
+`Problem` describe different meanings. A generic `Model` wrapper should not hide
+those distinctions. Applicable model facts carry a stable `ModelInvocationId`
+and optional event-specific model data. Invocation provenance remains in the
+driver-defined invocation event.
+
+## Simple Greeting
+
+Adding user content and requesting agent work are separate concepts:
+
+```text
+UserMessageRequested
+User
+TurnRequested
+DriverInvocationEvent
+Assistant
+TurnCompleted
+```
+
+`UserMessageRequested` records input received by the system. `User` records the
+accepted contribution to portable conversation history. User content can exist
+before a turn is requested, so it does not need to belong to a turn.
+
+`TurnRequested` starts agent work. The driver creates a driver-defined invocation
+event and its `ModelInvocationId`. User acceptance, assistant, communication,
+problem, and future model-produced tool facts reference that identifier.
+
+`TurnCompleted` is an explicit terminal fact recorded by the session. The driver
+does not emit lifecycle facts. The session applies its completion policy after
+the driver stream ends: an assistant response ends a successful turn, while any
+problem fails the turn even when earlier output was produced. Stream exhaustion
+without an assistant response or problem is incomplete execution.
+
+## Replay And Ordering
+
+Replaying history reconstructs state without executing commands again. Explicit
+re-execution can use recorded commands to produce new outcomes; model output
+may differ and tools may have side effects.
+
+Turn IDs associate work and outcomes. Invocation IDs distinguish multiple
+attempts or invocations within one turn. Tool execution will need its own
+correlation when introduced; adjacency is not sufficient once work runs
+concurrently.
+
+Extension records use a shared envelope containing the namespace and namespace
+version, event type and schema version, human-readable description, and opaque
+payload. A decoder for that namespace may reconstruct the concrete event;
+unavailable namespaces do not prevent preserving the envelope.
+
+The append boundary assigns durable positions, record IDs, and timestamps.
+Drivers do not allocate positions from an input snapshot. Log order records
+append order; typed references explain causal relationships.
+
+## Open Questions
+
+- What is the final name for the user-content command?
+- Should command and fact records use one enum or an outer record envelope?
+- What exactly defines a turn when tools are outstanding?
+- What metadata identifies the input actually used by a model invocation?
+- How should retries relate to the original turn and invocation?
+
+Implement the smallest coherent lifecycle before building a replay engine or a
+general scheduling framework.

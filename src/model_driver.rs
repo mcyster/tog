@@ -4,52 +4,82 @@ use std::fmt::{Display, Formatter};
 use futures_util::future::BoxFuture;
 use futures_util::stream::BoxStream;
 
-use crate::conversation::{Conversation, ModelEvent, ModelIssue, ModelSource};
+use crate::conversation::{
+    Conversation, ConversationCommandId, ConversationEventExtension, ConversationEventReader,
+    ConversationMessage, ConversationTurnId, ModelSource, UserMessageRequest,
+};
 
 pub(crate) type ModelOutputStream = BoxStream<'static, Result<ModelDriverOutput, ModelDriverError>>;
 
 pub(crate) enum ModelDriverOutput {
-    Event(ModelEvent),
-    Issue(ModelIssue),
+    Message(ConversationMessage),
+    Command(Box<dyn ConversationEventExtension>),
+    #[allow(dead_code)]
+    Extension(Box<dyn ConversationEventExtension>),
 }
 
-pub(crate) trait ModelDriver {
+pub(crate) struct TurnInput<'conversation> {
+    conversation: &'conversation Conversation,
+    pending_user_requests: Vec<UserMessageRequest>,
+    turn_id: ConversationTurnId,
+}
+
+impl<'conversation> TurnInput<'conversation> {
+    pub(crate) fn new(
+        conversation: &'conversation Conversation,
+        turn_id: ConversationTurnId,
+    ) -> Self {
+        Self {
+            conversation,
+            pending_user_requests: conversation.pending_user_requests(),
+            turn_id,
+        }
+    }
+
+    pub(crate) fn conversation(&self) -> &'conversation Conversation {
+        self.conversation
+    }
+
+    pub(crate) fn pending_user_requests(&self) -> &[UserMessageRequest] {
+        &self.pending_user_requests
+    }
+
+    pub(crate) fn turn_id(&self) -> ConversationTurnId {
+        self.turn_id
+    }
+}
+
+pub(crate) trait ModelDriver: ConversationEventReader {
     fn source(&self) -> &ModelSource;
 
     fn invoke<'invoke>(
         &'invoke self,
-        conversation: &'invoke Conversation,
+        input: TurnInput<'invoke>,
     ) -> BoxFuture<'invoke, Result<ModelOutputStream, ModelDriverError>>;
 }
 
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum ModelDriverError {
-    Authentication(String),
-    RateLimited(String),
-    Transport(String),
-    InvalidRequest(String),
-    InvalidResponse(String),
-    StreamInterrupted(String),
-    Provider(String),
+    UnassociatedUserMessage,
+    UnexpectedUserRequest { command_id: ConversationCommandId },
+    IncompleteTurn,
 }
 
 impl Display for ModelDriverError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Authentication(message) => write!(formatter, "authentication failed: {message}"),
-            Self::RateLimited(message) => write!(formatter, "rate limited: {message}"),
-            Self::Transport(message) => write!(formatter, "model transport failed: {message}"),
-            Self::InvalidRequest(message) => write!(formatter, "invalid model request: {message}"),
-            Self::InvalidResponse(message) => {
-                write!(formatter, "invalid model response: {message}")
-            }
-            Self::StreamInterrupted(message) => {
-                write!(
-                    formatter,
-                    "model response stream was interrupted: {message}"
-                )
-            }
-            Self::Provider(message) => write!(formatter, "model provider failed: {message}"),
+            Self::UnassociatedUserMessage => write!(
+                formatter,
+                "model driver emitted a user message without a request association"
+            ),
+            Self::UnexpectedUserRequest { command_id } => write!(
+                formatter,
+                "model driver accepted unexpected user request {command_id}"
+            ),
+            Self::IncompleteTurn => write!(
+                formatter,
+                "the model driver ended without an assistant response or problem"
+            ),
         }
     }
 }

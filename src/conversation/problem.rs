@@ -2,16 +2,15 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "category", content = "detail", rename_all = "snake_case")]
-pub(crate) enum ModelProblem {
+pub(crate) enum ConversationProblem {
     Issue(ModelIssue),
     Invocation(InvocationError),
 }
 
-impl ModelProblem {
+impl ConversationProblem {
     pub(crate) fn message(&self) -> &str {
         match self {
             Self::Issue(issue) => issue.message(),
@@ -27,7 +26,7 @@ impl ModelProblem {
         }
     }
 
-    pub(super) fn ensure_valid(&self) -> Result<(), InvalidModelProblem> {
+    pub(super) fn ensure_valid(&self) -> Result<(), InvalidConversationProblem> {
         match self {
             Self::Issue(issue) => issue.ensure_valid(),
             Self::Invocation(error) => error.ensure_valid(),
@@ -38,55 +37,28 @@ impl ModelProblem {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum ModelIssue {
-    Refusal {
-        message: ProblemMessage,
-    },
-    ContextLimitExceeded {
-        message: ProblemMessage,
-    },
-    Other {
-        message: ProblemMessage,
-        extensions: Map<String, Value>,
-    },
+    Refusal { message: ProblemMessage },
+    ContextLimitExceeded { message: ProblemMessage },
 }
 
 impl ModelIssue {
-    pub(crate) fn try_refusal(message: String) -> Result<Self, InvalidModelProblem> {
+    pub(crate) fn try_refusal(message: String) -> Result<Self, InvalidConversationProblem> {
         Ok(Self::Refusal {
             message: ProblemMessage::try_new(message)?,
         })
     }
 
-    pub(crate) fn try_context_limit_exceeded(message: String) -> Result<Self, InvalidModelProblem> {
+    pub(crate) fn try_context_limit_exceeded(
+        message: String,
+    ) -> Result<Self, InvalidConversationProblem> {
         Ok(Self::ContextLimitExceeded {
             message: ProblemMessage::try_new(message)?,
         })
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn try_other(
-        message: String,
-        extensions: Map<String, Value>,
-    ) -> Result<Self, InvalidModelProblem> {
-        Ok(Self::Other {
-            message: ProblemMessage::try_new(message)?,
-            extensions,
-        })
-    }
-
     pub(crate) fn message(&self) -> &str {
         match self {
-            Self::Refusal { message }
-            | Self::ContextLimitExceeded { message }
-            | Self::Other { message, .. } => message.as_str(),
-        }
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn extensions(&self) -> Option<&Map<String, Value>> {
-        match self {
-            Self::Other { extensions, .. } => Some(extensions),
-            Self::Refusal { .. } | Self::ContextLimitExceeded { .. } => None,
+            Self::Refusal { message } | Self::ContextLimitExceeded { message } => message.as_str(),
         }
     }
 
@@ -95,11 +67,11 @@ impl ModelIssue {
         false
     }
 
-    fn ensure_valid(&self) -> Result<(), InvalidModelProblem> {
+    fn ensure_valid(&self) -> Result<(), InvalidConversationProblem> {
         match self {
-            Self::Refusal { message }
-            | Self::ContextLimitExceeded { message }
-            | Self::Other { message, .. } => message.ensure_valid(),
+            Self::Refusal { message } | Self::ContextLimitExceeded { message } => {
+                message.ensure_valid()
+            }
         }
     }
 }
@@ -117,31 +89,33 @@ pub(crate) enum InvocationError {
 }
 
 impl InvocationError {
-    pub(crate) fn try_authentication(message: String) -> Result<Self, InvalidModelProblem> {
+    pub(crate) fn try_authentication(message: String) -> Result<Self, InvalidConversationProblem> {
         Ok(Self::Authentication {
             message: ProblemMessage::try_new(message)?,
         })
     }
 
-    pub(crate) fn try_rate_limited(message: String) -> Result<Self, InvalidModelProblem> {
+    pub(crate) fn try_rate_limited(message: String) -> Result<Self, InvalidConversationProblem> {
         Ok(Self::RateLimited {
             message: ProblemMessage::try_new(message)?,
         })
     }
 
-    pub(crate) fn try_transport(message: String) -> Result<Self, InvalidModelProblem> {
+    pub(crate) fn try_transport(message: String) -> Result<Self, InvalidConversationProblem> {
         Ok(Self::Transport {
             message: ProblemMessage::try_new(message)?,
         })
     }
 
-    pub(crate) fn try_invalid_request(message: String) -> Result<Self, InvalidModelProblem> {
+    pub(crate) fn try_invalid_request(message: String) -> Result<Self, InvalidConversationProblem> {
         Ok(Self::InvalidRequest {
             message: ProblemMessage::try_new(message)?,
         })
     }
 
-    pub(crate) fn try_provider_failure(message: String) -> Result<Self, InvalidModelProblem> {
+    pub(crate) fn try_provider_failure(
+        message: String,
+    ) -> Result<Self, InvalidConversationProblem> {
         Ok(Self::ProviderFailure {
             message: ProblemMessage::try_new(message)?,
         })
@@ -149,13 +123,15 @@ impl InvocationError {
 
     pub(crate) fn try_invalid_provider_response(
         message: String,
-    ) -> Result<Self, InvalidModelProblem> {
+    ) -> Result<Self, InvalidConversationProblem> {
         Ok(Self::InvalidProviderResponse {
             message: ProblemMessage::try_new(message)?,
         })
     }
 
-    pub(crate) fn try_stream_interrupted(message: String) -> Result<Self, InvalidModelProblem> {
+    pub(crate) fn try_stream_interrupted(
+        message: String,
+    ) -> Result<Self, InvalidConversationProblem> {
         Ok(Self::StreamInterrupted {
             message: ProblemMessage::try_new(message)?,
         })
@@ -184,7 +160,7 @@ impl InvocationError {
         )
     }
 
-    fn ensure_valid(&self) -> Result<(), InvalidModelProblem> {
+    fn ensure_valid(&self) -> Result<(), InvalidConversationProblem> {
         match self {
             Self::Authentication { message }
             | Self::RateLimited { message }
@@ -202,7 +178,7 @@ impl InvocationError {
 pub(crate) struct ProblemMessage(String);
 
 impl ProblemMessage {
-    fn try_new(message: String) -> Result<Self, InvalidModelProblem> {
+    fn try_new(message: String) -> Result<Self, InvalidConversationProblem> {
         let message = Self(message);
         message.ensure_valid()?;
         Ok(message)
@@ -212,44 +188,46 @@ impl ProblemMessage {
         &self.0
     }
 
-    fn ensure_valid(&self) -> Result<(), InvalidModelProblem> {
+    fn ensure_valid(&self) -> Result<(), InvalidConversationProblem> {
         if self.0.trim().is_empty() {
-            return Err(InvalidModelProblem::EmptyMessage);
+            return Err(InvalidConversationProblem::EmptyMessage);
         }
         Ok(())
     }
 }
 
 #[derive(Debug, Eq, PartialEq)]
-pub(crate) enum InvalidModelProblem {
+pub(crate) enum InvalidConversationProblem {
     EmptyMessage,
 }
 
-impl Display for InvalidModelProblem {
+impl Display for InvalidConversationProblem {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::EmptyMessage => write!(formatter, "model problem message must not be empty"),
+            Self::EmptyMessage => {
+                write!(formatter, "conversation problem message must not be empty")
+            }
         }
     }
 }
 
-impl Error for InvalidModelProblem {}
+impl Error for InvalidConversationProblem {}
 
 #[cfg(test)]
 mod tests {
-    use serde_json::{Map, json};
+    use serde_json::json;
 
-    use super::{InvocationError, ModelIssue, ModelProblem};
+    use super::{ConversationProblem, InvocationError, ModelIssue};
 
     #[test]
-    fn model_problem_round_trips_with_a_closed_tagged_representation() {
-        let problem = ModelProblem::Issue(
+    fn conversation_problem_round_trips_with_a_closed_tagged_representation() {
+        let problem = ConversationProblem::Issue(
             ModelIssue::try_refusal("I cannot help with that.".to_owned())
                 .expect("the refusal should be valid"),
         );
 
         let serialized = serde_json::to_value(&problem).expect("the problem should serialize");
-        let deserialized: ModelProblem =
+        let deserialized: ConversationProblem =
             serde_json::from_value(serialized.clone()).expect("the problem should deserialize");
 
         assert_eq!(
@@ -271,7 +249,7 @@ mod tests {
     fn every_problem_has_an_intentional_message_and_retryability() {
         let problems = [
             (
-                ModelProblem::Issue(
+                ConversationProblem::Issue(
                     ModelIssue::try_refusal("Refused.".to_owned())
                         .expect("the refusal should be valid"),
                 ),
@@ -279,7 +257,7 @@ mod tests {
                 false,
             ),
             (
-                ModelProblem::Issue(
+                ConversationProblem::Issue(
                     ModelIssue::try_context_limit_exceeded("Context exceeded.".to_owned())
                         .expect("the context issue should be valid"),
                 ),
@@ -287,15 +265,7 @@ mod tests {
                 false,
             ),
             (
-                ModelProblem::Issue(
-                    ModelIssue::try_other("Other issue.".to_owned(), Map::new())
-                        .expect("the other issue should be valid"),
-                ),
-                "Other issue.",
-                false,
-            ),
-            (
-                ModelProblem::Invocation(
+                ConversationProblem::Invocation(
                     InvocationError::try_authentication("Authentication failed.".to_owned())
                         .expect("the authentication error should be valid"),
                 ),
@@ -303,7 +273,7 @@ mod tests {
                 false,
             ),
             (
-                ModelProblem::Invocation(
+                ConversationProblem::Invocation(
                     InvocationError::try_rate_limited("Rate limited.".to_owned())
                         .expect("the rate limit should be valid"),
                 ),
@@ -311,7 +281,7 @@ mod tests {
                 true,
             ),
             (
-                ModelProblem::Invocation(
+                ConversationProblem::Invocation(
                     InvocationError::try_transport("Transport failed.".to_owned())
                         .expect("the transport error should be valid"),
                 ),
@@ -319,7 +289,7 @@ mod tests {
                 true,
             ),
             (
-                ModelProblem::Invocation(
+                ConversationProblem::Invocation(
                     InvocationError::try_invalid_request("Request invalid.".to_owned())
                         .expect("the invalid request should be valid"),
                 ),
@@ -327,7 +297,7 @@ mod tests {
                 false,
             ),
             (
-                ModelProblem::Invocation(
+                ConversationProblem::Invocation(
                     InvocationError::try_provider_failure("Provider failed.".to_owned())
                         .expect("the provider failure should be valid"),
                 ),
@@ -335,7 +305,7 @@ mod tests {
                 true,
             ),
             (
-                ModelProblem::Invocation(
+                ConversationProblem::Invocation(
                     InvocationError::try_invalid_provider_response("Response invalid.".to_owned())
                         .expect("the invalid provider response should be valid"),
                 ),
@@ -343,7 +313,7 @@ mod tests {
                 false,
             ),
             (
-                ModelProblem::Invocation(
+                ConversationProblem::Invocation(
                     InvocationError::try_stream_interrupted("Stream interrupted.".to_owned())
                         .expect("the stream interruption should be valid"),
                 ),
@@ -359,10 +329,9 @@ mod tests {
     }
 
     #[test]
-    fn model_problem_messages_must_not_be_blank() {
+    fn conversation_problem_messages_must_not_be_blank() {
         assert!(ModelIssue::try_refusal("  ".to_owned()).is_err());
         assert!(ModelIssue::try_context_limit_exceeded(String::new()).is_err());
-        assert!(ModelIssue::try_other("\n".to_owned(), Map::new()).is_err());
         assert!(InvocationError::try_authentication(" ".to_owned()).is_err());
         assert!(InvocationError::try_rate_limited("\n".to_owned()).is_err());
         assert!(InvocationError::try_transport("\t".to_owned()).is_err());
@@ -373,11 +342,11 @@ mod tests {
     }
 
     #[test]
-    fn model_problem_messages_preserve_surrounding_whitespace() {
-        let issue = ModelProblem::Issue(
+    fn conversation_problem_messages_preserve_surrounding_whitespace() {
+        let issue = ConversationProblem::Issue(
             ModelIssue::try_refusal("  refusal\n".to_owned()).expect("the refusal should be valid"),
         );
-        let invocation = ModelProblem::Invocation(
+        let invocation = ConversationProblem::Invocation(
             InvocationError::try_transport("  transport\n".to_owned())
                 .expect("the transport error should be valid"),
         );
