@@ -54,10 +54,10 @@ attempts or invocations within one turn. Tool execution will need its own
 correlation when introduced; adjacency is not sufficient once work runs
 concurrently.
 
-Driver-defined records use a shared envelope containing the driver name and
+Extension records use a shared envelope containing the namespace and namespace
 version, event type and schema version, human-readable description, and opaque
-payload. A driver decoder may reconstruct the concrete event; unavailable
-drivers do not prevent preserving the envelope.
+payload. A decoder for that namespace may reconstruct the concrete event;
+unavailable namespaces do not prevent preserving the envelope.
 
 The append boundary assigns durable positions, record IDs, and timestamps.
 Drivers do not allocate positions from an input snapshot. Log order records

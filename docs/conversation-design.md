@@ -92,12 +92,12 @@ future UIs
 
 ## 3. ConversationEvent and ConversationEventKind
 
-`ConversationEvent` is the stream value produced by a driver. It contains either
-a shared `ConversationEventKind` or a driver-defined extension event. The
-persisted canonical record is `ConversationEventRecord`; it adds identity,
-position, timestamp, and schema metadata. Driver-defined records use an opaque
-`DriverEventEnvelope` in the same log and are excluded from the model-facing
-`Conversation` projection.
+`ConversationEvent` is the append vocabulary for a conversation. It contains a
+session request, a shared `ConversationFact`, or a namespaced extension event.
+The persisted canonical record is `ConversationEventRecord`; it adds identity,
+position, timestamp, and schema metadata. Extension records use an opaque
+`ConversationEventEnvelope` in the same log and are excluded from the
+model-facing `Conversation` projection.
 
 Conceptually:
 
@@ -140,13 +140,13 @@ assistant, communication, or problem facts. Those facts carry only an
 driver-independent consumer can continue from their portable content without
 interpreting the invocation event.
 
-`DriverEventEnvelope` stores the driver name, driver version, event type, event
-schema version, human-readable description, and opaque JSON payload. A driver
-provided decoder may reconstruct its concrete event. If the driver is
-unavailable, the envelope remains readable and preserved without decoding.
+`ConversationEventEnvelope` stores the namespace, namespace version, event type,
+event schema version, human-readable description, and opaque JSON payload. A
+decoder for that namespace may reconstruct its concrete event. If no decoder is
+available, the envelope remains readable and preserved without decoding.
 
 Every event also has a typed `ConversationEventClass`: shared variants derive
-`Command` or `Fact` from their kind, while driver extensions declare the class
+`Command` or `Fact` from their kind, while extension events declare the class
 through the extension contract and persist it in the envelope. The class is
 independent from the `Shared`/`Extension` schema owner dimension.
 
@@ -743,22 +743,22 @@ enum ModelDriverOutput {
 }
 
 trait ConversationEventExtension: Send {
-    fn driver_name(&self) -> &str;
-    fn driver_version(&self) -> &str;
+    fn namespace(&self) -> &str;
+    fn namespace_version(&self) -> &str;
     fn event_type(&self) -> &str;
     fn event_schema_version(&self) -> u32;
     fn description(&self) -> &str;
     fn serialize_payload(&self) -> Result<Value, ConversationEventError>;
 }
 
-trait DriverEventReader {
+trait ConversationEventReader {
     fn read_event(
         &self,
-        envelope: &DriverEventEnvelope,
-    ) -> Result<Box<dyn ConversationEventExtension>, DriverEventReadError>;
+        envelope: &ConversationEventEnvelope,
+    ) -> Result<Box<dyn ConversationEventExtension>, ConversationEventReadError>;
 }
 
-trait ModelDriver: DriverEventReader {
+trait ModelDriver: ConversationEventReader {
     fn source(&self) -> &ModelSource;
 
     fn invoke<'invoke>(
