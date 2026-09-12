@@ -5,8 +5,8 @@ use futures_util::future::BoxFuture;
 use futures_util::stream::BoxStream;
 
 use crate::conversation::{
-    Conversation, ConversationCommandId, ConversationEventExtension, ConversationMessage,
-    ConversationTurnId, DriverEventReader, ModelSource, UserMessageRequest,
+    Conversation, ConversationCommandId, ConversationEventExtension, ConversationEventReader,
+    ConversationMessage, ConversationTurnId, ModelSource, UserMessageRequest,
 };
 
 pub(crate) type ModelOutputStream = BoxStream<'static, Result<ModelDriverOutput, ModelDriverError>>;
@@ -49,7 +49,7 @@ impl<'conversation> TurnInput<'conversation> {
     }
 }
 
-pub(crate) trait ModelDriver: DriverEventReader {
+pub(crate) trait ModelDriver: ConversationEventReader {
     fn source(&self) -> &ModelSource;
 
     fn invoke<'invoke>(

@@ -252,10 +252,11 @@ mod tests {
 
     use super::{ConversationSession, ConversationSessionProgress};
     use crate::conversation::{
-        AssistantResponse, ConversationEventExtension, ConversationEventKind, ConversationFact,
-        ConversationLifecycle, ConversationMessage, ConversationProblem, DriverEventEnvelope,
-        DriverEventReadError, DriverEventReader, InvocationError, ModelId, ModelInvocationId,
-        ModelSource, ProviderId, StoredConversationEventKind, TurnOutcome, UserPrompt,
+        AssistantResponse, ConversationEventEnvelope, ConversationEventExtension,
+        ConversationEventKind, ConversationEventReadError, ConversationEventReader,
+        ConversationFact, ConversationLifecycle, ConversationMessage, ConversationProblem,
+        InvocationError, ModelId, ModelInvocationId, ModelSource, ProviderId,
+        StoredConversationEventKind, TurnOutcome, UserPrompt,
     };
     use crate::model_driver::{
         ModelDriver, ModelDriverError, ModelDriverOutput, ModelOutputStream, TurnInput,
@@ -275,12 +276,12 @@ mod tests {
         response: RecordingResponse,
     }
 
-    impl DriverEventReader for RecordingDriver {
+    impl ConversationEventReader for RecordingDriver {
         fn read_event(
             &self,
-            _envelope: &DriverEventEnvelope,
-        ) -> Result<Box<dyn ConversationEventExtension>, DriverEventReadError> {
-            Err(DriverEventReadError::UnsupportedDriver)
+            _envelope: &ConversationEventEnvelope,
+        ) -> Result<Box<dyn ConversationEventExtension>, ConversationEventReadError> {
+            Err(ConversationEventReadError::UnsupportedNamespace)
         }
     }
 

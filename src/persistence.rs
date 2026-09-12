@@ -111,11 +111,13 @@ impl EventStore {
                 next_position(previous_position)?,
                 kind,
             ),
-            StoredConversationEventKind::Extension(event) => ConversationEventRecord::new_driver(
-                conversation_id,
-                next_position(previous_position)?,
-                event,
-            ),
+            StoredConversationEventKind::Extension(event) => {
+                ConversationEventRecord::new_extension(
+                    conversation_id,
+                    next_position(previous_position)?,
+                    event,
+                )
+            }
         };
         write_json_atomically(
             &event_path(
@@ -260,11 +262,11 @@ mod tests {
 
         assert_eq!(first_event.conversation_id, conversation_id);
         assert_eq!(first_event.position, 0);
-        assert_eq!(first_event.schema_version, 11);
+        assert_eq!(first_event.schema_version, 12);
         assert_ne!(first_event.timestamp, time::OffsetDateTime::UNIX_EPOCH);
         assert_eq!(second_event.conversation_id, conversation_id);
         assert_eq!(second_event.position, 1);
-        assert_eq!(second_event.schema_version, 11);
+        assert_eq!(second_event.schema_version, 12);
         assert_ne!(second_event.timestamp, time::OffsetDateTime::UNIX_EPOCH);
         assert_ne!(second_event.id, first_event.id);
 

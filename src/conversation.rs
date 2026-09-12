@@ -12,12 +12,12 @@ use std::str::FromStr;
 #[allow(unused_imports)]
 pub(crate) use event::{
     AssistantResponse, ConversationCommand, ConversationEvent, ConversationEventClass,
-    ConversationEventError, ConversationEventExtension, ConversationEventKind,
+    ConversationEventEnvelope, ConversationEventError, ConversationEventExtension,
+    ConversationEventKind, ConversationEventReadError, ConversationEventReader,
     ConversationEventRecord, ConversationFact, ConversationLifecycle, ConversationMessage,
-    ConversationRequest, DriverEventEnvelope, DriverEventReadError, DriverEventReader,
-    InvalidAssistantResponse, InvalidModelCommunication, ModelCommunication, ModelEvent,
-    ModelEventImportance, StoredConversationEventKind, TurnOutcome, UserContent,
-    UserMessageRequest,
+    ConversationRequest, InvalidAssistantResponse, InvalidConversationEventEnvelope,
+    InvalidModelCommunication, ModelCommunication, ModelEvent, ModelEventImportance,
+    StoredConversationEventKind, TurnOutcome, UserContent, UserMessageRequest,
 };
 pub(crate) use id::{
     ConversationCommandId, ConversationEventId, ConversationId, ConversationTurnId,

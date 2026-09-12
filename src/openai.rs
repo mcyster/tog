@@ -11,10 +11,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use crate::conversation::{
-    AssistantResponse, Conversation, ConversationEventClass, ConversationEventError,
-    ConversationEventExtension, ConversationEventKind, ConversationFact, ConversationMessage,
-    ConversationProblem, ConversationTurnId, DriverEventEnvelope, DriverEventReadError,
-    DriverEventReader, InvalidAssistantResponse, InvalidConversationProblem,
+    AssistantResponse, Conversation, ConversationEventClass, ConversationEventEnvelope,
+    ConversationEventError, ConversationEventExtension, ConversationEventKind,
+    ConversationEventReadError, ConversationEventReader, ConversationFact, ConversationMessage,
+    ConversationProblem, ConversationTurnId, InvalidAssistantResponse, InvalidConversationProblem,
     InvalidModelCommunication, InvocationError, ModelCommunication, ModelData, ModelEvent,
     ModelEventImportance, ModelId, ModelInvocationId, ModelIssue, ModelSource, ProviderId,
     StoredConversationEventKind, UserContent, UserMessageRequest,
@@ -26,7 +26,7 @@ use crate::model_driver::{
 type ResponseByteStream = BoxStream<'static, Result<Vec<u8>, OpenAiError>>;
 type ProviderOutputStream = BoxStream<'static, Result<ModelDriverEvent, OpenAiError>>;
 
-const OPEN_AI_DRIVER_VERSION: &str = "1";
+const OPEN_AI_NAMESPACE_VERSION: &str = "1";
 
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum OpenAiError {
@@ -90,12 +90,12 @@ impl ConversationEventExtension for OpenAiInvocationRequested {
         ConversationEventClass::Command
     }
 
-    fn driver_name(&self) -> &str {
+    fn namespace(&self) -> &str {
         "openai"
     }
 
-    fn driver_version(&self) -> &str {
-        OPEN_AI_DRIVER_VERSION
+    fn namespace_version(&self) -> &str {
+        OPEN_AI_NAMESPACE_VERSION
     }
 
     fn event_type(&self) -> &str {
@@ -250,22 +250,22 @@ impl ModelDriver for OpenAiModelDriver {
     }
 }
 
-impl DriverEventReader for OpenAiModelDriver {
+impl ConversationEventReader for OpenAiModelDriver {
     fn read_event(
         &self,
-        envelope: &DriverEventEnvelope,
-    ) -> Result<Box<dyn ConversationEventExtension>, DriverEventReadError> {
-        if envelope.driver() != "openai" {
-            return Err(DriverEventReadError::UnsupportedDriver);
+        envelope: &ConversationEventEnvelope,
+    ) -> Result<Box<dyn ConversationEventExtension>, ConversationEventReadError> {
+        if envelope.namespace() != "openai" {
+            return Err(ConversationEventReadError::UnsupportedNamespace);
         }
         if envelope.event_type() != "model_invocation_requested"
             || envelope.event_schema_version() != 1
         {
-            return Err(DriverEventReadError::UnsupportedEvent);
+            return Err(ConversationEventReadError::UnsupportedEvent);
         }
         serde_json::from_value::<OpenAiInvocationRequested>(envelope.payload().clone())
             .map(|event| Box::new(event) as Box<dyn ConversationEventExtension>)
-            .map_err(|error| DriverEventReadError::InvalidPayload(error.to_string()))
+            .map_err(|error| ConversationEventReadError::InvalidPayload(error.to_string()))
     }
 }
 

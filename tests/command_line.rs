@@ -264,7 +264,7 @@ fn turn_persists_events_and_prints_semantic_output() {
             .replace('-', ""),
         conversation_id.trim_start_matches("conversation_")
     );
-    assert_eq!(first_event["schema_version"], 11);
+    assert_eq!(first_event["schema_version"], 12);
     assert_eq!(first_event["class"], "command");
     assert_eq!(first_event["event"]["type"], "user_message_requested");
     assert_eq!(first_event["event"]["content"][0]["type"], "text");
@@ -281,7 +281,7 @@ fn turn_persists_events_and_prints_semantic_output() {
         fs::File::open(&event_paths[2]).expect("the persisted user event should open"),
     )
     .expect("the persisted user event should be JSON");
-    assert_eq!(user_event["schema_version"], 11);
+    assert_eq!(user_event["schema_version"], 12);
     assert_eq!(user_event["class"], "fact");
     assert_eq!(user_event["event"]["type"], "user");
     let invocation_event: Value = serde_json::from_reader(
@@ -289,8 +289,8 @@ fn turn_persists_events_and_prints_semantic_output() {
     )
     .expect("the invocation event should be JSON");
     assert_eq!(invocation_event["class"], "command");
-    assert_eq!(invocation_event["driver"], "openai");
-    assert_eq!(invocation_event["driver_version"], "1");
+    assert_eq!(invocation_event["namespace"], "openai");
+    assert_eq!(invocation_event["namespace_version"], "1");
     assert_eq!(invocation_event["event_type"], "model_invocation_requested");
     assert_eq!(invocation_event["event_schema_version"], 1);
     assert!(invocation_event["description"].is_string());
@@ -301,7 +301,7 @@ fn turn_persists_events_and_prints_semantic_output() {
         fs::File::open(&event_paths[4]).expect("the persisted model event should open"),
     )
     .expect("the persisted model event should be JSON");
-    assert_eq!(model_event["schema_version"], 11);
+    assert_eq!(model_event["schema_version"], 12);
     assert_eq!(model_event["class"], "fact");
     assert_eq!(model_event["event"]["type"], "assistant");
     assert_eq!(model_event["event"]["response"]["message"], "Hello");

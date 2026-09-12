@@ -2,8 +2,8 @@ mod extension;
 mod record;
 
 pub(crate) use extension::{
-    ConversationEventError, ConversationEventExtension, DriverEventEnvelope, DriverEventReadError,
-    DriverEventReader, InvalidDriverEventEnvelope,
+    ConversationEventEnvelope, ConversationEventError, ConversationEventExtension,
+    ConversationEventReadError, ConversationEventReader, InvalidConversationEventEnvelope,
 };
 pub(crate) use record::{ConversationEventRecord, StoredConversationEventKind};
 
@@ -214,7 +214,7 @@ pub(crate) enum InvalidConversationEventKind {
     ModelCommunication(InvalidModelCommunication),
     ConversationProblem(InvalidConversationProblem),
     ModelData(InvalidModelData),
-    DriverEvent(InvalidDriverEventEnvelope),
+    Envelope(InvalidConversationEventEnvelope),
 }
 
 impl Display for InvalidConversationEventKind {
@@ -224,7 +224,7 @@ impl Display for InvalidConversationEventKind {
             Self::ModelCommunication(error) => Display::fmt(error, formatter),
             Self::ConversationProblem(error) => Display::fmt(error, formatter),
             Self::ModelData(error) => Display::fmt(error, formatter),
-            Self::DriverEvent(error) => Display::fmt(error, formatter),
+            Self::Envelope(error) => Display::fmt(error, formatter),
         }
     }
 }
@@ -379,8 +379,8 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        AssistantResponse, ConversationCommand, ConversationEventClass, ConversationEventKind,
-        ConversationFact, ConversationLifecycle, ConversationMessage, DriverEventEnvelope,
+        AssistantResponse, ConversationCommand, ConversationEventClass, ConversationEventEnvelope,
+        ConversationEventKind, ConversationFact, ConversationLifecycle, ConversationMessage,
         InvalidAssistantResponse, InvalidModelCommunication, ModelCommunication,
         ModelEventImportance, TurnOutcome,
     };
@@ -468,8 +468,8 @@ mod tests {
     }
 
     #[test]
-    fn driver_event_envelope_preserves_its_classification_and_payload() {
-        let envelope = DriverEventEnvelope::new(
+    fn conversation_event_envelope_preserves_its_classification_and_payload() {
+        let envelope = ConversationEventEnvelope::new(
             ConversationEventClass::Command,
             "test".to_owned(),
             "1".to_owned(),
@@ -478,19 +478,20 @@ mod tests {
             "An invocation was requested.".to_owned(),
             json!({ "invocation_id": "invocation_1" }),
         )
-        .expect("the driver event envelope should be valid");
+        .expect("the conversation event envelope should be valid");
         let serialized = serde_json::to_value(&envelope).expect("the envelope should serialize");
-        let restored: DriverEventEnvelope =
+        let restored: ConversationEventEnvelope =
             serde_json::from_value(serialized).expect("the envelope should deserialize");
 
         assert_eq!(restored.class(), ConversationEventClass::Command);
-        assert_eq!(restored.driver(), "test");
+        assert_eq!(restored.namespace(), "test");
+        assert_eq!(restored.namespace_version(), "1");
         assert_eq!(restored.event_type(), "invocation_requested");
         assert_eq!(restored.event_schema_version(), 1);
         assert_eq!(restored.description(), "An invocation was requested.");
         assert_eq!(restored.payload()["invocation_id"], "invocation_1");
 
-        let fact = DriverEventEnvelope::new(
+        let fact = ConversationEventEnvelope::new(
             ConversationEventClass::Fact,
             "test".to_owned(),
             "1".to_owned(),
@@ -499,7 +500,7 @@ mod tests {
             "An invocation finished.".to_owned(),
             json!({ "successful": true }),
         )
-        .expect("the driver fact envelope should be valid");
+        .expect("the conversation fact envelope should be valid");
         assert_eq!(fact.class(), ConversationEventClass::Fact);
     }
 

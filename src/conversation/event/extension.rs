@@ -9,9 +9,9 @@ use super::ConversationEventClass;
 pub(crate) trait ConversationEventExtension: Send {
     fn class(&self) -> ConversationEventClass;
 
-    fn driver_name(&self) -> &str;
+    fn namespace(&self) -> &str;
 
-    fn driver_version(&self) -> &str;
+    fn namespace_version(&self) -> &str;
 
     fn event_type(&self) -> &str;
 
@@ -21,11 +21,11 @@ pub(crate) trait ConversationEventExtension: Send {
 
     fn serialize_payload(&self) -> Result<Value, ConversationEventError>;
 
-    fn to_envelope(&self) -> Result<DriverEventEnvelope, ConversationEventError> {
-        DriverEventEnvelope::new(
+    fn to_envelope(&self) -> Result<ConversationEventEnvelope, ConversationEventError> {
+        ConversationEventEnvelope::new(
             self.class(),
-            self.driver_name().to_owned(),
-            self.driver_version().to_owned(),
+            self.namespace().to_owned(),
+            self.namespace_version().to_owned(),
             self.event_type().to_owned(),
             self.event_schema_version(),
             self.description().to_owned(),
@@ -36,38 +36,42 @@ pub(crate) trait ConversationEventExtension: Send {
 }
 
 #[allow(dead_code)]
-pub(crate) trait DriverEventReader {
+pub(crate) trait ConversationEventReader {
     fn read_event(
         &self,
-        envelope: &DriverEventEnvelope,
-    ) -> Result<Box<dyn ConversationEventExtension>, DriverEventReadError>;
+        envelope: &ConversationEventEnvelope,
+    ) -> Result<Box<dyn ConversationEventExtension>, ConversationEventReadError>;
 }
 
 #[allow(dead_code)]
 #[derive(Debug, Eq, PartialEq)]
-pub(crate) enum DriverEventReadError {
-    UnsupportedDriver,
+pub(crate) enum ConversationEventReadError {
+    UnsupportedNamespace,
     UnsupportedEvent,
     InvalidPayload(String),
 }
 
-impl Display for DriverEventReadError {
+impl Display for ConversationEventReadError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::UnsupportedDriver => write!(formatter, "the driver does not own this event"),
-            Self::UnsupportedEvent => write!(formatter, "the driver does not own this event type"),
+            Self::UnsupportedNamespace => {
+                write!(formatter, "the namespace does not own this event")
+            }
+            Self::UnsupportedEvent => {
+                write!(formatter, "the namespace does not own this event type")
+            }
             Self::InvalidPayload(message) => {
-                write!(formatter, "invalid driver event payload: {message}")
+                write!(formatter, "invalid conversation event payload: {message}")
             }
         }
     }
 }
 
-impl Error for DriverEventReadError {}
+impl Error for ConversationEventReadError {}
 
 #[derive(Debug)]
 pub(crate) enum ConversationEventError {
-    InvalidEnvelope(InvalidDriverEventEnvelope),
+    InvalidEnvelope(InvalidConversationEventEnvelope),
     Serialization(String),
 }
 
@@ -86,10 +90,10 @@ impl Display for ConversationEventError {
 impl Error for ConversationEventError {}
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub(crate) struct DriverEventEnvelope {
+pub(crate) struct ConversationEventEnvelope {
     class: ConversationEventClass,
-    driver: String,
-    driver_version: String,
+    namespace: String,
+    namespace_version: String,
     event_type: String,
     event_schema_version: u32,
     description: String,
@@ -97,20 +101,20 @@ pub(crate) struct DriverEventEnvelope {
 }
 
 #[allow(dead_code)]
-impl DriverEventEnvelope {
+impl ConversationEventEnvelope {
     pub(crate) fn new(
         class: ConversationEventClass,
-        driver: String,
-        driver_version: String,
+        namespace: String,
+        namespace_version: String,
         event_type: String,
         event_schema_version: u32,
         description: String,
         payload: Value,
-    ) -> Result<Self, InvalidDriverEventEnvelope> {
+    ) -> Result<Self, InvalidConversationEventEnvelope> {
         let event = Self {
             class,
-            driver,
-            driver_version,
+            namespace,
+            namespace_version,
             event_type,
             event_schema_version,
             description,
@@ -120,16 +124,16 @@ impl DriverEventEnvelope {
         Ok(event)
     }
 
-    pub(crate) fn driver(&self) -> &str {
-        &self.driver
+    pub(crate) fn namespace(&self) -> &str {
+        &self.namespace
     }
 
     pub(crate) fn class(&self) -> ConversationEventClass {
         self.class
     }
 
-    pub(crate) fn driver_version(&self) -> &str {
-        &self.driver_version
+    pub(crate) fn namespace_version(&self) -> &str {
+        &self.namespace_version
     }
 
     pub(crate) fn event_type(&self) -> &str {
@@ -148,41 +152,41 @@ impl DriverEventEnvelope {
         &self.payload
     }
 
-    pub(crate) fn ensure_valid(&self) -> Result<(), InvalidDriverEventEnvelope> {
-        if self.driver.trim().is_empty() {
-            return Err(InvalidDriverEventEnvelope::DriverName);
+    pub(crate) fn ensure_valid(&self) -> Result<(), InvalidConversationEventEnvelope> {
+        if self.namespace.trim().is_empty() {
+            return Err(InvalidConversationEventEnvelope::Namespace);
         }
-        if self.driver_version.trim().is_empty() {
-            return Err(InvalidDriverEventEnvelope::DriverVersion);
+        if self.namespace_version.trim().is_empty() {
+            return Err(InvalidConversationEventEnvelope::NamespaceVersion);
         }
         if self.event_type.trim().is_empty() {
-            return Err(InvalidDriverEventEnvelope::EventType);
+            return Err(InvalidConversationEventEnvelope::EventType);
         }
         if self.description.trim().is_empty() {
-            return Err(InvalidDriverEventEnvelope::Description);
+            return Err(InvalidConversationEventEnvelope::Description);
         }
         Ok(())
     }
 }
 
 #[derive(Debug)]
-pub(crate) enum InvalidDriverEventEnvelope {
-    DriverName,
-    DriverVersion,
+pub(crate) enum InvalidConversationEventEnvelope {
+    Namespace,
+    NamespaceVersion,
     EventType,
     Description,
 }
 
-impl Display for InvalidDriverEventEnvelope {
+impl Display for InvalidConversationEventEnvelope {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         let message = match self {
-            Self::DriverName => "driver name must not be empty",
-            Self::DriverVersion => "driver version must not be empty",
-            Self::EventType => "driver event type must not be empty",
-            Self::Description => "driver event description must not be empty",
+            Self::Namespace => "namespace must not be empty",
+            Self::NamespaceVersion => "namespace version must not be empty",
+            Self::EventType => "conversation event type must not be empty",
+            Self::Description => "conversation event description must not be empty",
         };
         write!(formatter, "{message}")
     }
 }
 
-impl Error for InvalidDriverEventEnvelope {}
+impl Error for InvalidConversationEventEnvelope {}
