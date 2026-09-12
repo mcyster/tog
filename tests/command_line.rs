@@ -402,7 +402,7 @@ fn model_issue_is_rendered_and_persisted_as_a_top_level_problem() {
         .output()
         .expect("tog should run");
 
-    assert!(command_output.status.success());
+    assert!(!command_output.status.success());
     assert_eq!(
         String::from_utf8(command_output.stdout).expect("standard output should be UTF-8"),
         "### I cannot comply.\n"
@@ -638,7 +638,7 @@ fn failed_user_turn_is_included_in_the_next_local_reconstruction() {
         ])
         .output()
         .expect("the failed turn should run");
-    assert!(failed_output.status.success());
+    assert!(!failed_output.status.success());
     assert_eq!(
         reported_conversation_id(&failed_output.stderr),
         conversation_id
@@ -695,6 +695,26 @@ fn failed_user_turn_is_included_in_the_next_local_reconstruction() {
     assert!(requests[2].get("previous_response_id").is_none());
     assert_eq!(requests[2]["input"].as_array().map(Vec::len), Some(4));
     assert_eq!(requests[2]["input"][2]["content"], "Failed question");
+}
+
+#[test]
+fn authentication_failure_exits_unsuccessfully() {
+    let server = MockOpenAiServer::start(vec![MockResponse::Failure {
+        status: "401 Unauthorized",
+    }]);
+    let data_directory = temporary_data_directory();
+
+    let command_output = configured_command(&server, &data_directory)
+        .args(["Question"])
+        .output()
+        .expect("tog should run");
+
+    assert!(!command_output.status.success());
+    assert_eq!(
+        String::from_utf8(command_output.stdout).expect("standard output should be UTF-8"),
+        "### The model provider could not authenticate the invocation.\n"
+    );
+    assert_eq!(server.finish().len(), 1);
 }
 
 #[test]

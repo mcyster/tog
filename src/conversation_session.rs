@@ -6,7 +6,7 @@ use futures_util::StreamExt;
 use crate::conversation::{
     ConversationCommandId, ConversationEvent, ConversationFact, ConversationId,
     ConversationProblem, ConversationRequest, ConversationTurnId, DriverConversationEvent,
-    DriverConversationFact, UserContent, UserMessageRequest, UserPrompt,
+    DriverConversationFact, TurnOutcome, UserContent, UserMessageRequest, UserPrompt,
 };
 use crate::model_driver::{ModelDriver, ModelDriverError, TurnInput};
 use crate::persistence::EventStore;
@@ -71,7 +71,7 @@ impl ConversationSession {
     pub(crate) async fn invoke(
         &self,
         mut report_progress: impl FnMut(ConversationSessionProgress) -> ConversationSessionResult<()>,
-    ) -> ConversationSessionResult<()> {
+    ) -> ConversationSessionResult<TurnOutcome> {
         let turn_id = ConversationTurnId::new();
         self.event_store.append_new_conversation_event(
             self.conversation_id,
@@ -90,12 +90,12 @@ impl ConversationSession {
             .model_driver
             .invoke(TurnInput::new(&conversation, turn_id))
             .await?;
-        let mut turn_completed = false;
+        let mut completed_outcome = None;
         let mut accepted_request_ids = HashSet::new();
 
         while let Some(output) = output_stream.next().await {
             let output = output?;
-            if turn_completed {
+            if completed_outcome.is_some() {
                 return Err(Box::new(ModelDriverError::OutputAfterCompletion {
                     event_type: driver_event_type(&output),
                 }));
@@ -137,15 +137,16 @@ impl ConversationSession {
                         | ConversationFact::Communication {
                             turn_id: fact_turn_id,
                             ..
-                        }
-                        | ConversationFact::TurnCompleted {
-                            turn_id: fact_turn_id,
-                            ..
                         } => {
                             ensure_turn_id(*fact_turn_id, &turn_id)?;
-                            if matches!(fact, ConversationFact::TurnCompleted { .. }) {
-                                turn_completed = true;
-                            }
+                            self.report_shared_fact(fact, &mut report_progress)?;
+                        }
+                        ConversationFact::TurnCompleted {
+                            turn_id: fact_turn_id,
+                            outcome,
+                        } => {
+                            ensure_turn_id(*fact_turn_id, &turn_id)?;
+                            completed_outcome = Some(*outcome);
                             self.report_shared_fact(fact, &mut report_progress)?;
                         }
                         ConversationFact::Problem {
@@ -160,10 +161,7 @@ impl ConversationSession {
             }
         }
 
-        if !turn_completed {
-            return Err(Box::new(ModelDriverError::IncompleteTurn));
-        }
-        Ok(())
+        completed_outcome.ok_or_else(|| ModelDriverError::IncompleteTurn.into())
     }
 
     fn append_shared_fact(&self, fact: ConversationFact) -> ConversationSessionResult<()> {
@@ -273,6 +271,7 @@ mod tests {
     struct RecordingDriver {
         source: ModelSource,
         pending_counts: Arc<Mutex<Vec<usize>>>,
+        outcome: TurnOutcome,
     }
 
     impl DriverEventReader for RecordingDriver {
@@ -313,7 +312,7 @@ mod tests {
             output.push(Ok(DriverConversationEvent::Fact(
                 DriverConversationFact::Shared(ConversationFact::TurnCompleted {
                     turn_id,
-                    outcome: TurnOutcome::Succeeded,
+                    outcome: self.outcome,
                 }),
             )));
             async move { Ok(stream::iter(output).boxed()) }.boxed()
@@ -340,16 +339,20 @@ mod tests {
             Box::new(RecordingDriver {
                 source: source(),
                 pending_counts: Arc::clone(&pending_counts),
+                outcome: TurnOutcome::Succeeded,
             }),
         );
         let conversation_id = session.id();
         session
             .add_user_request(UserPrompt::from_str("hello").expect("the prompt should be valid"))
             .expect("the request should be recorded");
-        session
-            .invoke(|_| Ok(()))
-            .await
-            .expect("the first invocation should complete");
+        assert_eq!(
+            session
+                .invoke(|_| Ok(()))
+                .await
+                .expect("the first invocation should complete"),
+            TurnOutcome::Succeeded
+        );
 
         let reopened = ConversationSession::open(
             conversation_id,
@@ -357,25 +360,52 @@ mod tests {
             Box::new(RecordingDriver {
                 source: source(),
                 pending_counts: Arc::clone(&pending_counts),
+                outcome: TurnOutcome::Succeeded,
             }),
         )
         .expect("the session should open");
         assert_eq!(reopened.id(), conversation_id);
-        reopened
-            .invoke(|progress| {
-                if let ConversationSessionProgress::ProblemCompleted { problem } = progress {
-                    let _ = problem;
-                }
-                Ok(())
-            })
-            .await
-            .expect("an invocation without new input should complete");
+        assert_eq!(
+            reopened
+                .invoke(|progress| {
+                    if let ConversationSessionProgress::ProblemCompleted { problem } = progress {
+                        let _ = problem;
+                    }
+                    Ok(())
+                })
+                .await
+                .expect("an invocation without new input should complete"),
+            TurnOutcome::Succeeded
+        );
 
         assert_eq!(
             *pending_counts
                 .lock()
                 .expect("the pending request list should lock"),
             [1, 0]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_turn_outcome_is_returned_to_the_caller() {
+        let session = ConversationSession::create(
+            EventStore::new(temporary_directory()).expect("the store should be created"),
+            Box::new(RecordingDriver {
+                source: source(),
+                pending_counts: Arc::new(Mutex::new(Vec::new())),
+                outcome: TurnOutcome::Failed,
+            }),
+        );
+        session
+            .add_user_request(UserPrompt::from_str("hello").expect("the prompt should be valid"))
+            .expect("the request should be recorded");
+
+        assert_eq!(
+            session
+                .invoke(|_| Ok(()))
+                .await
+                .expect("the failed invocation should still complete"),
+            TurnOutcome::Failed
         );
     }
 }

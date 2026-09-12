@@ -5,6 +5,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use crate::conversation::{
     ConversationFact, ConversationId, ConversationProblem, ModelEventImportance, ModelId,
+    TurnOutcome,
 };
 use crate::conversation_session::{
     ConversationSession, ConversationSessionProgress, ConversationSessionResult,
@@ -39,7 +40,7 @@ impl CommandLine {
         Self::parse_from(arguments)
     }
 
-    pub(crate) async fn execute(self) -> ConversationSessionResult<()> {
+    pub(crate) async fn execute(self) -> ConversationSessionResult<TurnOutcome> {
         match self.command {
             Command::Turn(arguments) => {
                 let user_prompt = arguments.user_prompt_words.join(" ").parse()?;
