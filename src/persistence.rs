@@ -224,13 +224,14 @@ fn invalid_conversation_data(error: impl Error + Send + Sync + 'static) -> io::E
 
 #[cfg(test)]
 mod tests {
-    use serde_json::{Map, Value};
+    use schemars::json_schema;
+    use serde_json::{Map, Value, json};
 
     use super::EventStore;
     use crate::conversation::{
         AssistantResponse, ConversationCommandId, ConversationEvent, ConversationFact,
         ConversationId, ConversationMessage, ConversationTurnId, ModelData, ModelInvocationId,
-        UserContent,
+        ToolCallId, ToolDefinition, ToolName, ToolOutcome, ToolRequest, ToolResponse, UserContent,
     };
 
     fn temporary_store() -> EventStore {
@@ -262,11 +263,11 @@ mod tests {
 
         assert_eq!(first_event.conversation_id, conversation_id);
         assert_eq!(first_event.position, 0);
-        assert_eq!(first_event.schema_version, 12);
+        assert_eq!(first_event.schema_version, 13);
         assert_ne!(first_event.timestamp, time::OffsetDateTime::UNIX_EPOCH);
         assert_eq!(second_event.conversation_id, conversation_id);
         assert_eq!(second_event.position, 1);
-        assert_eq!(second_event.schema_version, 12);
+        assert_eq!(second_event.schema_version, 13);
         assert_ne!(second_event.timestamp, time::OffsetDateTime::UNIX_EPOCH);
         assert_ne!(second_event.id, first_event.id);
 
@@ -348,5 +349,83 @@ mod tests {
                 .append_new_conversation_event(conversation_id, user_fact("fourth"))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn event_store_round_trips_tool_definitions_requests_and_responses() {
+        let store = temporary_store();
+        let conversation_id = ConversationId::new();
+        let call_id = ToolCallId::new();
+        let turn_id = ConversationTurnId::new();
+        let tool_definition = ToolDefinition::try_new(
+            ToolName::try_new("shell".to_owned()).expect("the tool name should be valid"),
+            "Run a command.".to_owned(),
+            json_schema!({ "type": "object" }),
+            json_schema!({ "type": "object" }),
+        )
+        .expect("the tool definition should be valid");
+        let request = ToolRequest::try_new(
+            call_id,
+            ToolName::try_new("shell".to_owned()).expect("the tool name should be valid"),
+            json!({ "command": "pwd" }),
+            ModelInvocationId::new(),
+            None,
+        )
+        .expect("the tool request should be valid");
+        let response = ToolResponse::new(
+            call_id,
+            ToolOutcome::Result {
+                value: json!({ "stdout": "/tmp\n" }),
+            },
+        );
+
+        store
+            .append_new_conversation_event(
+                conversation_id,
+                ConversationEvent::Fact(ConversationFact::ToolsAvailable {
+                    tools: vec![tool_definition.clone()],
+                }),
+            )
+            .expect("the tool definitions should persist");
+        store
+            .append_new_conversation_event(
+                conversation_id,
+                ConversationEvent::Fact(ConversationFact::ToolRequest {
+                    request: request.clone(),
+                    turn_id: Some(turn_id),
+                }),
+            )
+            .expect("the tool request should persist");
+        store
+            .append_new_conversation_event(
+                conversation_id,
+                ConversationEvent::Fact(ConversationFact::ToolResponse {
+                    response: response.clone(),
+                    turn_id: Some(turn_id),
+                }),
+            )
+            .expect("the tool response should persist");
+
+        let conversation = store
+            .load_conversation(conversation_id)
+            .expect("the conversation should load");
+
+        assert_eq!(conversation.available_tools(), [tool_definition]);
+        assert!(matches!(
+            &conversation.events()[1].kind,
+            crate::conversation::StoredConversationEventKind::Shared(
+                crate::conversation::ConversationEventKind::Fact(
+                    ConversationFact::ToolRequest { request: restored, turn_id: Some(restored_turn) }
+                )
+            ) if restored == &request && restored_turn == &turn_id
+        ));
+        assert!(matches!(
+            &conversation.events()[2].kind,
+            crate::conversation::StoredConversationEventKind::Shared(
+                crate::conversation::ConversationEventKind::Fact(
+                    ConversationFact::ToolResponse { response: restored, .. }
+                )
+            ) if restored == &response
+        ));
     }
 }

@@ -6,13 +6,14 @@ use futures_util::stream::BoxStream;
 
 use crate::conversation::{
     Conversation, ConversationCommandId, ConversationEventExtension, ConversationEventReader,
-    ConversationMessage, ConversationTurnId, ModelSource, UserMessageRequest,
+    ConversationMessage, ConversationTurnId, ModelSource, ToolRequest, UserMessageRequest,
 };
 
 pub(crate) type ModelOutputStream = BoxStream<'static, Result<ModelDriverOutput, ModelDriverError>>;
 
 pub(crate) enum ModelDriverOutput {
     Message(ConversationMessage),
+    ToolRequest(ToolRequest),
     Command(Box<dyn ConversationEventExtension>),
     #[allow(dead_code)]
     Extension(Box<dyn ConversationEventExtension>),

@@ -1,6 +1,6 @@
 # Conversation and ModelDriver Architecture
 
-**Status:** Phase 1 asynchronous streaming text milestone implemented
+**Status:** Phase 1 asynchronous streaming text and bounded tool-calling slice implemented
 **Purpose:** Define a simple, durable conversation model and a narrow `ModelDriver` boundary that can be implemented against the OpenAI Responses API now and can support switching models/providers within a conversation.
 
 This design is intentionally incomplete.
@@ -1476,7 +1476,9 @@ These may become useful later, but they should not burden the first ModelDriver 
 
 ## 46. First implementation milestone
 
-The basic semantic text milestone uses the asynchronous streaming boundary. Tool use, content references, and provider tracing remain follow-up work.
+The basic semantic milestone uses the asynchronous streaming boundary with a
+bounded sequential tool-calling loop and a shell tool. Content references and
+provider tracing remain follow-up work.
 
 The asynchronous streaming implementation proves:
 

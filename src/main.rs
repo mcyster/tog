@@ -4,6 +4,7 @@ mod conversation_session;
 mod model_driver;
 mod openai;
 mod persistence;
+mod tools;
 
 use std::process::ExitCode;
 

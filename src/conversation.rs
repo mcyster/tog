@@ -3,6 +3,7 @@ mod id;
 mod model;
 mod model_data;
 mod problem;
+mod tool;
 
 use std::collections::HashSet;
 use std::error::Error;
@@ -21,15 +22,19 @@ pub(crate) use event::{
 };
 pub(crate) use id::{
     ConversationCommandId, ConversationEventId, ConversationId, ConversationTurnId,
-    ModelInvocationId,
+    ModelInvocationId, ToolCallId,
 };
 pub(crate) use model::{ModelId, ModelSource, ProviderId};
 pub(crate) use model_data::{InvalidModelData, ModelData};
 pub(crate) use problem::{
     ConversationProblem, InvalidConversationProblem, InvocationError, ModelIssue,
 };
+pub(crate) use tool::{
+    InvalidToolData, ToolDefinition, ToolExecutionProblem, ToolName, ToolOutcome, ToolRequest,
+    ToolResponse,
+};
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Conversation {
     id: ConversationId,
     events: Vec<ConversationEventRecord>,
@@ -116,6 +121,19 @@ impl Conversation {
             .filter(|request| !accepted_request_ids.contains(&request.command_id))
             .collect()
     }
+
+    pub(crate) fn available_tools(&self) -> &[ToolDefinition] {
+        self.events
+            .iter()
+            .rev()
+            .find_map(|event| match &event.kind {
+                StoredConversationEventKind::Shared(ConversationEventKind::Fact(
+                    ConversationFact::ToolsAvailable { tools },
+                )) => Some(tools.as_slice()),
+                _ => None,
+            })
+            .unwrap_or(&[])
+    }
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -201,6 +219,7 @@ impl Error for InvalidUserPrompt {}
 mod tests {
     use std::str::FromStr;
 
+    use schemars::json_schema;
     use serde_json::json;
     use time::OffsetDateTime;
 
@@ -208,8 +227,35 @@ mod tests {
         Conversation, ConversationCommandId, ConversationEventId, ConversationEventKind,
         ConversationEventRecord, ConversationFact, ConversationId, ConversationMessage,
         ConversationTurnId, InvalidConversation, InvalidUserPrompt, StoredConversationEventKind,
-        UserContent, UserPrompt,
+        ToolDefinition, ToolName, UserContent, UserPrompt,
     };
+
+    fn tool_definition(name: &str) -> ToolDefinition {
+        ToolDefinition::try_new(
+            ToolName::try_new(name.to_owned()).expect("the tool name should be valid"),
+            "Run something.".to_owned(),
+            json_schema!({ "type": "object" }),
+            json_schema!({ "type": "object" }),
+        )
+        .expect("the tool definition should be valid")
+    }
+
+    fn tools_available_event(
+        conversation_id: ConversationId,
+        position: u64,
+        tools: Vec<ToolDefinition>,
+    ) -> ConversationEventRecord {
+        ConversationEventRecord {
+            conversation_id,
+            position,
+            id: ConversationEventId::new(),
+            timestamp: OffsetDateTime::UNIX_EPOCH,
+            schema_version: 13,
+            kind: StoredConversationEventKind::Shared(ConversationEventKind::Fact(
+                ConversationFact::ToolsAvailable { tools },
+            )),
+        }
+    }
 
     fn user_event(conversation_id: ConversationId, position: u64) -> ConversationEventRecord {
         ConversationEventRecord {
@@ -302,6 +348,76 @@ mod tests {
         .expect("the conversation should allow command positions between events");
 
         assert_eq!(conversation.events()[1].position, 3);
+    }
+
+    #[test]
+    fn available_tools_uses_the_latest_declaration() {
+        let conversation_id = ConversationId::new();
+
+        let conversation = Conversation::from_events(vec![
+            tools_available_event(conversation_id, 0, vec![tool_definition("first")]),
+            user_event(conversation_id, 1),
+            tools_available_event(conversation_id, 2, vec![tool_definition("second")]),
+        ])
+        .expect("the conversation should be valid");
+
+        let available_tools = conversation.available_tools();
+        assert_eq!(available_tools.len(), 1);
+        assert_eq!(available_tools[0].name().as_str(), "second");
+    }
+
+    #[test]
+    fn an_empty_tools_available_declaration_removes_all_tools() {
+        let conversation_id = ConversationId::new();
+
+        let conversation = Conversation::from_events(vec![
+            tools_available_event(conversation_id, 0, vec![tool_definition("first")]),
+            tools_available_event(conversation_id, 1, Vec::new()),
+        ])
+        .expect("the conversation should be valid");
+
+        assert!(conversation.available_tools().is_empty());
+    }
+
+    #[test]
+    fn a_conversation_without_a_tools_available_declaration_has_no_tools() {
+        let conversation_id = ConversationId::new();
+
+        let conversation = Conversation::from_events(vec![user_event(conversation_id, 0)])
+            .expect("the conversation should be valid");
+
+        assert!(conversation.available_tools().is_empty());
+    }
+
+    #[test]
+    fn conversation_rejects_invalid_deserialized_tool_definitions() {
+        let conversation_id = ConversationId::new();
+        let event_id = ConversationEventId::new();
+        let conversation_event: ConversationEventRecord = serde_json::from_value(json!({
+            "conversation_id": conversation_id,
+            "position": 0,
+            "id": event_id,
+            "timestamp": "2026-08-22T18:42:31.482Z",
+            "schema_version": 13,
+            "class": "fact",
+            "event": {
+                "tools": [{
+                    "name": "shell",
+                    "description": "   ",
+                    "parameters": { "type": "object" },
+                    "result": { "type": "object" }
+                }]
+            }
+        }))
+        .expect("derived deserialization should construct the conversation event");
+
+        assert_eq!(
+            Conversation::from_events(vec![conversation_event]),
+            Err(InvalidConversation::InvalidEvent {
+                position: 0,
+                reason: "tool description must not be empty".to_owned(),
+            })
+        );
     }
 
     #[test]

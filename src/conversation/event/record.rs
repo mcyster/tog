@@ -7,9 +7,9 @@ use super::{
 };
 use crate::conversation::{ConversationEventId, ConversationId};
 
-pub(crate) const SCHEMA_VERSION: u32 = 12;
+pub(crate) const SCHEMA_VERSION: u32 = 13;
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub(crate) struct ConversationEventRecord {
     pub(crate) conversation_id: ConversationId,
     pub(crate) position: u64,
@@ -62,7 +62,7 @@ impl ConversationEventRecord {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(untagged)]
 pub(crate) enum StoredConversationEventKind {
     Shared(ConversationEventKind),

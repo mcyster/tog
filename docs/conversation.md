@@ -71,8 +71,9 @@ Fact
     Communication
     Problem
     TurnCompleted
-ToolRequest
-ToolResponse
+    ToolsAvailable
+    ToolRequest
+    ToolResponse
 Context
 Automation
 Data
@@ -126,13 +127,31 @@ output.done
     -> Assistant(model=..., invocation_id=..., message="Hello")
 ```
 
+### ToolsAvailable
+
+`ToolsAvailable` records the complete toolset offered by the caller before a
+model invocation. The latest declaration in the conversation is authoritative:
+each declaration replaces the previous toolset, and an empty list removes all
+tools. Earlier declarations remain in the ordered history. The event is
+conversation context, not a user or assistant message.
+
 ### ToolRequest And ToolResponse
 
-`ToolRequest` records that a model requested a tool invocation. Each request has a stable `ToolCallId`.
+`ToolRequest` records that a model requested a tool invocation. Each request has
+a stable portable `ToolCallId`, the tool name, JSON arguments, the producing
+`ModelInvocationId`, and optional `ModelData` that may preserve a provider-native
+call identifier while the portable contract remains provider-neutral.
 
-`ToolResponse` records the result of one request and references exactly one `ToolCallId`. A response is appended when it arrives, so response order does not need to match request order.
+`ToolResponse` records the result of one request and references exactly one
+`ToolCallId`. It contains either a successful result or a typed execution
+problem. A response is appended when it arrives, so response order does not need
+to match request order; the caller records responses before invoking the model
+again.
 
-These events record semantic facts. They do not prescribe whether tools run sequentially or concurrently, or when the model is invoked again. The caller owns that orchestration policy.
+These events record semantic facts. They do not prescribe whether tools run
+sequentially or concurrently, or when the model is invoked again. The caller
+owns that orchestration policy; the current session executes sequentially and
+bounds continuation rounds.
 
 ### Context
 

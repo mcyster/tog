@@ -34,6 +34,11 @@ enum MockResponse {
         interesting: &'static str,
         important: &'static str,
     },
+    ToolCall {
+        call_id: &'static str,
+        name: &'static str,
+        arguments: &'static str,
+    },
     Failure {
         status: &'static str,
     },
@@ -180,6 +185,24 @@ fn write_response(stream: &mut TcpStream, response: MockResponse) {
             "application/json",
             "{\"error\":{\"message\":\"request rejected\"}}".to_owned(),
         ),
+        MockResponse::ToolCall {
+            call_id,
+            name,
+            arguments,
+        } => (
+            "200 OK",
+            "text/event-stream",
+            format!(
+                concat!(
+                    "data: {{\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{{\"id\":\"fc_1\",\"type\":\"function_call\",\"call_id\":\"{}\",\"name\":\"{}\",\"arguments\":\"\"}}}}\n\n",
+                    "data: {{\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_1\",\"output_index\":0,\"delta\":\"{}\"}}\n\n",
+                    "data: {{\"type\":\"response.function_call_arguments.done\",\"item_id\":\"fc_1\",\"output_index\":0,\"arguments\":\"{}\"}}\n\n",
+                    "data: {{\"type\":\"response.completed\",\"response\":{{}}}}\n\n",
+                    "data: [DONE]\n\n"
+                ),
+                call_id, name, arguments, arguments
+            ),
+        ),
         MockResponse::Refusal { message } => (
             "200 OK",
             "text/event-stream",
@@ -264,7 +287,7 @@ fn turn_persists_events_and_prints_semantic_output() {
             .replace('-', ""),
         conversation_id.trim_start_matches("conversation_")
     );
-    assert_eq!(first_event["schema_version"], 12);
+    assert_eq!(first_event["schema_version"], 13);
     assert_eq!(first_event["class"], "command");
     assert_eq!(first_event["event"]["type"], "user_message_requested");
     assert_eq!(first_event["event"]["content"][0]["type"], "text");
@@ -277,15 +300,26 @@ fn turn_persists_events_and_prints_semantic_output() {
     .expect("the persisted turn request should be JSON");
     assert_eq!(turn_request["class"], "command");
     assert_eq!(turn_request["event"]["type"], "turn_requested");
+    let tools_available: Value = serde_json::from_reader(
+        fs::File::open(&event_paths[2]).expect("the tool context should open"),
+    )
+    .expect("the persisted tool context should be JSON");
+    assert_eq!(tools_available["schema_version"], 13);
+    assert_eq!(tools_available["class"], "fact");
+    assert_eq!(tools_available["event"]["tools"][0]["name"], "shell");
+    assert!(
+        tools_available["event"]["tools"][0]["parameters"]["properties"]["command"].is_object()
+    );
+    assert!(tools_available["event"]["tools"][0]["result"].is_object());
     let user_event: Value = serde_json::from_reader(
-        fs::File::open(&event_paths[2]).expect("the persisted user event should open"),
+        fs::File::open(&event_paths[3]).expect("the persisted user event should open"),
     )
     .expect("the persisted user event should be JSON");
-    assert_eq!(user_event["schema_version"], 12);
+    assert_eq!(user_event["schema_version"], 13);
     assert_eq!(user_event["class"], "fact");
     assert_eq!(user_event["event"]["type"], "user");
     let invocation_event: Value = serde_json::from_reader(
-        fs::File::open(&event_paths[3]).expect("the invocation event should open"),
+        fs::File::open(&event_paths[4]).expect("the invocation event should open"),
     )
     .expect("the invocation event should be JSON");
     assert_eq!(invocation_event["class"], "command");
@@ -298,17 +332,17 @@ fn turn_persists_events_and_prints_semantic_output() {
     assert_eq!(invocation_event["payload"]["model"]["provider"], "openai");
     assert_eq!(invocation_event["payload"]["model"]["model"], "gpt-5.6");
     let model_event: Value = serde_json::from_reader(
-        fs::File::open(&event_paths[4]).expect("the persisted model event should open"),
+        fs::File::open(&event_paths[5]).expect("the persisted model event should open"),
     )
     .expect("the persisted model event should be JSON");
-    assert_eq!(model_event["schema_version"], 12);
+    assert_eq!(model_event["schema_version"], 13);
     assert_eq!(model_event["class"], "fact");
     assert_eq!(model_event["event"]["type"], "assistant");
     assert_eq!(model_event["event"]["response"]["message"], "Hello");
     assert!(model_event.get("kind").is_none());
     assert!(model_event.get("data").is_none());
     let completion: Value = serde_json::from_reader(
-        fs::File::open(&event_paths[5]).expect("the persisted completion should open"),
+        fs::File::open(&event_paths[6]).expect("the persisted completion should open"),
     )
     .expect("the persisted completion should be JSON");
     assert_eq!(completion["class"], "fact");
@@ -317,9 +351,73 @@ fn turn_persists_events_and_prints_semantic_output() {
     let requests = server.finish();
     assert_eq!(requests[0]["model"], "gpt-5.6");
     assert_eq!(requests[0]["input"][0]["content"], "say hi");
+    assert_eq!(requests[0]["tools"][0]["type"], "function");
+    assert_eq!(requests[0]["tools"][0]["name"], "shell");
+    assert!(requests[0]["tools"][0]["parameters"]["properties"]["command"].is_object());
+    assert!(requests[0]["tools"][0].get("result").is_none());
     assert_eq!(requests[0]["reasoning"]["summary"], "auto");
     assert_eq!(requests[0]["stream"], true);
     assert!(requests[0].get("text").is_none());
+}
+
+#[test]
+fn turn_runs_the_shell_tool_and_reports_the_result() {
+    let server = MockOpenAiServer::start(vec![
+        MockResponse::ToolCall {
+            call_id: "call_pwd",
+            name: "shell",
+            arguments: "{\\\"command\\\":\\\"pwd\\\"}",
+        },
+        MockResponse::Success {
+            response_id: "resp_final",
+            assistant_text: "The command ran.",
+        },
+    ]);
+    let data_directory = temporary_data_directory();
+
+    let command_output = configured_command(&server, &data_directory)
+        .args(["run pwd and describe the result"])
+        .output()
+        .expect("tog should run");
+
+    assert!(command_output.status.success());
+    assert_eq!(
+        String::from_utf8(command_output.stdout).expect("standard output should be UTF-8"),
+        "The command ran.\n"
+    );
+    let requests = server.finish();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[1]["tools"][0]["name"], "shell");
+    let input = requests[1]["input"]
+        .as_array()
+        .expect("the follow-up request should contain input");
+    assert!(input.iter().any(|item| {
+        item["type"] == "function_call" && item["name"] == "shell" && item["call_id"] == "call_pwd"
+    }));
+    let tool_output = input
+        .iter()
+        .find(|item| item["type"] == "function_call_output")
+        .expect("the follow-up request should contain the tool result");
+    assert_eq!(tool_output["call_id"], "call_pwd");
+    let output: Value = serde_json::from_str(
+        tool_output["output"]
+            .as_str()
+            .expect("the tool output should be a JSON string"),
+    )
+    .expect("the tool output should be JSON");
+    assert_eq!(output["type"], "result");
+    assert_eq!(output["value"]["exit_status"]["type"], "exited");
+    assert_eq!(output["value"]["exit_status"]["code"], 0);
+    assert_eq!(output["value"]["stdout_truncated"], false);
+    let reported_directory = output["value"]["stdout"]
+        .as_str()
+        .expect("stdout should be a string")
+        .trim();
+    assert_eq!(
+        fs::canonicalize(reported_directory).expect("pwd should report an existing directory"),
+        fs::canonicalize(std::env::current_dir().expect("the test directory should be available"))
+            .expect("the test directory should canonicalize")
+    );
 }
 
 #[test]
@@ -425,7 +523,7 @@ fn model_issue_is_rendered_and_persisted_as_a_top_level_problem() {
         .collect::<Vec<_>>();
     event_paths.sort();
     let problem: Value = serde_json::from_reader(
-        fs::File::open(&event_paths[4]).expect("the problem event should open"),
+        fs::File::open(&event_paths[5]).expect("the problem event should open"),
     )
     .expect("the problem event should be JSON");
     assert_eq!(problem["class"], "fact");
@@ -510,24 +608,24 @@ fn reasoning_events_are_persisted_and_printed_but_not_replayed_as_assistant_mess
             .expect("the persisted event should be JSON")
         })
         .collect::<Vec<_>>();
-    assert_eq!(persisted_events[4]["class"], "fact");
-    assert_eq!(persisted_events[4]["event"]["type"], "communication");
-    assert_eq!(
-        persisted_events[4]["event"]["communication"]["subtype"],
-        "reasoning"
-    );
-    assert_eq!(
-        persisted_events[4]["event"]["communication"]["message"],
-        "Detailed thought"
-    );
     assert_eq!(persisted_events[5]["class"], "fact");
     assert_eq!(persisted_events[5]["event"]["type"], "communication");
     assert_eq!(
         persisted_events[5]["event"]["communication"]["subtype"],
-        "reasoning_summary"
+        "reasoning"
     );
     assert_eq!(
         persisted_events[5]["event"]["communication"]["message"],
+        "Detailed thought"
+    );
+    assert_eq!(persisted_events[6]["class"], "fact");
+    assert_eq!(persisted_events[6]["event"]["type"], "communication");
+    assert_eq!(
+        persisted_events[6]["event"]["communication"]["subtype"],
+        "reasoning_summary"
+    );
+    assert_eq!(
+        persisted_events[6]["event"]["communication"]["message"],
         "Reasoning summary"
     );
 
