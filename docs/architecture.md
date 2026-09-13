@@ -32,6 +32,9 @@ Assistant
 Communication
 Problem
 TurnCompleted
+ToolsAvailable
+ToolRequest
+ToolResponse
 ```
 
 `Assistant` and `Communication` are not nested beneath a generic `Model` kind.
@@ -70,6 +73,23 @@ The driver records its own invocation event, including a stable
 `ModelInvocationId`, as an opaque driver event. Returned model facts reference
 that identifier. The invocation record is execution metadata, not a replacement
 for portable assistant or problem meaning.
+
+## Tools
+
+The caller records `ToolsAvailable` before each driver invocation. The latest
+declaration determines the toolset the driver presents, and each declaration
+replaces the previous one. `ToolRequest` records a model-requested tool call
+with a portable `ToolCallId`, tool name, and JSON arguments. `ToolResponse`
+correlates the outcome of that call, either a successful result or a typed
+execution problem.
+
+The driver synthesizes portable requests from completed provider tool calls and
+translates recorded definitions into its provider's tool schema; it never
+executes tools. The session executes registered tools sequentially, persists
+each response, and invokes the model again until no tool work remains. Assistant
+text does not end a turn while tool requests are outstanding, and an execution
+problem is returned to the model rather than failing the turn. The loop is
+bounded and reports reaching its limit explicitly. See [Tools](tools.md).
 
 ## Conversation Projection
 

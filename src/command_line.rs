@@ -12,6 +12,7 @@ use crate::conversation_session::{
 };
 use crate::openai::OpenAiModelDriver;
 use crate::persistence::EventStore;
+use crate::tools::{ShellTool, ToolRegistry};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -47,11 +48,16 @@ impl CommandLine {
                 let verbosity = arguments.verbosity;
                 let event_store = EventStore::from_environment()?;
                 let model_driver = Box::new(OpenAiModelDriver::from_environment(arguments.model)?);
+                let mut tool_registry = ToolRegistry::default();
+                tool_registry.register(ShellTool::new());
                 let conversation_session = match arguments.conversation {
-                    Some(conversation_id) => {
-                        ConversationSession::open(conversation_id, event_store, model_driver)?
-                    }
-                    None => ConversationSession::create(event_store, model_driver),
+                    Some(conversation_id) => ConversationSession::open(
+                        conversation_id,
+                        event_store,
+                        model_driver,
+                        tool_registry,
+                    )?,
+                    None => ConversationSession::create(event_store, model_driver, tool_registry),
                 };
                 conversation_session.add_user_request(user_prompt)?;
                 eprintln!("#> conversation {}", conversation_session.id());

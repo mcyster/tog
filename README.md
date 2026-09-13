@@ -57,6 +57,17 @@ colon, so the explicit form is `cargo run -- :turn "Explain ownership in Rust"`.
 Run `cargo run -- --help` or `cargo run -- :turn --help` for the complete command-line
 help.
 
+## Tools
+
+A turn may request tools. The current build registers one `shell` tool that
+runs a command through `/bin/sh -c` without an approval prompt, in the current
+directory unless `working_directory` is given, with a 30-second timeout unless
+`timeout_seconds` is given. Standard output and standard error are captured up
+to 64 KiB each with explicit truncation flags. Nonzero exits are results;
+timeouts, unknown tools, invalid arguments, and launch failures are returned to
+the model as typed execution problems. Tool definitions, requests, and
+responses are recorded in the conversation log. See [Tools](docs/tools.md).
+
 ## Build
 
 Build an optimized binary from inside the Nix development environment:

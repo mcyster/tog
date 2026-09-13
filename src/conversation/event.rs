@@ -14,7 +14,8 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     ConversationCommandId, ConversationProblem, ConversationTurnId, InvalidConversationProblem,
-    InvalidModelData, ModelData, ModelInvocationId,
+    InvalidModelData, InvalidToolData, ModelData, ModelInvocationId, ToolDefinition, ToolRequest,
+    ToolResponse,
 };
 
 pub(crate) enum ConversationEvent {
@@ -47,7 +48,7 @@ pub(crate) struct UserMessageRequest {
     pub(crate) content: Vec<UserContent>,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "class", content = "event", rename_all = "snake_case")]
 pub(crate) enum ConversationEventKind {
     Command(ConversationCommand),
@@ -133,7 +134,7 @@ impl ConversationMessage {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(untagged)]
 pub(crate) enum ConversationFact {
     Message {
@@ -143,6 +144,21 @@ pub(crate) enum ConversationFact {
         turn_id: Option<ConversationTurnId>,
     },
     Lifecycle(ConversationLifecycle),
+    ToolsAvailable {
+        tools: Vec<ToolDefinition>,
+    },
+    ToolRequest {
+        #[serde(flatten)]
+        request: ToolRequest,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        turn_id: Option<ConversationTurnId>,
+    },
+    ToolResponse {
+        #[serde(flatten)]
+        response: ToolResponse,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        turn_id: Option<ConversationTurnId>,
+    },
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -160,6 +176,19 @@ impl ConversationEventKind {
             Self::Command(_) => Ok(()),
             Self::Fact(ConversationFact::Message { message, .. }) => message.ensure_valid(),
             Self::Fact(ConversationFact::Lifecycle(_)) => Ok(()),
+            Self::Fact(ConversationFact::ToolsAvailable { tools }) => {
+                for tool in tools {
+                    tool.ensure_valid()
+                        .map_err(InvalidConversationEventKind::Tool)?;
+                }
+                Ok(())
+            }
+            Self::Fact(ConversationFact::ToolRequest { request, .. }) => request
+                .ensure_valid()
+                .map_err(InvalidConversationEventKind::Tool),
+            Self::Fact(ConversationFact::ToolResponse { response, .. }) => response
+                .ensure_valid()
+                .map_err(InvalidConversationEventKind::Tool),
         }
     }
 
@@ -184,6 +213,7 @@ pub(crate) enum InvalidConversationEventKind {
     ModelCommunication(InvalidModelCommunication),
     ConversationProblem(InvalidConversationProblem),
     ModelData(InvalidModelData),
+    Tool(InvalidToolData),
     Envelope(InvalidConversationEventEnvelope),
 }
 
@@ -194,6 +224,7 @@ impl Display for InvalidConversationEventKind {
             Self::ModelCommunication(error) => Display::fmt(error, formatter),
             Self::ConversationProblem(error) => Display::fmt(error, formatter),
             Self::ModelData(error) => Display::fmt(error, formatter),
+            Self::Tool(error) => Display::fmt(error, formatter),
             Self::Envelope(error) => Display::fmt(error, formatter),
         }
     }

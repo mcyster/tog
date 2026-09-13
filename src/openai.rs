@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::fmt::{Display, Formatter};
 use std::str::FromStr;
@@ -7,6 +8,7 @@ use futures_util::stream::{self, BoxStream};
 use futures_util::{FutureExt, StreamExt};
 use reqwest::Client;
 use reqwest::StatusCode;
+use schemars::Schema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
@@ -17,7 +19,8 @@ use crate::conversation::{
     ConversationProblem, ConversationTurnId, InvalidAssistantResponse, InvalidConversationProblem,
     InvalidModelCommunication, InvocationError, ModelCommunication, ModelData, ModelEvent,
     ModelEventImportance, ModelId, ModelInvocationId, ModelIssue, ModelSource, ProviderId,
-    StoredConversationEventKind, UserContent, UserMessageRequest,
+    StoredConversationEventKind, ToolCallId, ToolDefinition, ToolName, ToolRequest, ToolResponse,
+    UserContent, UserMessageRequest,
 };
 use crate::model_driver::{
     ModelDriver, ModelDriverError, ModelDriverOutput, ModelOutputStream, TurnInput,
@@ -68,6 +71,11 @@ enum ModelDriverEvent {
     Problem {
         problem: ModelIssue,
         data: Option<ModelData>,
+    },
+    ToolRequest {
+        tool_name: ToolName,
+        arguments: Value,
+        provider_call_id: Option<String>,
     },
 }
 
@@ -163,6 +171,13 @@ impl ModelDriver for OpenAiModelDriver {
             "input".to_owned(),
             semantic_input(conversation, &pending_user_requests),
         );
+        let available_tools = conversation.available_tools();
+        if !available_tools.is_empty() {
+            request_body.insert(
+                "tools".to_owned(),
+                Value::Array(available_tools.iter().map(provider_tool).collect()),
+            );
+        }
         request_body.insert("reasoning".to_owned(), json!({ "summary": "auto" }));
         request_body.insert("stream".to_owned(), Value::Bool(true));
         request_body.insert("store".to_owned(), Value::Bool(true));
@@ -273,6 +288,7 @@ fn semantic_input(
     conversation: &Conversation,
     pending_user_requests: &[UserMessageRequest],
 ) -> Value {
+    let provider_call_ids = provider_tool_call_ids(conversation);
     let mut input =
         conversation
             .events()
@@ -300,6 +316,12 @@ fn semantic_input(
                     },
                 )) => Some(json!({ "role": "assistant", "content": response.message() })),
                 StoredConversationEventKind::Shared(ConversationEventKind::Fact(
+                    ConversationFact::ToolRequest { request, .. },
+                )) => Some(provider_tool_request_input(request, &provider_call_ids)),
+                StoredConversationEventKind::Shared(ConversationEventKind::Fact(
+                    ConversationFact::ToolResponse { response, .. },
+                )) => Some(provider_tool_response_input(response, &provider_call_ids)),
+                StoredConversationEventKind::Shared(ConversationEventKind::Fact(
                     ConversationFact::Message {
                         message:
                             ConversationMessage::Communication { .. }
@@ -309,6 +331,9 @@ fn semantic_input(
                 ))
                 | StoredConversationEventKind::Shared(ConversationEventKind::Fact(
                     ConversationFact::Lifecycle(_),
+                ))
+                | StoredConversationEventKind::Shared(ConversationEventKind::Fact(
+                    ConversationFact::ToolsAvailable { .. },
                 ))
                 | StoredConversationEventKind::Shared(ConversationEventKind::Command(_))
                 | StoredConversationEventKind::Extension(_) => None,
@@ -326,6 +351,78 @@ fn semantic_input(
         json!({ "role": "user", "content": text })
     }));
     Value::Array(input)
+}
+
+fn provider_tool(definition: &ToolDefinition) -> Value {
+    json!({
+        "type": "function",
+        "name": definition.name().as_str(),
+        "description": definition.description(),
+        "parameters": provider_schema(definition.parameters()),
+    })
+}
+
+fn provider_schema(schema: &Schema) -> Value {
+    let mut schema = schema.as_value().clone();
+    if let Value::Object(schema_object) = &mut schema {
+        schema_object.remove("$schema");
+    }
+    schema
+}
+
+fn provider_tool_call_ids(conversation: &Conversation) -> HashMap<ToolCallId, String> {
+    conversation
+        .events()
+        .iter()
+        .filter_map(|conversation_event| match &conversation_event.kind {
+            StoredConversationEventKind::Shared(ConversationEventKind::Fact(
+                ConversationFact::ToolRequest { request, .. },
+            )) => Some((request.call_id(), provider_tool_call_id(request))),
+            _ => None,
+        })
+        .collect()
+}
+
+fn provider_tool_call_id(request: &ToolRequest) -> String {
+    request
+        .data()
+        .and_then(|data| data.content().get("call_id"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .unwrap_or_else(|| request.call_id().to_string())
+}
+
+fn provider_tool_request_input(
+    request: &ToolRequest,
+    provider_call_ids: &HashMap<ToolCallId, String>,
+) -> Value {
+    let call_id = provider_call_ids
+        .get(&request.call_id())
+        .cloned()
+        .unwrap_or_else(|| request.call_id().to_string());
+    json!({
+        "type": "function_call",
+        "call_id": call_id,
+        "name": request.tool_name().as_str(),
+        "arguments": serde_json::to_string(request.arguments())
+            .expect("the tool request arguments should serialize"),
+    })
+}
+
+fn provider_tool_response_input(
+    response: &ToolResponse,
+    provider_call_ids: &HashMap<ToolCallId, String>,
+) -> Value {
+    let call_id = provider_call_ids
+        .get(&response.call_id())
+        .cloned()
+        .unwrap_or_else(|| response.call_id().to_string());
+    json!({
+        "type": "function_call_output",
+        "call_id": call_id,
+        "output": serde_json::to_string(response.outcome())
+            .expect("the tool response outcome should serialize"),
+    })
 }
 
 fn accepted_user_events(pending_user_requests: &[UserMessageRequest]) -> Vec<ModelDriverOutput> {
@@ -545,6 +642,25 @@ fn translate_model_driver_event(
                 problem: ConversationProblem::Issue(problem),
             })
         }
+        ModelDriverEvent::ToolRequest {
+            tool_name,
+            arguments,
+            provider_call_id,
+        } => {
+            let data = provider_call_id
+                .map(|call_id| {
+                    ModelData::new(Map::from_iter([(
+                        "call_id".to_owned(),
+                        Value::String(call_id),
+                    )]))
+                })
+                .transpose()
+                .map_err(|error| OpenAiError::InvalidResponse(error.to_string()))?;
+            let request =
+                ToolRequest::try_new(ToolCallId::new(), tool_name, arguments, invocation_id, data)
+                    .map_err(|error| OpenAiError::InvalidResponse(error.to_string()))?;
+            ModelDriverOutput::ToolRequest(request)
+        }
     };
     Ok(output)
 }
@@ -555,7 +671,16 @@ struct ResponseState {
     refusal_outputs: Vec<AccumulatedText>,
     reasoning_outputs: Vec<AccumulatedText>,
     reasoning_summaries: Vec<AccumulatedText>,
+    function_calls: Vec<AccumulatedFunctionCall>,
     completed: bool,
+}
+
+struct AccumulatedFunctionCall {
+    key: String,
+    call_id: Option<String>,
+    name: Option<String>,
+    completed_arguments: Option<String>,
+    emitted: bool,
 }
 
 struct AccumulatedText {
@@ -854,6 +979,18 @@ fn process_event(
                 .into_iter()
                 .collect()
         }
+        "response.output_item.added" => {
+            register_function_call(&payload, &mut response_state.function_calls)?;
+            Vec::new()
+        }
+        "response.function_call_arguments.done" => {
+            let key = semantic_output_key(&payload, &["output_index"])?;
+            complete_function_call_arguments(&payload, &mut response_state.function_calls, &key)?;
+            emit_function_call(&mut response_state.function_calls, &key)?
+                .into_iter()
+                .collect()
+        }
+        "response.output_item.done" => complete_function_call_item(&payload, response_state)?,
         "response.completed" => complete_response(response_state, &payload)?,
         "error" | "response.failed" if is_context_limit_payload(&payload) => {
             response_state.completed = true;
@@ -914,11 +1051,39 @@ fn complete_response(
             model_events.push(model_refusal(completed_refusal.text)?);
         }
     }
+    for completed_function_call in completed_content.function_calls {
+        upsert_function_call(
+            &mut response_state.function_calls,
+            completed_function_call.key.clone(),
+            completed_function_call.call_id,
+            completed_function_call.name,
+            Some(completed_function_call.arguments),
+        );
+        if let Some(event) = emit_function_call(
+            &mut response_state.function_calls,
+            &completed_function_call.key,
+        )? {
+            model_events.push(event);
+        }
+    }
+    if response_state
+        .function_calls
+        .iter()
+        .any(|function_call| !function_call.emitted)
+    {
+        return Err(OpenAiError::InvalidResponse(
+            "the completed response contained an incomplete function call".to_owned(),
+        ));
+    }
     let has_completed_model_output = response_state
         .assistant_outputs
         .iter()
         .chain(&response_state.refusal_outputs)
         .any(|output| output.emitted)
+        || response_state
+            .function_calls
+            .iter()
+            .any(|function_call| function_call.emitted)
         || model_events.iter().any(|event| {
             matches!(
                 event,
@@ -926,6 +1091,7 @@ fn complete_response(
                     event: ModelEvent::Assistant(_),
                     ..
                 } | ModelDriverEvent::Problem { .. }
+                    | ModelDriverEvent::ToolRequest { .. }
             )
         });
     if !has_completed_model_output {
@@ -1031,6 +1197,182 @@ fn emit_remaining_refusals(
     keys.into_iter()
         .filter_map(|key| emit_refusal(outputs, &key).transpose())
         .collect()
+}
+
+fn register_function_call(
+    payload: &Value,
+    function_calls: &mut Vec<AccumulatedFunctionCall>,
+) -> Result<(), OpenAiError> {
+    let Some(item) = payload.get("item") else {
+        return Ok(());
+    };
+    if item.get("type").and_then(Value::as_str) != Some("function_call") {
+        return Ok(());
+    }
+    let key = semantic_output_key(payload, &["output_index"])?;
+    let call_id = item
+        .get("call_id")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let name = item.get("name").and_then(Value::as_str).map(str::to_owned);
+    let completed_arguments = completed_function_call_arguments(item)?;
+    upsert_function_call(function_calls, key, call_id, name, completed_arguments);
+    Ok(())
+}
+
+fn complete_function_call_arguments(
+    payload: &Value,
+    function_calls: &mut Vec<AccumulatedFunctionCall>,
+    key: &str,
+) -> Result<(), OpenAiError> {
+    let arguments = payload
+        .get("arguments")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            OpenAiError::InvalidResponse(
+                "a completed function call did not contain string arguments".to_owned(),
+            )
+        })?
+        .to_owned();
+    if let Some(function_call) = function_calls
+        .iter_mut()
+        .find(|function_call| function_call.key == key)
+    {
+        function_call.completed_arguments = Some(arguments);
+    } else {
+        function_calls.push(AccumulatedFunctionCall {
+            key: key.to_owned(),
+            call_id: None,
+            name: None,
+            completed_arguments: Some(arguments),
+            emitted: false,
+        });
+    }
+    Ok(())
+}
+
+fn complete_function_call_item(
+    payload: &Value,
+    response_state: &mut ResponseState,
+) -> Result<Vec<ModelDriverEvent>, OpenAiError> {
+    let Some(item) = payload.get("item") else {
+        return Ok(Vec::new());
+    };
+    if item.get("type").and_then(Value::as_str) != Some("function_call") {
+        return Ok(Vec::new());
+    }
+    let key = semantic_output_key(payload, &["output_index"])?;
+    let call_id = item
+        .get("call_id")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let name = item.get("name").and_then(Value::as_str).map(str::to_owned);
+    let completed_arguments = item
+        .get("arguments")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            OpenAiError::InvalidResponse(
+                "a completed function call did not contain string arguments".to_owned(),
+            )
+        })?
+        .to_owned();
+    upsert_function_call(
+        &mut response_state.function_calls,
+        key.clone(),
+        call_id,
+        name,
+        Some(completed_arguments),
+    );
+    Ok(
+        emit_function_call(&mut response_state.function_calls, &key)?
+            .into_iter()
+            .collect(),
+    )
+}
+
+fn completed_function_call_arguments(item: &Value) -> Result<Option<String>, OpenAiError> {
+    match item.get("arguments") {
+        Some(Value::String(arguments)) if !arguments.trim().is_empty() => {
+            Ok(Some(arguments.clone()))
+        }
+        Some(Value::String(_)) | None => Ok(None),
+        Some(_) => Err(OpenAiError::InvalidResponse(
+            "a function call contained non-string arguments".to_owned(),
+        )),
+    }
+}
+
+fn upsert_function_call(
+    function_calls: &mut Vec<AccumulatedFunctionCall>,
+    key: String,
+    call_id: Option<String>,
+    name: Option<String>,
+    completed_arguments: Option<String>,
+) {
+    if let Some(function_call) = function_calls
+        .iter_mut()
+        .find(|function_call| function_call.key == key)
+    {
+        if function_call.call_id.is_none() {
+            function_call.call_id = call_id;
+        }
+        if function_call.name.is_none() {
+            function_call.name = name;
+        }
+        if completed_arguments.is_some() {
+            function_call.completed_arguments = completed_arguments;
+        }
+        return;
+    }
+    function_calls.push(AccumulatedFunctionCall {
+        key,
+        call_id,
+        name,
+        completed_arguments,
+        emitted: false,
+    });
+}
+
+fn emit_function_call(
+    function_calls: &mut [AccumulatedFunctionCall],
+    key: &str,
+) -> Result<Option<ModelDriverEvent>, OpenAiError> {
+    let function_call = function_calls
+        .iter_mut()
+        .find(|function_call| function_call.key == key)
+        .ok_or_else(|| {
+            OpenAiError::InvalidResponse(format!(
+                "a function call event referenced an unknown call {key}"
+            ))
+        })?;
+    if function_call.emitted {
+        return Ok(None);
+    }
+    let Some(completed_arguments) = function_call.completed_arguments.as_deref() else {
+        return Ok(None);
+    };
+    let name = function_call.name.clone().ok_or_else(|| {
+        OpenAiError::InvalidResponse("a completed function call did not contain a name".to_owned())
+    })?;
+    let arguments = parse_function_call_arguments(completed_arguments)?;
+    function_call.emitted = true;
+    Ok(Some(ModelDriverEvent::ToolRequest {
+        tool_name: ToolName::try_new(name)
+            .map_err(|error| OpenAiError::InvalidResponse(error.to_string()))?,
+        arguments,
+        provider_call_id: function_call.call_id.clone(),
+    }))
+}
+
+fn parse_function_call_arguments(arguments: &str) -> Result<Value, OpenAiError> {
+    if arguments.trim().is_empty() {
+        return Ok(Value::Object(Map::new()));
+    }
+    serde_json::from_str(arguments).map_err(|error| {
+        OpenAiError::InvalidResponse(format!(
+            "a function call contained invalid JSON arguments: {error}"
+        ))
+    })
 }
 
 fn assistant_response(message: String) -> Result<ModelDriverEvent, OpenAiError> {
@@ -1218,11 +1560,19 @@ fn preferred_text(streamed_text: &str, completed_text: &Option<String>) -> Optio
 struct CompletedResponseContent {
     assistant_outputs: Vec<CompletedText>,
     refusals: Vec<CompletedText>,
+    function_calls: Vec<CompletedFunctionCall>,
 }
 
 struct CompletedText {
     key: String,
     text: String,
+}
+
+struct CompletedFunctionCall {
+    key: String,
+    call_id: Option<String>,
+    name: Option<String>,
+    arguments: String,
 }
 
 fn completed_response_content(payload: &Value) -> Result<CompletedResponseContent, OpenAiError> {
@@ -1239,7 +1589,31 @@ fn completed_response_content(payload: &Value) -> Result<CompletedResponseConten
     })?;
     let mut assistant_outputs = Vec::new();
     let mut refusals = Vec::new();
+    let mut function_calls = Vec::new();
     for (output_index, output_item) in output.iter().enumerate() {
+        if output_item.get("type").and_then(Value::as_str) == Some("function_call") {
+            let arguments = output_item
+                .get("arguments")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    OpenAiError::InvalidResponse(
+                        "completed OpenAI function call arguments were not a string".to_owned(),
+                    )
+                })?;
+            function_calls.push(CompletedFunctionCall {
+                key: format!("output_index={output_index}"),
+                call_id: output_item
+                    .get("call_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                name: output_item
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                arguments: arguments.to_owned(),
+            });
+            continue;
+        }
         let Some(content_value) = output_item.get("content") else {
             continue;
         };
@@ -1286,6 +1660,7 @@ fn completed_response_content(payload: &Value) -> Result<CompletedResponseConten
     Ok(CompletedResponseContent {
         assistant_outputs,
         refusals,
+        function_calls,
     })
 }
 
@@ -1313,13 +1688,15 @@ mod tests {
         ConversationEventRecord, ConversationFact, ConversationId, ConversationMessage,
         ConversationProblem, ConversationTurnId, ModelCommunication, ModelData, ModelEvent,
         ModelEventImportance, ModelId, ModelInvocationId, ModelIssue, ModelSource, ProviderId,
-        StoredConversationEventKind, UserContent,
+        StoredConversationEventKind, ToolCallId, ToolDefinition, ToolExecutionProblem, ToolName,
+        ToolOutcome, ToolRequest, ToolResponse, UserContent,
     };
     use crate::model_driver::{ModelDriver, ModelDriverOutput, TurnInput};
 
     use super::{
         ModelDriverEvent, OpenAiError, OpenAiModelDriver, ResponseByteStream,
-        classify_response_failure, model_communication, model_output_stream, semantic_input,
+        classify_response_failure, model_communication, model_output_stream, provider_tool,
+        semantic_input,
     };
 
     fn conversation_event(
@@ -1401,6 +1778,237 @@ mod tests {
         );
     }
 
+    fn tool_definition(name: &str) -> ToolDefinition {
+        ToolDefinition::try_new(
+            ToolName::try_new(name.to_owned()).expect("the tool name should be valid"),
+            "Run a command.".to_owned(),
+            schemars::json_schema!({
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": { "command": { "type": "string" } }
+            }),
+            schemars::json_schema!({ "type": "object" }),
+        )
+        .expect("the tool definition should be valid")
+    }
+
+    #[test]
+    fn provider_tools_translate_definitions_without_mutating_them() {
+        let definition = tool_definition("shell");
+
+        let provider_tool = provider_tool(&definition);
+
+        assert_eq!(provider_tool["type"], "function");
+        assert_eq!(provider_tool["name"], "shell");
+        assert_eq!(provider_tool["description"], "Run a command.");
+        assert_eq!(
+            provider_tool["parameters"],
+            json!({
+                "type": "object",
+                "properties": { "command": { "type": "string" } }
+            })
+        );
+        assert!(
+            definition.parameters().as_value().get("$schema").is_some(),
+            "the recorded definition must keep its schema metadata"
+        );
+    }
+
+    #[test]
+    fn semantic_input_reconstructs_tool_requests_and_responses() {
+        let conversation_id = ConversationId::new();
+        let invocation_id = ModelInvocationId::new();
+        let call_id = ToolCallId::new();
+        let model_data = ModelData::new(Map::from_iter([(
+            "call_id".to_owned(),
+            Value::String("call_native".to_owned()),
+        )]))
+        .expect("the model data should be valid");
+        let request = ToolRequest::try_new(
+            call_id,
+            ToolName::try_new("shell".to_owned()).expect("the tool name should be valid"),
+            json!({ "command": "pwd" }),
+            invocation_id,
+            Some(model_data),
+        )
+        .expect("the tool request should be valid");
+        let response = ToolResponse::new(
+            call_id,
+            ToolOutcome::Result {
+                value: json!({ "stdout": "/tmp\n" }),
+            },
+        );
+        let conversation = Conversation::from_events(vec![
+            conversation_event(
+                conversation_id,
+                0,
+                ConversationEventKind::Fact(ConversationFact::Message {
+                    message: ConversationMessage::User {
+                        caused_by: None,
+                        content: vec![UserContent::Text("Run pwd".to_owned())],
+                    },
+                    turn_id: None,
+                }),
+            ),
+            conversation_event(
+                conversation_id,
+                1,
+                ConversationEventKind::Fact(ConversationFact::ToolRequest {
+                    request,
+                    turn_id: Some(ConversationTurnId::new()),
+                }),
+            ),
+            conversation_event(
+                conversation_id,
+                2,
+                ConversationEventKind::Fact(ConversationFact::ToolResponse {
+                    response,
+                    turn_id: Some(ConversationTurnId::new()),
+                }),
+            ),
+        ])
+        .expect("the conversation should be valid");
+
+        assert_eq!(
+            semantic_input(&conversation, &[]),
+            json!([
+                { "role": "user", "content": "Run pwd" },
+                {
+                    "type": "function_call",
+                    "call_id": "call_native",
+                    "name": "shell",
+                    "arguments": "{\"command\":\"pwd\"}"
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_native",
+                    "output": "{\"type\":\"result\",\"value\":{\"stdout\":\"/tmp\\n\"}}"
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn semantic_input_falls_back_to_the_portable_tool_call_id() {
+        let conversation_id = ConversationId::new();
+        let call_id = ToolCallId::new();
+        let request = ToolRequest::try_new(
+            call_id,
+            ToolName::try_new("shell".to_owned()).expect("the tool name should be valid"),
+            json!({ "command": "pwd" }),
+            ModelInvocationId::new(),
+            None,
+        )
+        .expect("the tool request should be valid");
+        let conversation = Conversation::from_events(vec![
+            conversation_event(
+                conversation_id,
+                0,
+                ConversationEventKind::Fact(ConversationFact::ToolRequest {
+                    request,
+                    turn_id: None,
+                }),
+            ),
+            conversation_event(
+                conversation_id,
+                1,
+                ConversationEventKind::Fact(ConversationFact::ToolResponse {
+                    response: ToolResponse::new(
+                        call_id,
+                        ToolOutcome::Problem {
+                            problem: ToolExecutionProblem::unknown_tool(
+                                ToolName::try_new("shell".to_owned())
+                                    .expect("the tool name should be valid"),
+                            ),
+                        },
+                    ),
+                    turn_id: None,
+                }),
+            ),
+        ])
+        .expect("the conversation should be valid");
+
+        let input = semantic_input(&conversation, &[]);
+        assert_eq!(input[0]["call_id"], call_id.to_string());
+        assert_eq!(input[1]["call_id"], call_id.to_string());
+        let output: Value = serde_json::from_str(
+            input[1]["output"]
+                .as_str()
+                .expect("the tool output should be a string"),
+        )
+        .expect("the tool output should be JSON");
+        assert_eq!(output["type"], "problem");
+        assert_eq!(output["problem"]["kind"], "unknown_tool");
+        assert_eq!(output["problem"]["message"], "unknown tool: shell");
+        assert!(output["problem"].get("details").is_none());
+    }
+
+    #[test]
+    fn semantic_input_projects_tool_problem_details() {
+        let conversation_id = ConversationId::new();
+        let call_id = ToolCallId::new();
+        let request = ToolRequest::try_new(
+            call_id,
+            ToolName::try_new("shell".to_owned()).expect("the tool name should be valid"),
+            json!({ "command": "sleep 5" }),
+            ModelInvocationId::new(),
+            None,
+        )
+        .expect("the tool request should be valid");
+        let response = ToolResponse::new(
+            call_id,
+            ToolOutcome::Problem {
+                problem: ToolExecutionProblem::try_timed_out(
+                    "the shell command timed out after 1 seconds".to_owned(),
+                    Some(json!({
+                        "timeout_seconds": 1,
+                        "stdout": "partial",
+                        "stderr": "",
+                        "stdout_truncated": false,
+                        "stderr_truncated": false
+                    })),
+                )
+                .expect("the timeout problem should be valid"),
+            },
+        );
+        let conversation = Conversation::from_events(vec![
+            conversation_event(
+                conversation_id,
+                0,
+                ConversationEventKind::Fact(ConversationFact::ToolRequest {
+                    request,
+                    turn_id: None,
+                }),
+            ),
+            conversation_event(
+                conversation_id,
+                1,
+                ConversationEventKind::Fact(ConversationFact::ToolResponse {
+                    response,
+                    turn_id: None,
+                }),
+            ),
+        ])
+        .expect("the conversation should be valid");
+
+        let input = semantic_input(&conversation, &[]);
+        let output: Value = serde_json::from_str(
+            input[1]["output"]
+                .as_str()
+                .expect("the tool output should be a string"),
+        )
+        .expect("the tool output should be JSON");
+        assert_eq!(output["type"], "problem");
+        assert_eq!(output["problem"]["kind"], "timed_out");
+        assert_eq!(
+            output["problem"]["message"],
+            "the shell command timed out after 1 seconds"
+        );
+        assert_eq!(output["problem"]["details"]["timeout_seconds"], 1);
+        assert_eq!(output["problem"]["details"]["stdout"], "partial");
+        assert_eq!(output["problem"]["details"]["stdout_truncated"], false);
+    }
+
     fn response_byte_stream(chunks: Vec<Vec<u8>>) -> ResponseByteStream {
         stream::iter(chunks.into_iter().map(Ok::<Vec<u8>, OpenAiError>)).boxed()
     }
@@ -1417,6 +2025,9 @@ mod tests {
                     ModelDriverEvent::Problem { .. } => Err(OpenAiError::InvalidResponse(
                         "the test expected a model event, not a model problem".to_owned(),
                     )),
+                    ModelDriverEvent::ToolRequest { .. } => Err(OpenAiError::InvalidResponse(
+                        "the test expected a model event, not a tool request".to_owned(),
+                    )),
                 })
             })
             .collect()
@@ -1432,14 +2043,18 @@ mod tests {
     fn expect_model_event(driver_event: ModelDriverEvent) -> ModelEvent {
         match driver_event {
             ModelDriverEvent::Model { event, .. } => event,
-            ModelDriverEvent::Problem { .. } => panic!("the output should be a model event"),
+            ModelDriverEvent::Problem { .. } | ModelDriverEvent::ToolRequest { .. } => {
+                panic!("the output should be a model event")
+            }
         }
     }
 
     fn expect_event(output: ModelDriverOutput) -> ConversationMessage {
         match output {
             ModelDriverOutput::Message(message) => message,
-            ModelDriverOutput::Command(_) | ModelDriverOutput::Extension(_) => {
+            ModelDriverOutput::ToolRequest(_)
+            | ModelDriverOutput::Command(_)
+            | ModelDriverOutput::Extension(_) => {
                 panic!("the output should be a conversation message")
             }
         }
@@ -1829,6 +2444,73 @@ mod tests {
 
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].message(), "Answer");
+    }
+
+    #[tokio::test]
+    async fn a_completed_function_call_becomes_a_portable_tool_request() {
+        let input = concat!(
+            "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"shell\",\"arguments\":\"\"}}\n\n",
+            "data: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_1\",\"output_index\":0,\"delta\":\"{\\\"command\\\":\"}\n\n",
+            "data: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_1\",\"output_index\":0,\"delta\":\"\\\"pwd\\\"}\"}\n\n",
+            "data: {\"type\":\"response.function_call_arguments.done\",\"item_id\":\"fc_1\",\"output_index\":0,\"arguments\":\"{\\\"command\\\":\\\"pwd\\\"}\"}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{}}\n\n",
+            "data: [DONE]\n\n"
+        );
+
+        let events = collect_outputs(input)
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .expect("the function call stream should parse");
+
+        assert_eq!(events.len(), 1);
+        let ModelDriverEvent::ToolRequest {
+            tool_name,
+            arguments,
+            provider_call_id,
+        } = &events[0]
+        else {
+            panic!("the output should be a tool request");
+        };
+        assert_eq!(tool_name.as_str(), "shell");
+        assert_eq!(arguments, &json!({ "command": "pwd" }));
+        assert_eq!(provider_call_id.as_deref(), Some("call_1"));
+    }
+
+    #[tokio::test]
+    async fn partially_streamed_function_arguments_are_never_executed() {
+        let input = concat!(
+            "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"shell\",\"arguments\":\"\"}}\n\n",
+            "data: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_1\",\"output_index\":0,\"delta\":\"{\\\"command\\\":\"}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{}}\n\n"
+        );
+
+        let results = collect_outputs(input).await;
+
+        assert_eq!(results.len(), 1);
+        assert!(matches!(results[0], Err(OpenAiError::InvalidResponse(_))));
+    }
+
+    #[tokio::test]
+    async fn a_completed_response_supplies_function_call_arguments_as_a_fallback() {
+        let input = concat!(
+            "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"shell\",\"arguments\":\"\"}}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"output\":[{\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"shell\",\"arguments\":\"{\\\"command\\\":\\\"pwd\\\"}\"}]}}\n\n",
+            "data: [DONE]\n\n"
+        );
+
+        let events = collect_outputs(input)
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .expect("the fallback function call should parse");
+
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            &events[0],
+            ModelDriverEvent::ToolRequest { arguments, .. }
+                if arguments == &json!({ "command": "pwd" })
+        ));
     }
 
     #[tokio::test]
