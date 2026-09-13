@@ -4,8 +4,8 @@ use std::io::{self, Write};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use crate::conversation::{
-    ConversationFact, ConversationId, ConversationMessage, ConversationProblem,
-    ModelEventImportance, ModelId, TurnOutcome,
+    ConversationEventRecord, ConversationFact, ConversationId, ConversationMessage,
+    ConversationProblem, ModelEventImportance, ModelId, TurnOutcome,
 };
 use crate::conversation_session::{
     ConversationSession, ConversationSessionProgress, ConversationSessionResult,
@@ -20,7 +20,7 @@ use crate::tools::{ShellTool, ToolRegistry};
     version,
     about = "Command-line access to agentic services",
     disable_help_subcommand = true,
-    override_usage = "tog [:turn] [OPTIONS] <USER_PROMPT>...",
+    override_usage = "tog [:turn] [OPTIONS] <USER_PROMPT>...\n       tog :log [CONVERSATION_ID]",
     after_help = "When no command is specified, :turn is used."
 )]
 pub(crate) struct CommandLine {
@@ -41,7 +41,7 @@ impl CommandLine {
         Self::parse_from(arguments)
     }
 
-    pub(crate) async fn execute(self) -> ConversationSessionResult<TurnOutcome> {
+    pub(crate) async fn execute(self) -> ConversationSessionResult<CommandOutcome> {
         match self.command {
             Command::Turn(arguments) => {
                 let user_prompt = arguments.user_prompt_words.join(" ").parse()?;
@@ -61,7 +61,7 @@ impl CommandLine {
                 };
                 conversation_session.add_user_request(user_prompt)?;
                 eprintln!("#> conversation {}", conversation_session.id());
-                conversation_session
+                let outcome = conversation_session
                     .invoke(|progress| {
                         match progress {
                             ConversationSessionProgress::InvocationStarted { model } => {
@@ -76,10 +76,39 @@ impl CommandLine {
                         }
                         Ok(())
                     })
-                    .await
+                    .await?;
+                Ok(CommandOutcome::Turn(outcome))
+            }
+            Command::Log(arguments) => {
+                let event_store = EventStore::from_environment()?;
+                let conversation_id = match arguments.conversation_id {
+                    Some(conversation_id) => conversation_id,
+                    None => event_store.latest_conversation_id()?,
+                };
+                let events = event_store.load_conversation_log(conversation_id)?;
+                let standard_output = io::stdout();
+                let mut standard_output = standard_output.lock();
+                write_conversation_log(&events, &mut standard_output)?;
+                Ok(CommandOutcome::ConversationLogged)
             }
         }
     }
+}
+
+pub(crate) enum CommandOutcome {
+    Turn(TurnOutcome),
+    ConversationLogged,
+}
+
+fn write_conversation_log(
+    events: &[ConversationEventRecord],
+    output: &mut impl Write,
+) -> io::Result<()> {
+    for event in events {
+        serde_json::to_writer(&mut *output, event).map_err(io::Error::other)?;
+        output.write_all(b"\n")?;
+    }
+    output.flush()
 }
 
 fn render_model_event(event: &ConversationFact, verbosity: Verbosity) -> io::Result<()> {
@@ -115,6 +144,20 @@ enum Command {
         override_usage = "tog [:turn] [OPTIONS] <USER_PROMPT>..."
     )]
     Turn(TurnArguments),
+
+    #[command(
+        name = ":log",
+        about = "Dump a conversation log as JSON Lines",
+        override_usage = "tog :log [CONVERSATION_ID]"
+    )]
+    Log(LogArguments),
+}
+
+#[derive(Debug, Args)]
+struct LogArguments {
+    /// Conversation to dump; defaults to the most recently active conversation.
+    #[arg(value_name = "CONVERSATION_ID")]
+    conversation_id: Option<ConversationId>,
 }
 
 #[derive(Debug, Args)]
