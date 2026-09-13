@@ -57,6 +57,24 @@ colon, so the explicit form is `cargo run -- :turn "Explain ownership in Rust"`.
 Run `cargo run -- --help` or `cargo run -- :turn --help` for the complete command-line
 help.
 
+## Conversation Log
+
+Dump a conversation log to standard output as JSON Lines, one stored record per
+line, including command records and extension events. Without an identifier, the
+most recently active conversation is dumped:
+
+```console
+cargo run -- :log
+cargo run -- :log conversation_019...
+```
+
+Standard output contains only the JSON Lines, so the log can be piped directly
+into another consumer:
+
+```console
+tog :log | jq 'select(.class == "fact")'
+```
+
 ## Tools
 
 A turn may request tools. The current build registers one `shell` tool that

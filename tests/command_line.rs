@@ -1,7 +1,7 @@
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
@@ -241,6 +241,40 @@ fn reported_conversation_id(standard_error: &[u8]) -> String {
         .find_map(|line| line.strip_prefix("#> conversation "))
         .expect("standard error should identify the conversation")
         .to_owned()
+}
+
+fn persisted_events(data_directory: &Path, conversation_id: &str) -> Vec<Value> {
+    let events_directory = data_directory
+        .join("conversations")
+        .join(conversation_id.trim_start_matches("conversation_"))
+        .join("events");
+    let mut event_paths = fs::read_dir(events_directory)
+        .expect("the persisted events should be readable")
+        .map(|entry| entry.expect("the event entry should be readable").path())
+        .collect::<Vec<_>>();
+    event_paths.sort();
+    event_paths
+        .iter()
+        .map(|path| {
+            serde_json::from_reader(fs::File::open(path).expect("the persisted event should open"))
+                .expect("the persisted event should be JSON")
+        })
+        .collect()
+}
+
+fn logged_events(standard_output: &[u8]) -> Vec<Value> {
+    String::from_utf8(standard_output.to_vec())
+        .expect("standard output should be UTF-8")
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("each log line should be JSON"))
+        .collect()
+}
+
+fn logged_conversation_id(event: &Value) -> String {
+    event["conversation_id"]
+        .as_str()
+        .expect("each logged event should carry its conversation identifier")
+        .replace('-', "")
 }
 
 #[test]
@@ -845,4 +879,100 @@ fn help_lists_the_colon_prefixed_turn_command() {
         String::from_utf8(command_output.stdout).expect("standard output should be UTF-8");
     assert!(standard_output.contains(":turn"));
     assert!(!standard_output.contains("\n  help"));
+}
+
+#[test]
+fn log_dumps_the_conversation_log_as_json_lines() {
+    let server = MockOpenAiServer::start(vec![MockResponse::Success {
+        response_id: "resp_log",
+        assistant_text: "Hello",
+    }]);
+    let data_directory = temporary_data_directory();
+    let turn_output = configured_command(&server, &data_directory)
+        .args(["say", "hi"])
+        .output()
+        .expect("the turn should run");
+    assert!(turn_output.status.success());
+    let conversation_id = reported_conversation_id(&turn_output.stderr);
+
+    let log_output = tog_command()
+        .env("TOG_DATA_DIR", &data_directory)
+        .arg(":log")
+        .output()
+        .expect("the log command should run");
+
+    assert!(log_output.status.success());
+    let standard_output =
+        String::from_utf8(log_output.stdout.clone()).expect("standard output should be UTF-8");
+    assert!(standard_output.ends_with('\n'));
+    assert_eq!(
+        logged_events(&log_output.stdout),
+        persisted_events(&data_directory, &conversation_id)
+    );
+    server.finish();
+}
+
+#[test]
+fn log_defaults_to_the_most_recent_conversation_and_accepts_an_identifier() {
+    let server = MockOpenAiServer::start(vec![
+        MockResponse::Success {
+            response_id: "resp_first",
+            assistant_text: "First answer",
+        },
+        MockResponse::Success {
+            response_id: "resp_second",
+            assistant_text: "Second answer",
+        },
+    ]);
+    let data_directory = temporary_data_directory();
+    let first_output = configured_command(&server, &data_directory)
+        .args(["First question"])
+        .output()
+        .expect("the first turn should run");
+    let first_conversation_id = reported_conversation_id(&first_output.stderr);
+    let second_output = configured_command(&server, &data_directory)
+        .args(["Second question"])
+        .output()
+        .expect("the second turn should run");
+    let second_conversation_id = reported_conversation_id(&second_output.stderr);
+
+    let default_log = tog_command()
+        .env("TOG_DATA_DIR", &data_directory)
+        .arg(":log")
+        .output()
+        .expect("the log command should run");
+    assert!(default_log.status.success());
+    let default_events = logged_events(&default_log.stdout);
+    assert!(!default_events.is_empty());
+    assert!(default_events.iter().all(|event| {
+        logged_conversation_id(event) == second_conversation_id.trim_start_matches("conversation_")
+    }));
+
+    let explicit_log = tog_command()
+        .env("TOG_DATA_DIR", &data_directory)
+        .args([":log", &first_conversation_id])
+        .output()
+        .expect("the log command should run");
+    assert!(explicit_log.status.success());
+    assert_eq!(
+        logged_events(&explicit_log.stdout),
+        persisted_events(&data_directory, &first_conversation_id)
+    );
+    server.finish();
+}
+
+#[test]
+fn log_without_conversations_reports_a_failure() {
+    let data_directory = temporary_data_directory();
+
+    let command_output = tog_command()
+        .env("TOG_DATA_DIR", &data_directory)
+        .arg(":log")
+        .output()
+        .expect("the log command should run");
+
+    assert!(!command_output.status.success());
+    let standard_error =
+        String::from_utf8(command_output.stderr).expect("standard error should be UTF-8");
+    assert!(standard_error.contains("no conversations found"));
 }
