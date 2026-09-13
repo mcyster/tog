@@ -203,82 +203,77 @@ impl ToolOutcome {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub(crate) enum ToolExecutionProblem {
-    InvalidArguments {
-        message: ToolProblemMessage,
-    },
-    UnknownTool {
-        tool_name: ToolName,
-    },
-    LaunchFailed {
-        message: ToolProblemMessage,
-    },
-    TimedOut {
-        timeout_seconds: u64,
-        stdout: String,
-        stderr: String,
-        stdout_truncated: bool,
-        stderr_truncated: bool,
-    },
+pub(crate) struct ToolExecutionProblem {
+    kind: ToolExecutionProblemKind,
+    message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    details: Option<Value>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ToolExecutionProblemKind {
+    InvalidArguments,
+    UnknownTool,
+    TimedOut,
+    ExecutionFailed,
 }
 
 impl ToolExecutionProblem {
+    pub(crate) fn try_new(
+        kind: ToolExecutionProblemKind,
+        message: String,
+        details: Option<Value>,
+    ) -> Result<Self, InvalidToolData> {
+        let problem = Self {
+            kind,
+            message,
+            details,
+        };
+        problem.ensure_valid()?;
+        Ok(problem)
+    }
+
     pub(crate) fn try_invalid_arguments(message: String) -> Result<Self, InvalidToolData> {
-        Ok(Self::InvalidArguments {
-            message: ToolProblemMessage::try_new(message)?,
-        })
+        Self::try_new(ToolExecutionProblemKind::InvalidArguments, message, None)
     }
 
     pub(crate) fn unknown_tool(tool_name: ToolName) -> Self {
-        Self::UnknownTool { tool_name }
-    }
-
-    pub(crate) fn try_launch_failed(message: String) -> Result<Self, InvalidToolData> {
-        Ok(Self::LaunchFailed {
-            message: ToolProblemMessage::try_new(message)?,
-        })
-    }
-
-    pub(crate) fn timed_out(
-        timeout_seconds: u64,
-        stdout: String,
-        stderr: String,
-        stdout_truncated: bool,
-        stderr_truncated: bool,
-    ) -> Self {
-        Self::TimedOut {
-            timeout_seconds,
-            stdout,
-            stderr,
-            stdout_truncated,
-            stderr_truncated,
+        Self {
+            kind: ToolExecutionProblemKind::UnknownTool,
+            message: format!("unknown tool: {tool_name}"),
+            details: None,
         }
     }
 
-    fn ensure_valid(&self) -> Result<(), InvalidToolData> {
-        match self {
-            Self::InvalidArguments { message } | Self::LaunchFailed { message } => {
-                message.ensure_valid()
-            }
-            Self::UnknownTool { .. } | Self::TimedOut { .. } => Ok(()),
-        }
-    }
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(transparent)]
-pub(crate) struct ToolProblemMessage(String);
-
-impl ToolProblemMessage {
-    fn try_new(message: String) -> Result<Self, InvalidToolData> {
-        let message = Self(message);
-        message.ensure_valid()?;
-        Ok(message)
+    pub(crate) fn try_execution_failed(message: String) -> Result<Self, InvalidToolData> {
+        Self::try_new(ToolExecutionProblemKind::ExecutionFailed, message, None)
     }
 
+    pub(crate) fn try_timed_out(
+        message: String,
+        details: Option<Value>,
+    ) -> Result<Self, InvalidToolData> {
+        Self::try_new(ToolExecutionProblemKind::TimedOut, message, details)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn kind(&self) -> ToolExecutionProblemKind {
+        self.kind
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn message(&self) -> &str {
+        &self.message
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn details(&self) -> Option<&Value> {
+        self.details.as_ref()
+    }
+
     fn ensure_valid(&self) -> Result<(), InvalidToolData> {
-        if self.0.trim().is_empty() {
+        if self.message.trim().is_empty() {
             return Err(InvalidToolData::EmptyProblemMessage);
         }
         Ok(())
@@ -314,8 +309,8 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        InvalidToolData, ToolDefinition, ToolExecutionProblem, ToolName, ToolOutcome, ToolRequest,
-        ToolResponse,
+        InvalidToolData, ToolDefinition, ToolExecutionProblem, ToolExecutionProblemKind, ToolName,
+        ToolOutcome, ToolRequest, ToolResponse,
     };
     use crate::conversation::{ModelData, ModelInvocationId, ToolCallId};
 
@@ -427,25 +422,57 @@ mod tests {
     }
 
     #[test]
-    fn tool_execution_problems_round_trip_and_keep_partial_output() {
-        let problem = ToolExecutionProblem::timed_out(
-            5,
-            "partial".to_owned(),
-            "warning".to_owned(),
-            false,
-            true,
-        );
+    fn tool_execution_problems_round_trip_kind_message_and_details() {
+        let problem = ToolExecutionProblem::try_new(
+            ToolExecutionProblemKind::ExecutionFailed,
+            "the process could not be started".to_owned(),
+            Some(json!({ "errno": 2 })),
+        )
+        .expect("the problem should be valid");
 
         let serialized = serde_json::to_value(&problem).expect("the problem should serialize");
         let restored: ToolExecutionProblem =
             serde_json::from_value(serialized.clone()).expect("the problem should deserialize");
 
+        assert_eq!(
+            serialized,
+            json!({
+                "kind": "execution_failed",
+                "message": "the process could not be started",
+                "details": { "errno": 2 }
+            })
+        );
         assert_eq!(restored, problem);
-        assert_eq!(serialized["type"], "timed_out");
-        assert_eq!(serialized["stdout"], "partial");
-        assert_eq!(serialized["stderr"], "warning");
-        assert_eq!(serialized["stdout_truncated"], false);
-        assert_eq!(serialized["stderr_truncated"], true);
+        assert_eq!(restored.kind(), ToolExecutionProblemKind::ExecutionFailed);
+        assert_eq!(restored.message(), "the process could not be started");
+        assert_eq!(restored.details(), Some(&json!({ "errno": 2 })));
+    }
+
+    #[test]
+    fn a_shared_timeout_problem_is_valid_without_details() {
+        let problem = ToolExecutionProblem::try_timed_out("the tool timed out".to_owned(), None)
+            .expect("a timeout without details should be valid");
+
+        let serialized = serde_json::to_value(&problem).expect("the problem should serialize");
+        let restored: ToolExecutionProblem =
+            serde_json::from_value(serialized.clone()).expect("the problem should deserialize");
+
+        assert_eq!(problem.kind(), ToolExecutionProblemKind::TimedOut);
+        assert!(problem.details().is_none());
+        assert!(serialized.get("details").is_none());
+        assert_eq!(restored, problem);
+    }
+
+    #[test]
+    fn tool_problem_messages_preserve_valid_text() {
+        let problem = ToolExecutionProblem::try_new(
+            ToolExecutionProblemKind::InvalidArguments,
+            "  missing command\n".to_owned(),
+            None,
+        )
+        .expect("the problem should be valid");
+
+        assert_eq!(problem.message(), "  missing command\n");
     }
 
     #[test]
@@ -455,7 +482,15 @@ mod tests {
             Err(InvalidToolData::EmptyProblemMessage)
         );
         assert_eq!(
-            ToolExecutionProblem::try_launch_failed(String::new()),
+            ToolExecutionProblem::try_execution_failed(String::new()),
+            Err(InvalidToolData::EmptyProblemMessage)
+        );
+        assert_eq!(
+            ToolExecutionProblem::try_new(
+                ToolExecutionProblemKind::TimedOut,
+                "\n".to_owned(),
+                Some(json!({ "timeout_seconds": 5 })),
+            ),
             Err(InvalidToolData::EmptyProblemMessage)
         );
     }

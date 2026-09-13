@@ -80,17 +80,26 @@ and each stream retains at most 64 KiB. Truncation is reported through the
 explicit boolean flags; output is never silently truncated.
 
 A timeout is an execution problem, not a shell result. On timeout the tool
-terminates the child's process group, reaps the child, and returns a
-`timed_out` problem that includes the partial `stdout` and `stderr` captured so
-far and their truncation flags. The result schema does not contain a timeout
-field.
+terminates the child's process group, reaps the child, and returns a problem of
+kind `timed_out` whose details include the timeout duration, the partial
+`stdout` and `stderr` captured so far, and their truncation flags. The result
+schema does not contain a timeout field.
 
-Execution problems are typed:
+An execution problem records a portable `kind`, a `message`, and optional
+tool-specific `details`:
 
-- `invalid_arguments` for missing, mistyped, or blank parameters
-- `unknown_tool` when no registered implementation matches the requested name
-- `launch_failed` when the command cannot be spawned or waited for
-- `timed_out` with any captured partial output
+- kind `invalid_arguments` for missing, mistyped, or blank parameters
+- kind `unknown_tool` when no registered implementation matches the requested
+  name
+- kind `timed_out` when the tool exceeded its allowed duration
+- kind `execution_failed` when the tool process could not be started or
+  completed
+
+The kind and message carry the portable meaning; understanding the failure never
+requires interpreting details. Details are optional diagnostics, so another
+tool can report a timeout with different details or none at all. The shell tool
+defines its own timeout details locally rather than requiring them from the
+shared `timed_out` category.
 
 Strings are an explicitly accepted limitation of this first implementation.
 There are no file handles, artifact storage, or output-reference abstractions.

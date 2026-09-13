@@ -29,9 +29,10 @@ pub(crate) use model_data::{InvalidModelData, ModelData};
 pub(crate) use problem::{
     ConversationProblem, InvalidConversationProblem, InvocationError, ModelIssue,
 };
+#[allow(unused_imports)]
 pub(crate) use tool::{
-    InvalidToolData, ToolDefinition, ToolExecutionProblem, ToolName, ToolOutcome, ToolRequest,
-    ToolResponse,
+    InvalidToolData, ToolDefinition, ToolExecutionProblem, ToolExecutionProblemKind, ToolName,
+    ToolOutcome, ToolRequest, ToolResponse,
 };
 
 #[derive(Clone, Debug, PartialEq)]

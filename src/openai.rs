@@ -1688,8 +1688,8 @@ mod tests {
         ConversationEventRecord, ConversationFact, ConversationId, ConversationMessage,
         ConversationProblem, ConversationTurnId, ModelCommunication, ModelData, ModelEvent,
         ModelEventImportance, ModelId, ModelInvocationId, ModelIssue, ModelSource, ProviderId,
-        StoredConversationEventKind, ToolCallId, ToolDefinition, ToolName, ToolOutcome,
-        ToolRequest, ToolResponse, UserContent,
+        StoredConversationEventKind, ToolCallId, ToolDefinition, ToolExecutionProblem, ToolName,
+        ToolOutcome, ToolRequest, ToolResponse, UserContent,
     };
     use crate::model_driver::{ModelDriver, ModelDriverOutput, TurnInput};
 
@@ -1916,7 +1916,7 @@ mod tests {
                     response: ToolResponse::new(
                         call_id,
                         ToolOutcome::Problem {
-                            problem: crate::conversation::ToolExecutionProblem::unknown_tool(
+                            problem: ToolExecutionProblem::unknown_tool(
                                 ToolName::try_new("shell".to_owned())
                                     .expect("the tool name should be valid"),
                             ),
@@ -1931,6 +1931,82 @@ mod tests {
         let input = semantic_input(&conversation, &[]);
         assert_eq!(input[0]["call_id"], call_id.to_string());
         assert_eq!(input[1]["call_id"], call_id.to_string());
+        let output: Value = serde_json::from_str(
+            input[1]["output"]
+                .as_str()
+                .expect("the tool output should be a string"),
+        )
+        .expect("the tool output should be JSON");
+        assert_eq!(output["type"], "problem");
+        assert_eq!(output["problem"]["kind"], "unknown_tool");
+        assert_eq!(output["problem"]["message"], "unknown tool: shell");
+        assert!(output["problem"].get("details").is_none());
+    }
+
+    #[test]
+    fn semantic_input_projects_tool_problem_details() {
+        let conversation_id = ConversationId::new();
+        let call_id = ToolCallId::new();
+        let request = ToolRequest::try_new(
+            call_id,
+            ToolName::try_new("shell".to_owned()).expect("the tool name should be valid"),
+            json!({ "command": "sleep 5" }),
+            ModelInvocationId::new(),
+            None,
+        )
+        .expect("the tool request should be valid");
+        let response = ToolResponse::new(
+            call_id,
+            ToolOutcome::Problem {
+                problem: ToolExecutionProblem::try_timed_out(
+                    "the shell command timed out after 1 seconds".to_owned(),
+                    Some(json!({
+                        "timeout_seconds": 1,
+                        "stdout": "partial",
+                        "stderr": "",
+                        "stdout_truncated": false,
+                        "stderr_truncated": false
+                    })),
+                )
+                .expect("the timeout problem should be valid"),
+            },
+        );
+        let conversation = Conversation::from_events(vec![
+            conversation_event(
+                conversation_id,
+                0,
+                ConversationEventKind::Fact(ConversationFact::ToolRequest {
+                    request,
+                    turn_id: None,
+                }),
+            ),
+            conversation_event(
+                conversation_id,
+                1,
+                ConversationEventKind::Fact(ConversationFact::ToolResponse {
+                    response,
+                    turn_id: None,
+                }),
+            ),
+        ])
+        .expect("the conversation should be valid");
+
+        let input = semantic_input(&conversation, &[]);
+        let output: Value = serde_json::from_str(
+            input[1]["output"]
+                .as_str()
+                .expect("the tool output should be a string"),
+        )
+        .expect("the tool output should be JSON");
+        assert_eq!(output["type"], "problem");
+        assert_eq!(output["problem"]["kind"], "timed_out");
+        assert_eq!(
+            output["problem"]["message"],
+            "the shell command timed out after 1 seconds"
+        );
+        assert_eq!(output["problem"]["details"]["timeout_seconds"], 1);
+        assert_eq!(output["problem"]["details"]["stdout"], "partial");
+        assert_eq!(output["problem"]["details"]["stdout_truncated"], false);
     }
 
     fn response_byte_stream(chunks: Vec<Vec<u8>>) -> ResponseByteStream {

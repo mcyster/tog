@@ -66,8 +66,8 @@ mod tests {
 
     use super::{ExecutableTool, ToolRegistry};
     use crate::conversation::{
-        ModelInvocationId, ToolCallId, ToolDefinition, ToolExecutionProblem, ToolName, ToolOutcome,
-        ToolRequest,
+        ModelInvocationId, ToolCallId, ToolDefinition, ToolExecutionProblem,
+        ToolExecutionProblemKind, ToolName, ToolOutcome, ToolRequest,
     };
 
     #[derive(Deserialize, JsonSchema, Serialize)]
@@ -166,9 +166,8 @@ mod tests {
 
         assert!(matches!(
             outcome,
-            ToolOutcome::Problem {
-                problem: ToolExecutionProblem::InvalidArguments { .. }
-            }
+            ToolOutcome::Problem { problem }
+                if problem.kind() == ToolExecutionProblemKind::InvalidArguments
         ));
     }
 
@@ -182,9 +181,9 @@ mod tests {
 
         assert!(matches!(
             outcome,
-            ToolOutcome::Problem {
-                problem: ToolExecutionProblem::UnknownTool { .. }
-            }
+            ToolOutcome::Problem { problem }
+                if problem.kind() == ToolExecutionProblemKind::UnknownTool
+                    && problem.message() == "unknown tool: missing"
         ));
     }
 }

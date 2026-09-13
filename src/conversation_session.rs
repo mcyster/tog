@@ -345,8 +345,8 @@ mod tests {
         ConversationEventKind, ConversationEventReadError, ConversationEventReader,
         ConversationFact, ConversationId, ConversationLifecycle, ConversationMessage,
         ConversationProblem, InvocationError, ModelId, ModelInvocationId, ModelSource, ProviderId,
-        StoredConversationEventKind, ToolCallId, ToolDefinition, ToolExecutionProblem, ToolName,
-        ToolOutcome, ToolRequest, TurnOutcome, UserPrompt,
+        StoredConversationEventKind, ToolCallId, ToolDefinition, ToolExecutionProblem,
+        ToolExecutionProblemKind, ToolName, ToolOutcome, ToolRequest, TurnOutcome, UserPrompt,
     };
     use crate::model_driver::{
         ModelDriver, ModelDriverError, ModelDriverOutput, ModelOutputStream, TurnInput,
@@ -1070,6 +1070,7 @@ mod tests {
             Box::new(SharedScriptedDriver(Arc::clone(&driver))),
             ToolRegistry::default(),
         );
+        let conversation_id = session.id();
         session
             .add_user_request(UserPrompt::from_str("try it").expect("the prompt should be valid"))
             .expect("the request should be recorded");
@@ -1088,10 +1089,32 @@ mod tests {
             .expect("the invocation list should lock");
         assert!(invocations[1].tool_responses.iter().any(|outcome| matches!(
             outcome,
-            ToolOutcome::Problem {
-                problem: ToolExecutionProblem::UnknownTool { .. }
-            }
+            ToolOutcome::Problem { problem }
+                if problem.kind() == ToolExecutionProblemKind::UnknownTool
+                    && problem.message() == "unknown tool: missing"
+                    && problem.details().is_none()
         )));
+        drop(invocations);
+
+        let facts = loaded_facts(&directory, conversation_id);
+        let request_call_id = facts
+            .iter()
+            .find_map(|fact| match fact {
+                ConversationFact::ToolRequest { request, .. } => Some(request.call_id()),
+                _ => None,
+            })
+            .expect("the tool request should be persisted");
+        let response_call_id = facts
+            .iter()
+            .find_map(|fact| match fact {
+                ConversationFact::ToolResponse { response, .. } => Some(response.call_id()),
+                _ => None,
+            })
+            .expect("the tool response should be persisted");
+        assert_eq!(
+            response_call_id, request_call_id,
+            "the problem response must stay correlated to its request"
+        );
     }
 
     #[tokio::test]
