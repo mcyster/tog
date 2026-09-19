@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use serde::de::DeserializeOwned;
 
-use super::ensure_contiguous_positions;
+use super::log::ensure_contiguous_positions;
 use crate::conversation::ConversationEventRecord;
 
 const LEGACY_EVENTS_DIRECTORY_NAME: &str = "events";

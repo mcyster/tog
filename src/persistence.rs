@@ -1,280 +1,56 @@
+mod file_event_store;
 mod legacy;
 mod log;
 #[cfg(test)]
 mod tests;
 
-use std::error::Error;
-use std::fs;
+pub(crate) use file_event_store::FileEventStore;
+
 use std::io;
-use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
 
 use crate::conversation::{
-    Conversation, ConversationEvent, ConversationEventKind, ConversationEventRecord,
-    ConversationId, StoredConversationEventKind,
+    Conversation, ConversationEvent, ConversationEventRecord, ConversationId,
 };
 
-const CONVERSATIONS_DIRECTORY_NAME: &str = "conversations";
+/// Durable storage for conversation event batches.
+pub(crate) trait EventStore {
+    /// Reconstructs the model-facing conversation from its committed records.
+    ///
+    /// The projection contains the accepted semantic history only. Command,
+    /// turn lifecycle, and driver extension records stay in the log and are
+    /// excluded from it.
+    ///
+    /// Fails when the conversation has no committed records, mixes conversation
+    /// identifiers, or contains an invalid record.
+    fn load_conversation(&self, conversation_id: ConversationId) -> io::Result<Conversation>;
 
-pub(crate) struct EventStore {
-    root_directory: PathBuf,
-}
-
-impl EventStore {
-    pub(crate) fn from_environment() -> io::Result<Self> {
-        let root_directory = if let Some(configured_directory) = std::env::var_os("TOG_DATA_DIR") {
-            PathBuf::from(configured_directory)
-        } else if let Some(data_home) = std::env::var_os("XDG_DATA_HOME") {
-            PathBuf::from(data_home).join("tog")
-        } else if let Some(home_directory) = std::env::var_os("HOME") {
-            PathBuf::from(home_directory).join(".local/share/tog")
-        } else {
-            return Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                "TOG_DATA_DIR, XDG_DATA_HOME, or HOME must be set",
-            ));
-        };
-
-        Self::new(root_directory)
-    }
-
-    pub(crate) fn new(root_directory: PathBuf) -> io::Result<Self> {
-        create_private_directory(&root_directory)?;
-        create_private_directory(&root_directory.join(CONVERSATIONS_DIRECTORY_NAME))?;
-        Ok(Self { root_directory })
-    }
-
-    pub(crate) fn load_conversation(
+    /// Returns every committed record for the conversation in position order.
+    ///
+    /// Unlike [`EventStore::load_conversation`], the result includes command,
+    /// lifecycle, and driver extension records. Consumers use it to inspect or
+    /// present the complete durable log rather than the model-facing history.
+    ///
+    /// Fails when the conversation has no committed records.
+    fn load_conversation_log(
         &self,
         conversation_id: ConversationId,
-    ) -> io::Result<Conversation> {
-        let events = self.load_conversation_log(conversation_id)?;
-        let conversation = Conversation::from_events(events).map_err(invalid_conversation_data)?;
-        if conversation.id() != conversation_id {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("loaded {}, expected {conversation_id}", conversation.id()),
-            ));
-        }
-        Ok(conversation)
-    }
+    ) -> io::Result<Vec<ConversationEventRecord>>;
 
-    pub(crate) fn load_conversation_log(
-        &self,
-        conversation_id: ConversationId,
-    ) -> io::Result<Vec<ConversationEventRecord>> {
-        let conversation_directory = self.conversation_directory(conversation_id);
-        if let Some(log) = log::read(&conversation_directory)? {
-            return Ok(log.events);
-        }
-        if let Some(events) = legacy::read_events(&conversation_directory)? {
-            return Ok(events);
-        }
-        Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("no events found for {conversation_id}"),
-        ))
-    }
+    /// Returns the identifier of the conversation whose latest committed
+    /// record carries the newest timestamp.
+    ///
+    /// Fails when no conversation has a committed record.
+    fn latest_conversation_id(&self) -> io::Result<ConversationId>;
 
-    pub(crate) fn latest_conversation_id(&self) -> io::Result<ConversationId> {
-        let conversations_directory = self.root_directory.join(CONVERSATIONS_DIRECTORY_NAME);
-        let mut latest_event: Option<ConversationEventRecord> = None;
-        for directory_entry in fs::read_dir(&conversations_directory)? {
-            let directory_entry = directory_entry?;
-            if !directory_entry.file_type()?.is_dir() {
-                continue;
-            }
-            let Some(last_event) = read_last_conversation_event(&directory_entry.path())? else {
-                continue;
-            };
-            if latest_event
-                .as_ref()
-                .is_none_or(|current| last_event.timestamp > current.timestamp)
-            {
-                latest_event = Some(last_event);
-            }
-        }
-        latest_event
-            .map(|event| event.conversation_id)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no conversations found"))
-    }
-
-    pub(crate) fn append_new_conversation_events(
+    /// Appends `events` as one atomic batch and returns their committed records
+    /// in the order supplied.
+    ///
+    /// Positions are assigned at the append boundary. An empty batch is
+    /// rejected. Readers observe either every record in the batch or none of
+    /// it, and a successful append is durable before it returns.
+    fn append_new_conversation_events(
         &self,
         conversation_id: ConversationId,
         events: Vec<ConversationEvent>,
-    ) -> io::Result<Vec<ConversationEventRecord>> {
-        let kinds = stored_event_kinds(events)?;
-        let conversation_directory = self.conversation_directory(conversation_id);
-        create_private_directory(&conversation_directory)?;
-        let existing_events = read_stored_events(&conversation_directory)?;
-        let previous_position =
-            validate_existing_events(conversation_id, existing_events.events())?;
-        let batch = build_event_batch(conversation_id, previous_position, kinds)?;
-        existing_events.commit(&conversation_directory, &batch)?;
-        Ok(batch)
-    }
-
-    fn conversation_directory(&self, conversation_id: ConversationId) -> PathBuf {
-        self.root_directory
-            .join(CONVERSATIONS_DIRECTORY_NAME)
-            .join(conversation_id.storage_key())
-    }
-}
-
-enum StoredEvents {
-    Log(log::ConversationLog),
-    Legacy(Vec<ConversationEventRecord>),
-}
-
-impl StoredEvents {
-    fn events(&self) -> &[ConversationEventRecord] {
-        match self {
-            Self::Log(log) => &log.events,
-            Self::Legacy(events) => events,
-        }
-    }
-
-    fn commit(
-        self,
-        conversation_directory: &Path,
-        batch: &[ConversationEventRecord],
-    ) -> io::Result<()> {
-        let batch_bytes = log::encode_batch(batch)?;
-        match self {
-            Self::Log(log) => {
-                log::append(conversation_directory, log.committed_length, &batch_bytes)
-            }
-            Self::Legacy(events) if events.is_empty() => {
-                log::create(conversation_directory, &batch_bytes)
-            }
-            Self::Legacy(events) => {
-                log::create_migrated(conversation_directory, &events, &batch_bytes)?;
-                legacy::remove(conversation_directory);
-                Ok(())
-            }
-        }
-    }
-}
-
-fn read_stored_events(conversation_directory: &Path) -> io::Result<StoredEvents> {
-    match log::read(conversation_directory)? {
-        Some(log) => Ok(StoredEvents::Log(log)),
-        None => Ok(StoredEvents::Legacy(
-            legacy::read_events(conversation_directory)?.unwrap_or_default(),
-        )),
-    }
-}
-
-fn read_last_conversation_event(
-    conversation_directory: &Path,
-) -> io::Result<Option<ConversationEventRecord>> {
-    if let Some(log) = log::read(conversation_directory)? {
-        return Ok(log.events.into_iter().last());
-    }
-    legacy::read_last_event(conversation_directory)
-}
-
-fn validate_existing_events(
-    conversation_id: ConversationId,
-    existing_events: &[ConversationEventRecord],
-) -> io::Result<Option<u64>> {
-    if existing_events.is_empty() {
-        return Ok(None);
-    }
-    let conversation =
-        Conversation::from_events(existing_events.to_vec()).map_err(invalid_conversation_data)?;
-    if conversation.id() != conversation_id {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("loaded {}, expected {conversation_id}", conversation.id()),
-        ));
-    }
-    ensure_contiguous_positions(existing_events)?;
-    Ok(existing_events.last().map(|event| event.position))
-}
-
-fn build_event_batch(
-    conversation_id: ConversationId,
-    previous_position: Option<u64>,
-    kinds: Vec<StoredConversationEventKind>,
-) -> io::Result<Vec<ConversationEventRecord>> {
-    let first_position = next_position(previous_position)?;
-    kinds
-        .into_iter()
-        .enumerate()
-        .map(|(offset, kind)| {
-            let position = first_position
-                .checked_add(u64::try_from(offset).map_err(io::Error::other)?)
-                .ok_or_else(|| io::Error::other("event position overflow"))?;
-            Ok(match kind {
-                StoredConversationEventKind::Shared(kind) => {
-                    ConversationEventRecord::new(conversation_id, position, kind)
-                }
-                StoredConversationEventKind::Extension(event) => {
-                    ConversationEventRecord::new_extension(conversation_id, position, event)
-                }
-            })
-        })
-        .collect()
-}
-
-fn stored_event_kinds(
-    events: Vec<ConversationEvent>,
-) -> io::Result<Vec<StoredConversationEventKind>> {
-    if events.is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "an appended event batch must not be empty",
-        ));
-    }
-    events.into_iter().map(stored_kind).collect()
-}
-
-fn stored_kind(event: ConversationEvent) -> io::Result<StoredConversationEventKind> {
-    match event {
-        ConversationEvent::Command(command) => Ok(StoredConversationEventKind::Shared(
-            ConversationEventKind::Command(command),
-        )),
-        ConversationEvent::Fact(fact) => Ok(StoredConversationEventKind::Shared(
-            ConversationEventKind::Fact(fact),
-        )),
-        ConversationEvent::Extension(event) => event
-            .to_envelope()
-            .map(StoredConversationEventKind::Extension)
-            .map_err(io::Error::other),
-    }
-}
-
-fn next_position(previous_position: Option<u64>) -> io::Result<u64> {
-    match previous_position {
-        Some(position) => position
-            .checked_add(1)
-            .ok_or_else(|| io::Error::other("event position overflow")),
-        None => Ok(0),
-    }
-}
-
-fn ensure_contiguous_positions(events: &[ConversationEventRecord]) -> io::Result<()> {
-    for (expected_position, event) in (0_u64..).zip(events) {
-        if event.position != expected_position {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "expected conversation event position {expected_position}, found {}",
-                    event.position
-                ),
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn create_private_directory(path: &Path) -> io::Result<()> {
-    fs::create_dir_all(path)?;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
-}
-
-fn invalid_conversation_data(error: impl Error + Send + Sync + 'static) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, error)
+    ) -> io::Result<Vec<ConversationEventRecord>>;
 }

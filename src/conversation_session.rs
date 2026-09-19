@@ -23,16 +23,16 @@ pub(crate) enum ConversationSessionProgress {
     ProblemCompleted { problem: ConversationProblem },
 }
 
-pub(crate) struct ConversationSession {
+pub(crate) struct ConversationSession<Store: EventStore> {
     conversation_id: ConversationId,
-    event_store: EventStore,
+    event_store: Store,
     model_driver: Box<dyn ModelDriver>,
     tool_registry: ToolRegistry,
 }
 
-impl ConversationSession {
+impl<Store: EventStore> ConversationSession<Store> {
     pub(crate) fn create(
-        event_store: EventStore,
+        event_store: Store,
         model_driver: Box<dyn ModelDriver>,
         tool_registry: ToolRegistry,
     ) -> Self {
@@ -46,7 +46,7 @@ impl ConversationSession {
 
     pub(crate) fn open(
         conversation_id: ConversationId,
-        event_store: EventStore,
+        event_store: Store,
         model_driver: Box<dyn ModelDriver>,
         tool_registry: ToolRegistry,
     ) -> ConversationSessionResult<Self> {
@@ -317,7 +317,7 @@ mod tests {
         ModelDriver, ModelDriverError, ModelDriverOutput, ModelDriverOutputBatch,
         ModelOutputStream, TurnInput,
     };
-    use crate::persistence::EventStore;
+    use crate::persistence::{EventStore, FileEventStore};
     use crate::tools::{ExecutableTool, ShellTool, ToolRegistry};
 
     enum RecordingResponse {
@@ -607,7 +607,7 @@ mod tests {
     }
 
     fn loaded_facts(directory: &Path, conversation_id: ConversationId) -> Vec<ConversationFact> {
-        EventStore::new(directory.to_path_buf())
+        FileEventStore::new(directory.to_path_buf())
             .expect("the store should reopen")
             .load_conversation(conversation_id)
             .expect("the conversation should load")
@@ -628,7 +628,7 @@ mod tests {
         let directory = temporary_directory();
         let pending_counts = Arc::new(Mutex::new(Vec::new()));
         let session = ConversationSession::create(
-            EventStore::new(directory.clone()).expect("the store should be created"),
+            FileEventStore::new(directory.clone()).expect("the store should be created"),
             Box::new(RecordingDriver {
                 source: source(),
                 pending_counts: Arc::clone(&pending_counts),
@@ -650,7 +650,7 @@ mod tests {
 
         let reopened = ConversationSession::open(
             conversation_id,
-            EventStore::new(directory).expect("the store should reopen"),
+            FileEventStore::new(directory).expect("the store should reopen"),
             Box::new(RecordingDriver {
                 source: source(),
                 pending_counts: Arc::clone(&pending_counts),
@@ -684,7 +684,7 @@ mod tests {
     #[tokio::test]
     async fn a_failed_turn_outcome_is_returned_to_the_caller() {
         let session = ConversationSession::create(
-            EventStore::new(temporary_directory()).expect("the store should be created"),
+            FileEventStore::new(temporary_directory()).expect("the store should be created"),
             Box::new(RecordingDriver {
                 source: source(),
                 pending_counts: Arc::new(Mutex::new(Vec::new())),
@@ -709,7 +709,7 @@ mod tests {
     async fn a_late_problem_fails_the_turn_but_preserves_earlier_output() {
         let directory = temporary_directory();
         let session = ConversationSession::create(
-            EventStore::new(directory.clone()).expect("the store should be created"),
+            FileEventStore::new(directory.clone()).expect("the store should be created"),
             Box::new(RecordingDriver {
                 source: source(),
                 pending_counts: Arc::new(Mutex::new(Vec::new())),
@@ -730,7 +730,7 @@ mod tests {
             TurnOutcome::Failed
         );
 
-        let conversation = EventStore::new(directory)
+        let conversation = FileEventStore::new(directory)
             .expect("the store should reopen")
             .load_conversation(conversation_id)
             .expect("the conversation should load");
@@ -773,7 +773,7 @@ mod tests {
     #[tokio::test]
     async fn a_driver_that_ends_without_output_is_an_incomplete_turn() {
         let session = ConversationSession::create(
-            EventStore::new(temporary_directory()).expect("the store should be created"),
+            FileEventStore::new(temporary_directory()).expect("the store should be created"),
             Box::new(RecordingDriver {
                 source: source(),
                 pending_counts: Arc::new(Mutex::new(Vec::new())),
@@ -802,7 +802,7 @@ mod tests {
         registry.register(ObservingTool::new());
         let driver = Arc::new(ScriptedDriver::new(vec![vec![assistant_response()]]));
         let session = ConversationSession::create(
-            EventStore::new(directory.clone()).expect("the store should be created"),
+            FileEventStore::new(directory.clone()).expect("the store should be created"),
             Box::new(SharedScriptedDriver(Arc::clone(&driver))),
             registry,
         );
@@ -854,7 +854,7 @@ mod tests {
             vec![assistant_response()],
         ]));
         let session = ConversationSession::create(
-            EventStore::new(directory.clone()).expect("the store should be created"),
+            FileEventStore::new(directory.clone()).expect("the store should be created"),
             Box::new(SharedScriptedDriver(Arc::clone(&driver))),
             shell_registry(),
         );
@@ -910,7 +910,7 @@ mod tests {
             vec![assistant_response()],
         ]));
         let session = ConversationSession::create(
-            EventStore::new(directory.clone()).expect("the store should be created"),
+            FileEventStore::new(directory.clone()).expect("the store should be created"),
             Box::new(SharedScriptedDriver(Arc::clone(&driver))),
             registry,
         );
@@ -956,7 +956,7 @@ mod tests {
         let mut registry = ToolRegistry::default();
         registry.register(ObservingTool::new());
         let session = ConversationSession::create(
-            EventStore::new(directory.clone()).expect("the store should be created"),
+            FileEventStore::new(directory.clone()).expect("the store should be created"),
             Box::new(SharedScriptedDriver(Arc::clone(&driver))),
             registry,
         );
@@ -1025,7 +1025,7 @@ mod tests {
         let mut registry = ToolRegistry::default();
         registry.register(ObservingTool::new());
         let session = ConversationSession::create(
-            EventStore::new(temporary_directory()).expect("the store should be created"),
+            FileEventStore::new(temporary_directory()).expect("the store should be created"),
             Box::new(SharedScriptedDriver(Arc::clone(&driver))),
             registry,
         );
@@ -1053,7 +1053,7 @@ mod tests {
             vec![assistant_response()],
         ]));
         let session = ConversationSession::create(
-            EventStore::new(directory.clone()).expect("the store should be created"),
+            FileEventStore::new(directory.clone()).expect("the store should be created"),
             Box::new(SharedScriptedDriver(Arc::clone(&driver))),
             ToolRegistry::default(),
         );
@@ -1112,7 +1112,7 @@ mod tests {
             .collect();
         let driver = Arc::new(ScriptedDriver::new(script));
         let session = ConversationSession::create(
-            EventStore::new(directory.clone()).expect("the store should be created"),
+            FileEventStore::new(directory.clone()).expect("the store should be created"),
             Box::new(SharedScriptedDriver(Arc::clone(&driver))),
             ToolRegistry::default(),
         );

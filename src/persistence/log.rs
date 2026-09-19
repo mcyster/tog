@@ -7,7 +7,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-use super::ensure_contiguous_positions;
 use crate::conversation::ConversationEventRecord;
 
 const EVENT_LOG_FILE_NAME: &str = "events.log";
@@ -144,6 +143,21 @@ pub(super) fn crc32(bytes: &[u8]) -> u32 {
         }
     }
     !remainder
+}
+
+pub(super) fn ensure_contiguous_positions(events: &[ConversationEventRecord]) -> io::Result<()> {
+    for (expected_position, event) in (0_u64..).zip(events) {
+        if event.position != expected_position {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "expected conversation event position {expected_position}, found {}",
+                    event.position
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn decode(bytes: &[u8]) -> io::Result<ConversationLog> {

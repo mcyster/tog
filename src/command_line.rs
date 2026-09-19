@@ -11,7 +11,7 @@ use crate::conversation_session::{
     ConversationSession, ConversationSessionProgress, ConversationSessionResult,
 };
 use crate::openai::OpenAiModelDriver;
-use crate::persistence::EventStore;
+use crate::persistence::{EventStore, FileEventStore};
 use crate::tools::{ShellTool, ToolRegistry};
 
 #[derive(Debug, Parser)]
@@ -46,7 +46,7 @@ impl CommandLine {
             Command::Turn(arguments) => {
                 let user_prompt = arguments.user_prompt_words.join(" ").parse()?;
                 let verbosity = arguments.verbosity;
-                let event_store = EventStore::from_environment()?;
+                let event_store = FileEventStore::from_environment()?;
                 let model_driver = Box::new(OpenAiModelDriver::from_environment(arguments.model)?);
                 let mut tool_registry = ToolRegistry::default();
                 tool_registry.register(ShellTool::new());
@@ -80,7 +80,7 @@ impl CommandLine {
                 Ok(CommandOutcome::Turn(outcome))
             }
             Command::Log(arguments) => {
-                let event_store = EventStore::from_environment()?;
+                let event_store = FileEventStore::from_environment()?;
                 let conversation_id = match arguments.conversation_id {
                     Some(conversation_id) => conversation_id,
                     None => event_store.latest_conversation_id()?,

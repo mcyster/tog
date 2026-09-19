@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use schemars::json_schema;
 use serde_json::{Map, Value, json};
 
-use super::{EventStore, legacy, log};
+use super::{EventStore, FileEventStore, legacy, log};
 use crate::conversation::{
     AssistantResponse, ConversationCommandId, ConversationEvent, ConversationEventKind,
     ConversationEventRecord, ConversationFact, ConversationId, ConversationMessage,
@@ -12,12 +12,12 @@ use crate::conversation::{
     ToolOutcome, ToolRequest, ToolResponse, UserContent,
 };
 
-fn temporary_store() -> EventStore {
+fn temporary_store() -> FileEventStore {
     let directory = std::env::temp_dir().join(format!("tog-test-{}", uuid::Uuid::now_v7()));
-    EventStore::new(directory).expect("the event store should be created")
+    FileEventStore::new(directory).expect("the event store should be created")
 }
 
-fn conversation_event_log_path(store: &EventStore, conversation_id: ConversationId) -> PathBuf {
+fn conversation_event_log_path(store: &FileEventStore, conversation_id: ConversationId) -> PathBuf {
     log::log_path(&store.conversation_directory(conversation_id))
 }
 
@@ -405,7 +405,7 @@ fn timestamp(day: u64) -> time::OffsetDateTime {
 }
 
 fn set_event_timestamp(
-    store: &EventStore,
+    store: &FileEventStore,
     event: &ConversationEventRecord,
     timestamp: time::OffsetDateTime,
 ) {
