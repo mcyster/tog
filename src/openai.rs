@@ -23,7 +23,8 @@ use crate::conversation::{
     UserContent, UserMessageRequest,
 };
 use crate::model_driver::{
-    ModelDriver, ModelDriverError, ModelDriverOutput, ModelOutputStream, TurnInput,
+    ModelDriver, ModelDriverError, ModelDriverOutput, ModelDriverOutputBatch, ModelOutputStream,
+    TurnInput,
 };
 
 type ResponseByteStream = BoxStream<'static, Result<Vec<u8>, OpenAiError>>;
@@ -481,8 +482,7 @@ fn model_issue_stream(issue: ModelIssue) -> ProviderOutputStream {
 struct ConversationEventStreamState {
     provider_events: ProviderOutputStream,
     invocation_id: ModelInvocationId,
-    invocation_event: Option<Box<dyn ConversationEventExtension>>,
-    pending_events: VecDeque<ModelDriverOutput>,
+    pending_batches: VecDeque<ModelDriverOutputBatch>,
     terminated: bool,
 }
 
@@ -499,7 +499,9 @@ fn invocation_error_stream(
         data: None,
         problem: provider_problem(&error, failure_stage),
     }));
-    stream::iter(pending_user_events.into_iter().map(Ok)).boxed()
+    let batch = ModelDriverOutputBatch::try_new(pending_user_events)
+        .expect("an invocation failure batch contains an invocation event and a problem");
+    stream::once(async move { Ok(batch) }).boxed()
 }
 
 fn conversation_event_stream(
@@ -508,52 +510,55 @@ fn conversation_event_stream(
     invocation_id: ModelInvocationId,
     invocation_event: Box<dyn ConversationEventExtension>,
 ) -> ModelOutputStream {
+    let mut initial_batch = initial_events;
+    initial_batch.push(ModelDriverOutput::Command(invocation_event));
+    let initial_batch = ModelDriverOutputBatch::try_new(initial_batch)
+        .expect("a model driver batch includes its invocation event");
     stream::unfold(
         ConversationEventStreamState {
             provider_events,
             invocation_id,
-            invocation_event: Some(invocation_event),
-            pending_events: initial_events.into_iter().collect(),
+            pending_batches: VecDeque::from([initial_batch]),
             terminated: false,
         },
         |mut state| async move {
-            if let Some(event) = state.pending_events.pop_front() {
-                return Some((Ok(event), state));
+            if let Some(batch) = state.pending_batches.pop_front() {
+                return Some((Ok(batch), state));
             }
             if state.terminated {
                 return None;
             }
-            if let Some(invocation_event) = state.invocation_event.take() {
-                return Some((Ok(ModelDriverOutput::Command(invocation_event)), state));
-            }
             match state.provider_events.next().await {
                 Some(Ok(driver_event)) => {
-                    let driver_output =
+                    let output =
                         match translate_model_driver_event(driver_event, state.invocation_id) {
                             Ok(driver_output) => driver_output,
                             Err(error) => {
-                                state.pending_events = failure_events(
+                                state.pending_batches = VecDeque::from([failure_batch(
                                     state.invocation_id,
                                     error,
                                     FailureStage::DuringStream,
-                                );
+                                )]);
                                 state.terminated = true;
                                 return state
-                                    .pending_events
+                                    .pending_batches
                                     .pop_front()
-                                    .map(|event| (Ok(event), state));
+                                    .map(|batch| (Ok(batch), state));
                             }
                         };
-                    Some((Ok(driver_output), state))
+                    Some((Ok(ModelDriverOutputBatch::from(output)), state))
                 }
                 Some(Err(error)) => {
-                    state.pending_events =
-                        failure_events(state.invocation_id, error, FailureStage::DuringStream);
+                    state.pending_batches = VecDeque::from([failure_batch(
+                        state.invocation_id,
+                        error,
+                        FailureStage::DuringStream,
+                    )]);
                     state.terminated = true;
                     state
-                        .pending_events
+                        .pending_batches
                         .pop_front()
-                        .map(|event| (Ok(event), state))
+                        .map(|batch| (Ok(batch), state))
                 }
                 None => None,
             }
@@ -568,16 +573,16 @@ enum FailureStage {
     DuringStream,
 }
 
-fn failure_events(
+fn failure_batch(
     invocation_id: ModelInvocationId,
     error: OpenAiError,
     failure_stage: FailureStage,
-) -> VecDeque<ModelDriverOutput> {
-    VecDeque::from([ModelDriverOutput::Message(ConversationMessage::Problem {
+) -> ModelDriverOutputBatch {
+    ModelDriverOutputBatch::from(ModelDriverOutput::Message(ConversationMessage::Problem {
         invocation_id: Some(invocation_id),
         data: None,
         problem: provider_problem(&error, failure_stage),
-    })])
+    }))
 }
 
 fn provider_problem(error: &OpenAiError, failure_stage: FailureStage) -> ConversationProblem {
@@ -1691,7 +1696,7 @@ mod tests {
         StoredConversationEventKind, ToolCallId, ToolDefinition, ToolExecutionProblem, ToolName,
         ToolOutcome, ToolRequest, ToolResponse, UserContent,
     };
-    use crate::model_driver::{ModelDriver, ModelDriverOutput, TurnInput};
+    use crate::model_driver::{ModelDriver, ModelDriverOutput, ModelDriverOutputBatch, TurnInput};
 
     use super::{
         ModelDriverEvent, OpenAiError, OpenAiModelDriver, ResponseByteStream,
@@ -2060,6 +2065,12 @@ mod tests {
         }
     }
 
+    fn expect_single_event(batch: ModelDriverOutputBatch) -> ConversationMessage {
+        let mut outputs = batch.into_outputs();
+        assert_eq!(outputs.len(), 1, "the batch should hold one output");
+        expect_event(outputs.remove(0))
+    }
+
     fn test_conversation() -> Conversation {
         let conversation_id = ConversationId::new();
         Conversation::from_events(vec![conversation_event(
@@ -2124,17 +2135,21 @@ mod tests {
         let invocation = model_events
             .next()
             .await
-            .expect("the stream should yield an invocation event")
-            .expect("the invocation event should be valid");
-        assert!(matches!(invocation, ModelDriverOutput::Command(_)));
-        let first_event = expect_event(
+            .expect("the stream should yield an invocation batch")
+            .expect("the invocation batch should be valid")
+            .into_outputs();
+        assert!(matches!(
+            invocation.as_slice(),
+            [ModelDriverOutput::Command(_)]
+        ));
+        let first_event = expect_single_event(
             model_events
                 .next()
                 .await
                 .expect("the stream should yield reasoning")
                 .expect("the reasoning should be valid"),
         );
-        let second_event = expect_event(
+        let second_event = expect_single_event(
             model_events
                 .next()
                 .await
@@ -2190,15 +2205,18 @@ mod tests {
         let result = driver.invoke(driver_request(&conversation)).await;
 
         let mut model_events = result.expect("the invocation should establish a stream");
+        let outputs = model_events
+            .next()
+            .await
+            .expect("the stream should yield a failure batch")
+            .expect("the failure batch should be valid")
+            .into_outputs();
         assert!(matches!(
-            model_events.next().await,
-            Some(Ok(ModelDriverOutput::Command(_)))
-        ));
-        assert!(matches!(
-            model_events.next().await,
-            Some(Ok(ModelDriverOutput::Message(
-                ConversationMessage::Problem { .. }
-            )))
+            outputs.as_slice(),
+            [
+                ModelDriverOutput::Command(_),
+                ModelDriverOutput::Message(ConversationMessage::Problem { .. })
+            ]
         ));
         assert!(model_events.next().await.is_none());
         server.join().expect("the mock server should stop");
@@ -2239,11 +2257,17 @@ mod tests {
             .invoke(driver_request(&conversation))
             .await
             .expect("the context-limit outcome should establish a semantic stream");
+        let invocation = model_events
+            .next()
+            .await
+            .expect("the stream should yield an invocation batch")
+            .expect("the invocation batch should be valid")
+            .into_outputs();
         assert!(matches!(
-            model_events.next().await,
-            Some(Ok(ModelDriverOutput::Command(_)))
+            invocation.as_slice(),
+            [ModelDriverOutput::Command(_)]
         ));
-        let model_event = expect_event(
+        let model_event = expect_single_event(
             model_events
                 .next()
                 .await

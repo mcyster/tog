@@ -1,17 +1,25 @@
 use std::error::Error;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, BufReader, Write};
+use std::io::{self, BufReader, Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
-use serde::Serialize;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::conversation::{
     Conversation, ConversationEvent, ConversationEventKind, ConversationEventRecord,
     ConversationId, StoredConversationEventKind,
 };
+
+const CONVERSATIONS_DIRECTORY_NAME: &str = "conversations";
+const EVENT_LOG_FILE_NAME: &str = "events.log";
+const LEGACY_EVENTS_DIRECTORY_NAME: &str = "events";
+const EVENT_FRAME_KIND: u8 = 1;
+const COMMIT_FRAME_KIND: u8 = 2;
+const FRAME_HEADER_LENGTH: usize = 9;
+const CRC32_IEEE_POLYNOMIAL: u32 = 0xedb8_8320;
 
 pub(crate) struct EventStore {
     root_directory: PathBuf,
@@ -37,7 +45,7 @@ impl EventStore {
 
     pub(crate) fn new(root_directory: PathBuf) -> io::Result<Self> {
         create_private_directory(&root_directory)?;
-        create_private_directory(&root_directory.join("conversations"))?;
+        create_private_directory(&root_directory.join(CONVERSATIONS_DIRECTORY_NAME))?;
         Ok(Self { root_directory })
     }
 
@@ -64,14 +72,14 @@ impl EventStore {
     }
 
     pub(crate) fn latest_conversation_id(&self) -> io::Result<ConversationId> {
-        let conversations_directory = self.root_directory.join("conversations");
+        let conversations_directory = self.root_directory.join(CONVERSATIONS_DIRECTORY_NAME);
         let mut latest_event: Option<ConversationEventRecord> = None;
         for directory_entry in fs::read_dir(&conversations_directory)? {
             let directory_entry = directory_entry?;
             if !directory_entry.file_type()?.is_dir() {
                 continue;
             }
-            let Some(last_event) = read_last_event(&directory_entry.path().join("events"))? else {
+            let Some(last_event) = read_last_conversation_event(&directory_entry.path())? else {
                 continue;
             };
             if latest_event
@@ -86,89 +94,348 @@ impl EventStore {
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no conversations found"))
     }
 
-    pub(crate) fn append_new_conversation_event(
+    pub(crate) fn append_new_conversation_events(
         &self,
         conversation_id: ConversationId,
-        event: ConversationEvent,
-    ) -> io::Result<ConversationEventRecord> {
-        let kind = match event {
-            ConversationEvent::Command(command) => {
-                StoredConversationEventKind::Shared(ConversationEventKind::Command(command))
-            }
-            ConversationEvent::Fact(fact) => {
-                StoredConversationEventKind::Shared(ConversationEventKind::Fact(fact))
-            }
-            ConversationEvent::Extension(event) => StoredConversationEventKind::Extension(
-                event.to_envelope().map_err(io::Error::other)?,
-            ),
-        };
-        self.append_new_record(conversation_id, kind)
-    }
-
-    fn append_new_record(
-        &self,
-        conversation_id: ConversationId,
-        kind: StoredConversationEventKind,
-    ) -> io::Result<ConversationEventRecord> {
+        events: Vec<ConversationEvent>,
+    ) -> io::Result<Vec<ConversationEventRecord>> {
+        if events.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "an appended event batch must not be empty",
+            ));
+        }
+        let kinds = events
+            .into_iter()
+            .map(stored_kind)
+            .collect::<io::Result<Vec<_>>>()?;
         let conversation_directory = self.conversation_directory(conversation_id);
         create_private_directory(&conversation_directory)?;
-        let events_directory = conversation_directory.join("events");
-        create_private_directory(&events_directory)?;
-        let existing_events = self.load_conversation_events(conversation_id)?;
-        let previous_position = if existing_events.is_empty() {
-            None
+        let log_path = conversation_directory.join(EVENT_LOG_FILE_NAME);
+        let log = read_conversation_log(&log_path)?;
+        let log_exists = log.is_some();
+        let legacy_directory = conversation_directory.join(LEGACY_EVENTS_DIRECTORY_NAME);
+        let (existing_events, committed_length, migration_prefix) = match log {
+            Some(log) => (log.events, log.committed_length, None),
+            None => match read_legacy_events(&legacy_directory)? {
+                Some(legacy_events) => {
+                    let prefix = if legacy_events.is_empty() {
+                        None
+                    } else {
+                        Some(encode_event_batch(&legacy_events)?)
+                    };
+                    (legacy_events, 0, prefix)
+                }
+                None => (Vec::new(), 0, None),
+            },
+        };
+        let previous_position = validate_existing_events(conversation_id, &existing_events)?;
+        let first_position = next_position(previous_position)?;
+        let batch = kinds
+            .into_iter()
+            .enumerate()
+            .map(|(offset, kind)| {
+                let position = first_position
+                    .checked_add(u64::try_from(offset).map_err(io::Error::other)?)
+                    .ok_or_else(|| io::Error::other("event position overflow"))?;
+                Ok(match kind {
+                    StoredConversationEventKind::Shared(kind) => {
+                        ConversationEventRecord::new(conversation_id, position, kind)
+                    }
+                    StoredConversationEventKind::Extension(event) => {
+                        ConversationEventRecord::new_extension(conversation_id, position, event)
+                    }
+                })
+            })
+            .collect::<io::Result<Vec<_>>>()?;
+        let batch_bytes = encode_event_batch(&batch)?;
+        if let Some(prefix) = migration_prefix {
+            let mut contents = prefix;
+            contents.extend_from_slice(&batch_bytes);
+            write_file_atomically(&log_path, &contents)?;
+            remove_superseded_legacy_events(&legacy_directory);
+        } else if log_exists {
+            append_batch_to_log(&log_path, committed_length, &batch_bytes)?;
         } else {
-            let conversation =
-                Conversation::from_events(existing_events).map_err(invalid_conversation_data)?;
-            if conversation.id() != conversation_id {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("loaded {}, expected {conversation_id}", conversation.id()),
-                ));
-            }
-            conversation.events().last().map(|event| event.position)
-        };
-        let conversation_event = match kind {
-            StoredConversationEventKind::Shared(kind) => ConversationEventRecord::new(
-                conversation_id,
-                next_position(previous_position)?,
-                kind,
-            ),
-            StoredConversationEventKind::Extension(event) => {
-                ConversationEventRecord::new_extension(
-                    conversation_id,
-                    next_position(previous_position)?,
-                    event,
-                )
-            }
-        };
-        write_json_atomically(
-            &event_path(
-                &events_directory,
-                conversation_event.position,
-                &conversation_event.id.storage_key(),
-            ),
-            &conversation_event,
-        )?;
-        Ok(conversation_event)
+            create_log(&log_path, &batch_bytes)?;
+        }
+        Ok(batch)
     }
 
     fn load_conversation_events(
         &self,
         conversation_id: ConversationId,
     ) -> io::Result<Vec<ConversationEventRecord>> {
-        let mut events =
-            read_json_directory(&self.conversation_directory(conversation_id).join("events"))?;
-        events.sort_by_key(|event: &ConversationEventRecord| event.position);
-        ensure_contiguous_positions(&events)?;
-        Ok(events)
+        let conversation_directory = self.conversation_directory(conversation_id);
+        if let Some(log) = read_conversation_log(&conversation_directory.join(EVENT_LOG_FILE_NAME))?
+        {
+            return Ok(log.events);
+        }
+        if let Some(events) =
+            read_legacy_events(&conversation_directory.join(LEGACY_EVENTS_DIRECTORY_NAME))?
+        {
+            return Ok(events);
+        }
+        Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("no events found for {conversation_id}"),
+        ))
     }
 
     fn conversation_directory(&self, conversation_id: ConversationId) -> PathBuf {
         self.root_directory
-            .join("conversations")
+            .join(CONVERSATIONS_DIRECTORY_NAME)
             .join(conversation_id.storage_key())
     }
+}
+
+struct ConversationLog {
+    events: Vec<ConversationEventRecord>,
+    committed_length: u64,
+}
+
+#[derive(Deserialize, Serialize)]
+struct ConversationEventBatchCommit {
+    event_count: u64,
+    first_position: u64,
+    last_position: u64,
+}
+
+fn stored_kind(event: ConversationEvent) -> io::Result<StoredConversationEventKind> {
+    match event {
+        ConversationEvent::Command(command) => Ok(StoredConversationEventKind::Shared(
+            ConversationEventKind::Command(command),
+        )),
+        ConversationEvent::Fact(fact) => Ok(StoredConversationEventKind::Shared(
+            ConversationEventKind::Fact(fact),
+        )),
+        ConversationEvent::Extension(event) => event
+            .to_envelope()
+            .map(StoredConversationEventKind::Extension)
+            .map_err(io::Error::other),
+    }
+}
+
+fn validate_existing_events(
+    conversation_id: ConversationId,
+    existing_events: &[ConversationEventRecord],
+) -> io::Result<Option<u64>> {
+    if existing_events.is_empty() {
+        return Ok(None);
+    }
+    let conversation =
+        Conversation::from_events(existing_events.to_vec()).map_err(invalid_conversation_data)?;
+    if conversation.id() != conversation_id {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("loaded {}, expected {conversation_id}", conversation.id()),
+        ));
+    }
+    ensure_contiguous_positions(existing_events)?;
+    Ok(existing_events.last().map(|event| event.position))
+}
+
+fn read_conversation_log(path: &Path) -> io::Result<Option<ConversationLog>> {
+    let mut file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    let log = decode_log(&bytes)?;
+    ensure_contiguous_positions(&log.events)?;
+    Ok(Some(log))
+}
+
+fn decode_log(bytes: &[u8]) -> io::Result<ConversationLog> {
+    let mut events = Vec::new();
+    let mut pending_events: Vec<ConversationEventRecord> = Vec::new();
+    let mut committed_length = 0_u64;
+    let mut offset = 0_usize;
+    while let Some((kind, payload, frame_end)) = next_frame(bytes, offset)? {
+        match kind {
+            EVENT_FRAME_KIND => {
+                let event = serde_json::from_slice(payload).map_err(io::Error::other)?;
+                pending_events.push(event);
+            }
+            COMMIT_FRAME_KIND => {
+                let commit: ConversationEventBatchCommit =
+                    serde_json::from_slice(payload).map_err(io::Error::other)?;
+                validate_batch_commit(&commit, &pending_events)?;
+                events.append(&mut pending_events);
+                committed_length = u64::try_from(frame_end).map_err(io::Error::other)?;
+            }
+            unknown_kind => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "conversation log frame at byte {offset} has unknown kind {unknown_kind}"
+                    ),
+                ));
+            }
+        }
+        offset = frame_end;
+    }
+    Ok(ConversationLog {
+        events,
+        committed_length,
+    })
+}
+
+fn next_frame(bytes: &[u8], offset: usize) -> io::Result<Option<(u8, &[u8], usize)>> {
+    let Some(header_end) = offset.checked_add(FRAME_HEADER_LENGTH) else {
+        return Ok(None);
+    };
+    if header_end > bytes.len() {
+        return Ok(None);
+    }
+    let kind = bytes[offset];
+    let payload_length = u32::from_be_bytes([
+        bytes[offset + 1],
+        bytes[offset + 2],
+        bytes[offset + 3],
+        bytes[offset + 4],
+    ]) as usize;
+    let expected_crc = u32::from_be_bytes([
+        bytes[offset + 5],
+        bytes[offset + 6],
+        bytes[offset + 7],
+        bytes[offset + 8],
+    ]);
+    let Some(frame_end) = header_end.checked_add(payload_length) else {
+        return Ok(None);
+    };
+    if frame_end > bytes.len() {
+        return Ok(None);
+    }
+    let payload = &bytes[header_end..frame_end];
+    if crc32(payload) != expected_crc {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("conversation log frame at byte {offset} failed its checksum"),
+        ));
+    }
+    Ok(Some((kind, payload, frame_end)))
+}
+
+fn validate_batch_commit(
+    commit: &ConversationEventBatchCommit,
+    pending_events: &[ConversationEventRecord],
+) -> io::Result<()> {
+    let event_count = u64::try_from(pending_events.len()).map_err(io::Error::other)?;
+    let first_position = pending_events.first().map(|event| event.position);
+    let last_position = pending_events.last().map(|event| event.position);
+    if commit.event_count == 0
+        || commit.event_count != event_count
+        || Some(commit.first_position) != first_position
+        || Some(commit.last_position) != last_position
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "a conversation log commit marker does not match its batch",
+        ));
+    }
+    Ok(())
+}
+
+fn encode_event_batch(events: &[ConversationEventRecord]) -> io::Result<Vec<u8>> {
+    let (Some(first_event), Some(last_event)) = (events.first(), events.last()) else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "an encoded event batch must not be empty",
+        ));
+    };
+    let commit = ConversationEventBatchCommit {
+        event_count: u64::try_from(events.len()).map_err(io::Error::other)?,
+        first_position: first_event.position,
+        last_position: last_event.position,
+    };
+    let mut bytes = Vec::new();
+    for event in events {
+        let payload = serde_json::to_vec(event).map_err(io::Error::other)?;
+        bytes.extend_from_slice(&encode_frame(EVENT_FRAME_KIND, &payload)?);
+    }
+    let payload = serde_json::to_vec(&commit).map_err(io::Error::other)?;
+    bytes.extend_from_slice(&encode_frame(COMMIT_FRAME_KIND, &payload)?);
+    Ok(bytes)
+}
+
+fn encode_frame(kind: u8, payload: &[u8]) -> io::Result<Vec<u8>> {
+    let payload_length = u32::try_from(payload.len()).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "a conversation log frame exceeds the maximum payload length",
+        )
+    })?;
+    let mut frame = Vec::with_capacity(FRAME_HEADER_LENGTH + payload.len());
+    frame.push(kind);
+    frame.extend_from_slice(&payload_length.to_be_bytes());
+    frame.extend_from_slice(&crc32(payload).to_be_bytes());
+    frame.extend_from_slice(payload);
+    Ok(frame)
+}
+
+fn crc32(bytes: &[u8]) -> u32 {
+    let mut remainder = 0xffff_ffff_u32;
+    for byte in bytes {
+        remainder ^= u32::from(*byte);
+        for _ in 0..8 {
+            let mask = (remainder & 1).wrapping_neg();
+            remainder = (remainder >> 1) ^ (CRC32_IEEE_POLYNOMIAL & mask);
+        }
+    }
+    !remainder
+}
+
+fn append_batch_to_log(
+    log_path: &Path,
+    committed_length: u64,
+    batch_bytes: &[u8],
+) -> io::Result<()> {
+    let mut log_file = OpenOptions::new().read(true).write(true).open(log_path)?;
+    log_file.set_len(committed_length)?;
+    log_file.seek(SeekFrom::Start(committed_length))?;
+    log_file.write_all(batch_bytes)?;
+    log_file.sync_all()
+}
+
+fn create_log(log_path: &Path, batch_bytes: &[u8]) -> io::Result<()> {
+    let parent_directory = log_path
+        .parent()
+        .ok_or_else(|| io::Error::other("persisted file has no parent directory"))?;
+    let mut log_file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(log_path)?;
+    log_file.write_all(batch_bytes)?;
+    log_file.sync_all()?;
+    File::open(parent_directory)?.sync_all()
+}
+
+fn read_legacy_events(directory: &Path) -> io::Result<Option<Vec<ConversationEventRecord>>> {
+    let mut events = match read_json_directory::<ConversationEventRecord>(directory) {
+        Ok(events) => events,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    events.sort_by_key(|event: &ConversationEventRecord| event.position);
+    ensure_contiguous_positions(&events)?;
+    Ok(Some(events))
+}
+
+fn read_last_conversation_event(
+    conversation_directory: &Path,
+) -> io::Result<Option<ConversationEventRecord>> {
+    if let Some(log) = read_conversation_log(&conversation_directory.join(EVENT_LOG_FILE_NAME))? {
+        return Ok(log.events.into_iter().last());
+    }
+    read_last_legacy_event(&conversation_directory.join(LEGACY_EVENTS_DIRECTORY_NAME))
+}
+
+fn remove_superseded_legacy_events(legacy_directory: &Path) {
+    let _ = fs::remove_dir_all(legacy_directory);
 }
 
 fn create_private_directory(path: &Path) -> io::Result<()> {
@@ -200,11 +467,12 @@ fn ensure_contiguous_positions(events: &[ConversationEventRecord]) -> io::Result
     Ok(())
 }
 
+#[cfg(test)]
 fn event_path(directory: &Path, position: u64, identifier: &str) -> PathBuf {
     directory.join(format!("{position:020}-{identifier}.json"))
 }
 
-fn write_json_atomically<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
+fn write_file_atomically(path: &Path, contents: &[u8]) -> io::Result<()> {
     let parent_directory = path
         .parent()
         .ok_or_else(|| io::Error::other("persisted file has no parent directory"))?;
@@ -214,11 +482,17 @@ fn write_json_atomically<T: Serialize>(path: &Path, value: &T) -> io::Result<()>
         .create_new(true)
         .mode(0o600)
         .open(&temporary_path)?;
-    serde_json::to_writer(&mut temporary_file, value).map_err(io::Error::other)?;
-    temporary_file.write_all(b"\n")?;
+    temporary_file.write_all(contents)?;
     temporary_file.sync_all()?;
     fs::rename(&temporary_path, path)?;
     File::open(parent_directory)?.sync_all()
+}
+
+#[cfg(test)]
+fn write_json_atomically<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
+    let mut contents = serde_json::to_vec(value).map_err(io::Error::other)?;
+    contents.push(b'\n');
+    write_file_atomically(path, &contents)
 }
 
 fn read_json<T: DeserializeOwned>(path: &Path) -> io::Result<T> {
@@ -241,7 +515,7 @@ fn read_json_directory<T: DeserializeOwned>(directory: &Path) -> io::Result<Vec<
     Ok(values)
 }
 
-fn read_last_event(events_directory: &Path) -> io::Result<Option<ConversationEventRecord>> {
+fn read_last_legacy_event(events_directory: &Path) -> io::Result<Option<ConversationEventRecord>> {
     let directory_entries = match fs::read_dir(events_directory) {
         Ok(directory_entries) => directory_entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -274,15 +548,21 @@ fn invalid_conversation_data(error: impl Error + Send + Sync + 'static) -> io::E
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
+    use std::path::PathBuf;
+
     use schemars::json_schema;
     use serde_json::{Map, Value, json};
 
-    use super::{EventStore, event_path, write_json_atomically};
+    use super::{
+        EVENT_LOG_FILE_NAME, EventStore, FRAME_HEADER_LENGTH, LEGACY_EVENTS_DIRECTORY_NAME,
+        encode_event_batch, event_path, write_file_atomically, write_json_atomically,
+    };
     use crate::conversation::{
-        AssistantResponse, ConversationCommandId, ConversationEvent, ConversationEventRecord,
-        ConversationFact, ConversationId, ConversationMessage, ConversationTurnId, ModelData,
-        ModelInvocationId, ToolCallId, ToolDefinition, ToolName, ToolOutcome, ToolRequest,
-        ToolResponse, UserContent,
+        AssistantResponse, ConversationCommandId, ConversationEvent, ConversationEventKind,
+        ConversationEventRecord, ConversationFact, ConversationId, ConversationMessage,
+        ConversationTurnId, ModelData, ModelInvocationId, ToolCallId, ToolDefinition, ToolName,
+        ToolOutcome, ToolRequest, ToolResponse, UserContent,
     };
 
     fn temporary_store() -> EventStore {
@@ -290,14 +570,33 @@ mod tests {
         EventStore::new(directory).expect("the event store should be created")
     }
 
-    fn user_fact(content: &str) -> ConversationEvent {
-        ConversationEvent::Fact(ConversationFact::Message {
+    fn conversation_event_log_path(store: &EventStore, conversation_id: ConversationId) -> PathBuf {
+        store
+            .conversation_directory(conversation_id)
+            .join(EVENT_LOG_FILE_NAME)
+    }
+
+    fn user_message_fact(content: &str) -> ConversationFact {
+        ConversationFact::Message {
             message: ConversationMessage::User {
                 caused_by: Some(ConversationCommandId::new()),
                 content: vec![UserContent::Text(content.to_owned())],
             },
             turn_id: None,
-        })
+        }
+    }
+
+    fn user_fact(content: &str) -> ConversationEvent {
+        ConversationEvent::Fact(user_message_fact(content))
+    }
+
+    fn user_kind(content: &str) -> ConversationEventKind {
+        ConversationEventKind::Fact(user_message_fact(content))
+    }
+
+    #[test]
+    fn crc32_matches_the_standard_check_value() {
+        assert_eq!(super::crc32(b"123456789"), 0xcbf4_3926);
     }
 
     #[test]
@@ -305,12 +604,14 @@ mod tests {
         let store = temporary_store();
         let conversation_id = ConversationId::new();
 
-        let first_event = store
-            .append_new_conversation_event(conversation_id, user_fact("first"))
+        let first_batch = store
+            .append_new_conversation_events(conversation_id, vec![user_fact("first")])
             .expect("the first event should be persisted");
-        let second_event = store
-            .append_new_conversation_event(conversation_id, user_fact("second"))
+        let second_batch = store
+            .append_new_conversation_events(conversation_id, vec![user_fact("second")])
             .expect("the second event should be persisted");
+        let first_event = &first_batch[0];
+        let second_event = &second_batch[0];
 
         assert_eq!(first_event.conversation_id, conversation_id);
         assert_eq!(first_event.position, 0);
@@ -339,6 +640,132 @@ mod tests {
                 .join("conversation.json")
                 .exists()
         );
+        assert!(conversation_event_log_path(&store, conversation_id).exists());
+    }
+
+    #[test]
+    fn appending_an_event_batch_commits_its_events_in_order() {
+        let store = temporary_store();
+        let conversation_id = ConversationId::new();
+
+        let appended = store
+            .append_new_conversation_events(
+                conversation_id,
+                vec![user_fact("first"), user_fact("second"), user_fact("third")],
+            )
+            .expect("the batch should be persisted");
+
+        assert_eq!(
+            appended
+                .iter()
+                .map(|event| event.position)
+                .collect::<Vec<_>>(),
+            [0, 1, 2]
+        );
+        let loaded = store
+            .load_conversation_log(conversation_id)
+            .expect("the log should load");
+        assert_eq!(loaded, appended);
+    }
+
+    #[test]
+    fn appending_an_empty_event_batch_is_rejected() {
+        let store = temporary_store();
+        let conversation_id = ConversationId::new();
+
+        let error = store
+            .append_new_conversation_events(conversation_id, Vec::new())
+            .expect_err("an empty batch should be rejected");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn event_store_rejects_committed_positions_with_a_gap() {
+        let store = temporary_store();
+        let conversation_id = ConversationId::new();
+        let mut events = vec![
+            ConversationEventRecord::new(conversation_id, 0, user_kind("first")),
+            ConversationEventRecord::new(conversation_id, 1, user_kind("second")),
+        ];
+        events[1].position = 2;
+        std::fs::create_dir_all(store.conversation_directory(conversation_id))
+            .expect("the conversation directory should be created");
+        write_file_atomically(
+            &conversation_event_log_path(&store, conversation_id),
+            &encode_event_batch(&events).expect("the batch should encode"),
+        )
+        .expect("the log should be written");
+
+        let error = store
+            .load_conversation(conversation_id)
+            .expect_err("the incomplete log should be rejected");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(
+            error.to_string(),
+            "expected conversation event position 1, found 2"
+        );
+        assert!(
+            store
+                .append_new_conversation_events(conversation_id, vec![user_fact("third")])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn recovery_ignores_an_incomplete_trailing_batch() {
+        let store = temporary_store();
+        let conversation_id = ConversationId::new();
+        store
+            .append_new_conversation_events(conversation_id, vec![user_fact("committed")])
+            .expect("the committed event should be persisted");
+        let log_path = conversation_event_log_path(&store, conversation_id);
+        let torn_batch = encode_event_batch(&[ConversationEventRecord::new(
+            conversation_id,
+            1,
+            user_kind("torn"),
+        )])
+        .expect("the torn batch should encode");
+        let mut log_file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&log_path)
+            .expect("the log should open");
+        log_file
+            .write_all(&torn_batch[..torn_batch.len() - 8])
+            .expect("the torn tail should be written");
+
+        let loaded = store
+            .load_conversation_log(conversation_id)
+            .expect("the committed log should load");
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].position, 0);
+
+        store
+            .append_new_conversation_events(conversation_id, vec![user_fact("after")])
+            .expect("the torn tail should be discarded");
+        let loaded = store
+            .load_conversation_log(conversation_id)
+            .expect("the log should load");
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded[1].position, 1);
+    }
+
+    #[test]
+    fn corruption_inside_committed_history_is_rejected() {
+        let store = temporary_store();
+        let conversation_id = ConversationId::new();
+        store
+            .append_new_conversation_events(conversation_id, vec![user_fact("first")])
+            .expect("the event should be persisted");
+        let log_path = conversation_event_log_path(&store, conversation_id);
+        let mut bytes = std::fs::read(&log_path).expect("the log should be readable");
+        bytes[FRAME_HEADER_LENGTH + 2] ^= 0xff;
+        std::fs::write(&log_path, &bytes).expect("the corrupted log should be written");
+
+        let error = store
+            .load_conversation(conversation_id)
+            .expect_err("corruption inside committed history should be rejected");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     }
 
     #[test]
@@ -360,46 +787,14 @@ mod tests {
             },
             turn_id: Some(ConversationTurnId::new()),
         });
-        let model_event = store
-            .append_new_conversation_event(conversation_id, assistant)
+        let batch = store
+            .append_new_conversation_events(conversation_id, vec![assistant])
             .expect("the model event should be persisted");
 
         let conversation = store
             .load_conversation(conversation_id)
             .expect("the conversation should load");
-        assert_eq!(conversation.events()[0], model_event);
-    }
-
-    #[test]
-    fn event_store_rejects_a_log_with_a_missing_middle_record() {
-        let store = temporary_store();
-        let conversation_id = ConversationId::new();
-        for content in ["first", "second", "third"] {
-            store
-                .append_new_conversation_event(conversation_id, user_fact(content))
-                .expect("the event should be persisted");
-        }
-        let events_directory = store.conversation_directory(conversation_id).join("events");
-        let mut event_paths = std::fs::read_dir(&events_directory)
-            .expect("the persisted events should be readable")
-            .map(|entry| entry.expect("the event entry should be readable").path())
-            .collect::<Vec<_>>();
-        event_paths.sort();
-        std::fs::remove_file(&event_paths[1]).expect("the middle event should be removed");
-
-        let error = store
-            .load_conversation(conversation_id)
-            .expect_err("the incomplete log should be rejected");
-        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
-        assert_eq!(
-            error.to_string(),
-            "expected conversation event position 1, found 2"
-        );
-        assert!(
-            store
-                .append_new_conversation_event(conversation_id, user_fact("fourth"))
-                .is_err()
-        );
+        assert_eq!(conversation.events()[0], batch[0]);
     }
 
     #[test]
@@ -431,29 +826,29 @@ mod tests {
         );
 
         store
-            .append_new_conversation_event(
+            .append_new_conversation_events(
                 conversation_id,
-                ConversationEvent::Fact(ConversationFact::ToolsAvailable {
+                vec![ConversationEvent::Fact(ConversationFact::ToolsAvailable {
                     tools: vec![tool_definition.clone()],
-                }),
+                })],
             )
             .expect("the tool definitions should persist");
         store
-            .append_new_conversation_event(
+            .append_new_conversation_events(
                 conversation_id,
-                ConversationEvent::Fact(ConversationFact::ToolRequest {
+                vec![ConversationEvent::Fact(ConversationFact::ToolRequest {
                     request: request.clone(),
                     turn_id: Some(turn_id),
-                }),
+                })],
             )
             .expect("the tool request should persist");
         store
-            .append_new_conversation_event(
+            .append_new_conversation_events(
                 conversation_id,
-                ConversationEvent::Fact(ConversationFact::ToolResponse {
+                vec![ConversationEvent::Fact(ConversationFact::ToolResponse {
                     response: response.clone(),
                     turn_id: Some(turn_id),
-                }),
+                })],
             )
             .expect("the tool response should persist");
 
@@ -480,6 +875,46 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn event_store_migrates_legacy_per_event_files_on_append() {
+        let store = temporary_store();
+        let conversation_id = ConversationId::new();
+        let conversation_directory = store.conversation_directory(conversation_id);
+        let legacy_directory = conversation_directory.join(LEGACY_EVENTS_DIRECTORY_NAME);
+        std::fs::create_dir_all(&legacy_directory).expect("the legacy directory should be created");
+        let first = ConversationEventRecord::new(conversation_id, 0, user_kind("first"));
+        let second = ConversationEventRecord::new(conversation_id, 1, user_kind("second"));
+        write_json_atomically(
+            &event_path(&legacy_directory, first.position, "first"),
+            &first,
+        )
+        .expect("the first legacy event should be written");
+        write_json_atomically(
+            &event_path(&legacy_directory, second.position, "second"),
+            &second,
+        )
+        .expect("the second legacy event should be written");
+
+        let loaded = store
+            .load_conversation_log(conversation_id)
+            .expect("the legacy events should load");
+        assert_eq!(loaded, vec![first.clone(), second.clone()]);
+
+        let appended = store
+            .append_new_conversation_events(conversation_id, vec![user_fact("third")])
+            .expect("the new event should migrate the legacy log");
+        assert_eq!(appended[0].position, 2);
+
+        let loaded = store
+            .load_conversation_log(conversation_id)
+            .expect("the migrated log should load");
+        assert_eq!(loaded.len(), 3);
+        assert_eq!(loaded[0], first);
+        assert_eq!(loaded[1], second);
+        assert!(!legacy_directory.exists());
+        assert!(conversation_event_log_path(&store, conversation_id).exists());
+    }
+
     fn timestamp(day: u64) -> time::OffsetDateTime {
         time::OffsetDateTime::UNIX_EPOCH + time::Duration::days(day as i64)
     }
@@ -489,18 +924,17 @@ mod tests {
         event: &ConversationEventRecord,
         timestamp: time::OffsetDateTime,
     ) {
-        let mut rewritten_event = event.clone();
-        rewritten_event.timestamp = timestamp;
-        let events_directory = store
-            .conversation_directory(event.conversation_id)
-            .join("events");
-        write_json_atomically(
-            &event_path(
-                &events_directory,
-                rewritten_event.position,
-                &rewritten_event.id.storage_key(),
-            ),
-            &rewritten_event,
+        let mut events = store
+            .load_conversation_log(event.conversation_id)
+            .expect("the log should load");
+        for loaded_event in &mut events {
+            if loaded_event.id == event.id {
+                loaded_event.timestamp = timestamp;
+            }
+        }
+        write_file_atomically(
+            &conversation_event_log_path(store, event.conversation_id),
+            &encode_event_batch(&events).expect("the batch should encode"),
         )
         .expect("the event timestamp should be written");
     }
@@ -510,14 +944,14 @@ mod tests {
         let store = temporary_store();
         let first_conversation_id = ConversationId::new();
         let second_conversation_id = ConversationId::new();
-        let first_event = store
-            .append_new_conversation_event(first_conversation_id, user_fact("first"))
+        let first_batch = store
+            .append_new_conversation_events(first_conversation_id, vec![user_fact("first")])
             .expect("the first event should be persisted");
-        let second_event = store
-            .append_new_conversation_event(second_conversation_id, user_fact("second"))
+        let second_batch = store
+            .append_new_conversation_events(second_conversation_id, vec![user_fact("second")])
             .expect("the second event should be persisted");
-        set_event_timestamp(&store, &first_event, timestamp(1));
-        set_event_timestamp(&store, &second_event, timestamp(2));
+        set_event_timestamp(&store, &first_batch[0], timestamp(1));
+        set_event_timestamp(&store, &second_batch[0], timestamp(2));
 
         assert_eq!(
             store
@@ -526,10 +960,10 @@ mod tests {
             second_conversation_id
         );
 
-        let third_event = store
-            .append_new_conversation_event(first_conversation_id, user_fact("third"))
+        let third_batch = store
+            .append_new_conversation_events(first_conversation_id, vec![user_fact("third")])
             .expect("the third event should be persisted");
-        set_event_timestamp(&store, &third_event, timestamp(3));
+        set_event_timestamp(&store, &third_batch[0], timestamp(3));
 
         assert_eq!(
             store
@@ -556,15 +990,11 @@ mod tests {
         let store = temporary_store();
         let conversation_id = ConversationId::new();
         store
-            .append_new_conversation_event(conversation_id, user_fact("first"))
+            .append_new_conversation_events(conversation_id, vec![user_fact("first")])
             .expect("the event should be persisted");
         let empty_conversation_id = ConversationId::new();
-        std::fs::create_dir_all(
-            store
-                .conversation_directory(empty_conversation_id)
-                .join("events"),
-        )
-        .expect("the empty conversation directory should be created");
+        std::fs::create_dir_all(store.conversation_directory(empty_conversation_id))
+            .expect("the empty conversation directory should be created");
 
         assert_eq!(
             store
@@ -574,42 +1004,23 @@ mod tests {
         );
     }
 
-    fn replace_last_event_contents(
-        store: &EventStore,
-        conversation_id: ConversationId,
-        contents: &str,
-    ) {
-        let events_directory = store.conversation_directory(conversation_id).join("events");
-        let mut event_paths = std::fs::read_dir(&events_directory)
-            .expect("the events should be readable")
-            .map(|entry| entry.expect("the event entry should be readable").path())
-            .collect::<Vec<_>>();
-        event_paths.sort();
-        std::fs::write(
-            event_paths
-                .last()
-                .expect("the conversation should have an event"),
-            contents,
-        )
-        .expect("the event contents should be written");
-    }
-
     #[test]
     fn latest_conversation_ignores_an_earlier_schema() {
         let store = temporary_store();
         let legacy_conversation_id = ConversationId::new();
-        store
-            .append_new_conversation_event(legacy_conversation_id, user_fact("legacy"))
-            .expect("the event should be persisted");
-        replace_last_event_contents(
-            &store,
-            legacy_conversation_id,
+        let legacy_directory = store
+            .conversation_directory(legacy_conversation_id)
+            .join(LEGACY_EVENTS_DIRECTORY_NAME);
+        std::fs::create_dir_all(&legacy_directory).expect("the legacy directory should be created");
+        std::fs::write(
+            legacy_directory.join("00000000000000000000-01a00692c0dc7402a70f67ae862a5eb5.json"),
             concat!(
                 r#"{"position":0,"id":"01a00692-c0dc-7402-a70f-67ae862a5eb5","#,
                 r#""timestamp_milliseconds":1786816676060,"schema_version":1,"#,
                 r#""event":{"type":"user","text":"test"}}"#
             ),
-        );
+        )
+        .expect("the earlier schema event should be written");
 
         let error = store
             .latest_conversation_id()
@@ -618,7 +1029,7 @@ mod tests {
 
         let current_conversation_id = ConversationId::new();
         store
-            .append_new_conversation_event(current_conversation_id, user_fact("current"))
+            .append_new_conversation_events(current_conversation_id, vec![user_fact("current")])
             .expect("the event should be persisted");
 
         assert_eq!(

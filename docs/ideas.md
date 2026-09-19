@@ -10,4 +10,4 @@ Consider standard input and file-based prompts when concrete automation workflow
 
 ## Conversation State
 
-Evaluate when the Phase 1 atomic file-per-event store needs concurrent append coordination, indexing, compaction, or migration to a database.
+Evaluate when the Phase 1 append-only conversation log needs concurrent append coordination, indexing, compaction, or migration to a database.

@@ -55,10 +55,6 @@ impl ConversationEventId {
     pub(crate) fn new() -> Self {
         Self(Uuid::now_v7())
     }
-
-    pub(crate) fn storage_key(self) -> String {
-        self.0.simple().to_string()
-    }
 }
 
 impl Display for ConversationEventId {

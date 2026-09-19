@@ -244,22 +244,49 @@ fn reported_conversation_id(standard_error: &[u8]) -> String {
 }
 
 fn persisted_events(data_directory: &Path, conversation_id: &str) -> Vec<Value> {
-    let events_directory = data_directory
+    let log_path = data_directory
         .join("conversations")
         .join(conversation_id.trim_start_matches("conversation_"))
-        .join("events");
-    let mut event_paths = fs::read_dir(events_directory)
-        .expect("the persisted events should be readable")
-        .map(|entry| entry.expect("the event entry should be readable").path())
-        .collect::<Vec<_>>();
-    event_paths.sort();
-    event_paths
-        .iter()
-        .map(|path| {
-            serde_json::from_reader(fs::File::open(path).expect("the persisted event should open"))
-                .expect("the persisted event should be JSON")
-        })
-        .collect()
+        .join("events.log");
+    let bytes = fs::read(&log_path).expect("the conversation log should be readable");
+    committed_events(&bytes)
+}
+
+fn committed_events(bytes: &[u8]) -> Vec<Value> {
+    const EVENT_FRAME_KIND: u8 = 1;
+    const COMMIT_FRAME_KIND: u8 = 2;
+    const FRAME_HEADER_LENGTH: usize = 9;
+
+    let mut events = Vec::new();
+    let mut pending_events = Vec::new();
+    let mut offset = 0;
+    while offset + FRAME_HEADER_LENGTH <= bytes.len() {
+        let kind = bytes[offset];
+        let payload_length = u32::from_be_bytes([
+            bytes[offset + 1],
+            bytes[offset + 2],
+            bytes[offset + 3],
+            bytes[offset + 4],
+        ]) as usize;
+        let Some(frame_end) = offset
+            .checked_add(FRAME_HEADER_LENGTH)
+            .and_then(|start| start.checked_add(payload_length))
+        else {
+            break;
+        };
+        if frame_end > bytes.len() {
+            break;
+        }
+        let payload = &bytes[offset + FRAME_HEADER_LENGTH..frame_end];
+        match kind {
+            EVENT_FRAME_KIND => pending_events
+                .push(serde_json::from_slice(payload).expect("the persisted event should be JSON")),
+            COMMIT_FRAME_KIND => events.append(&mut pending_events),
+            unknown_kind => panic!("unknown conversation log frame kind {unknown_kind}"),
+        }
+        offset = frame_end;
+    }
+    events
 }
 
 fn logged_events(standard_output: &[u8]) -> Vec<Value> {
@@ -305,15 +332,9 @@ fn turn_persists_events_and_prints_semantic_output() {
         .join("conversations")
         .join(conversation_id.trim_start_matches("conversation_"));
     assert!(!conversation_directory.join("conversation.json").exists());
-    let mut event_paths = fs::read_dir(conversation_directory.join("events"))
-        .expect("the persisted events should be readable")
-        .map(|entry| entry.expect("the event entry should be readable").path())
-        .collect::<Vec<_>>();
-    event_paths.sort();
-    let first_event: Value = serde_json::from_reader(
-        fs::File::open(&event_paths[0]).expect("the persisted user event should open"),
-    )
-    .expect("the persisted user event should be JSON");
+    assert!(conversation_directory.join("events.log").exists());
+    let events = persisted_events(&data_directory, &conversation_id);
+    let first_event = &events[0];
     assert_eq!(
         first_event["conversation_id"]
             .as_str()
@@ -328,16 +349,10 @@ fn turn_persists_events_and_prints_semantic_output() {
     assert_eq!(first_event["event"]["content"][0]["value"], "say hi");
     assert!(first_event.get("kind").is_none());
     assert!(first_event.get("model").is_none());
-    let turn_request: Value = serde_json::from_reader(
-        fs::File::open(&event_paths[1]).expect("the persisted turn request should open"),
-    )
-    .expect("the persisted turn request should be JSON");
+    let turn_request = &events[1];
     assert_eq!(turn_request["class"], "command");
     assert_eq!(turn_request["event"]["type"], "turn_requested");
-    let tools_available: Value = serde_json::from_reader(
-        fs::File::open(&event_paths[2]).expect("the tool context should open"),
-    )
-    .expect("the persisted tool context should be JSON");
+    let tools_available = &events[2];
     assert_eq!(tools_available["schema_version"], 13);
     assert_eq!(tools_available["class"], "fact");
     assert_eq!(tools_available["event"]["tools"][0]["name"], "shell");
@@ -345,17 +360,11 @@ fn turn_persists_events_and_prints_semantic_output() {
         tools_available["event"]["tools"][0]["parameters"]["properties"]["command"].is_object()
     );
     assert!(tools_available["event"]["tools"][0]["result"].is_object());
-    let user_event: Value = serde_json::from_reader(
-        fs::File::open(&event_paths[3]).expect("the persisted user event should open"),
-    )
-    .expect("the persisted user event should be JSON");
+    let user_event = &events[3];
     assert_eq!(user_event["schema_version"], 13);
     assert_eq!(user_event["class"], "fact");
     assert_eq!(user_event["event"]["type"], "user");
-    let invocation_event: Value = serde_json::from_reader(
-        fs::File::open(&event_paths[4]).expect("the invocation event should open"),
-    )
-    .expect("the invocation event should be JSON");
+    let invocation_event = &events[4];
     assert_eq!(invocation_event["class"], "command");
     assert_eq!(invocation_event["namespace"], "openai");
     assert_eq!(invocation_event["namespace_version"], "1");
@@ -365,20 +374,14 @@ fn turn_persists_events_and_prints_semantic_output() {
     assert!(invocation_event["payload"]["invocation_id"].is_string());
     assert_eq!(invocation_event["payload"]["model"]["provider"], "openai");
     assert_eq!(invocation_event["payload"]["model"]["model"], "gpt-5.6");
-    let model_event: Value = serde_json::from_reader(
-        fs::File::open(&event_paths[5]).expect("the persisted model event should open"),
-    )
-    .expect("the persisted model event should be JSON");
+    let model_event = &events[5];
     assert_eq!(model_event["schema_version"], 13);
     assert_eq!(model_event["class"], "fact");
     assert_eq!(model_event["event"]["type"], "assistant");
     assert_eq!(model_event["event"]["response"]["message"], "Hello");
     assert!(model_event.get("kind").is_none());
     assert!(model_event.get("data").is_none());
-    let completion: Value = serde_json::from_reader(
-        fs::File::open(&event_paths[6]).expect("the persisted completion should open"),
-    )
-    .expect("the persisted completion should be JSON");
+    let completion = &events[6];
     assert_eq!(completion["class"], "fact");
     assert_eq!(completion["event"]["type"], "turn_completed");
     assert_eq!(completion["event"]["outcome"], "succeeded");
@@ -547,19 +550,8 @@ fn model_issue_is_rendered_and_persisted_as_a_top_level_problem() {
         "### I cannot comply.\n"
     );
     let conversation_id = reported_conversation_id(&command_output.stderr);
-    let events_directory = data_directory
-        .join("conversations")
-        .join(conversation_id.trim_start_matches("conversation_"))
-        .join("events");
-    let mut event_paths = fs::read_dir(events_directory)
-        .expect("the persisted events should be readable")
-        .map(|entry| entry.expect("the event entry should be readable").path())
-        .collect::<Vec<_>>();
-    event_paths.sort();
-    let problem: Value = serde_json::from_reader(
-        fs::File::open(&event_paths[5]).expect("the problem event should open"),
-    )
-    .expect("the problem event should be JSON");
+    let events = persisted_events(&data_directory, &conversation_id);
+    let problem = &events[5];
     assert_eq!(problem["class"], "fact");
     assert_eq!(problem["event"]["type"], "problem");
     assert_eq!(problem["event"]["problem"]["category"], "issue");
@@ -624,24 +616,7 @@ fn reasoning_events_are_persisted_and_printed_but_not_replayed_as_assistant_mess
         "### Detailed thought\n### Reasoning summary\nFinal answer\n"
     );
     let conversation_id = reported_conversation_id(&first_output.stderr);
-    let events_directory = data_directory
-        .join("conversations")
-        .join(conversation_id.trim_start_matches("conversation_"))
-        .join("events");
-    let mut event_paths = fs::read_dir(events_directory)
-        .expect("the persisted events should be readable")
-        .map(|entry| entry.expect("the event entry should be readable").path())
-        .collect::<Vec<_>>();
-    event_paths.sort();
-    let persisted_events = event_paths
-        .iter()
-        .map(|path| {
-            serde_json::from_reader::<_, Value>(
-                fs::File::open(path).expect("the persisted event should open"),
-            )
-            .expect("the persisted event should be JSON")
-        })
-        .collect::<Vec<_>>();
+    let persisted_events = persisted_events(&data_directory, &conversation_id);
     assert_eq!(persisted_events[5]["class"], "fact");
     assert_eq!(persisted_events[5]["event"]["type"], "communication");
     assert_eq!(
@@ -782,23 +757,8 @@ fn failed_user_turn_is_included_in_the_next_local_reconstruction() {
         reported_conversation_id(&failed_output.stderr),
         conversation_id
     );
-    let events_directory = data_directory
-        .join("conversations")
-        .join(conversation_id.trim_start_matches("conversation_"))
-        .join("events");
-    let mut event_paths = fs::read_dir(events_directory)
-        .expect("the persisted events should be readable")
-        .map(|entry| entry.expect("the event entry should be readable").path())
-        .collect::<Vec<_>>();
-    event_paths.sort();
-    let invocation_problem = event_paths
-        .iter()
-        .map(|path| {
-            serde_json::from_reader::<_, Value>(
-                fs::File::open(path).expect("the persisted event should open"),
-            )
-            .expect("the persisted event should be JSON")
-        })
+    let invocation_problem = persisted_events(&data_directory, &conversation_id)
+        .into_iter()
         .find(|event| event["class"] == "fact" && event["event"]["type"] == "problem")
         .expect("the invocation problem should be persisted");
     assert_eq!(invocation_problem["class"], "fact");
