@@ -55,7 +55,7 @@ The complete development standards are in [`docs/development-standards.md`](docs
 - When a simpler accepted direction gives up an earlier property, remove the superseded code, tests, and documentation rather than preserving it implicitly.
 - Preserve existing behavior unless the task explicitly changes it.
 - Add or update tests for observable behavior and validation rules.
-- Do not commit or push unless explicitly requested.
+- Deliver every change through a pull request: commit, push, and create one, or update the current open pull request. Check that an existing pull request is not already merged before updating it.
 
 ## Required Validation
 

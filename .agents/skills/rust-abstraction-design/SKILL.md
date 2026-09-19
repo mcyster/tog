@@ -199,8 +199,13 @@ concrete type can do.
 
 ## Keep the interface file to the contract
 
-An interface file presents operations and their documented semantics. It holds
-no fields, implementation bodies, private helpers, or storage details.
+An interface file presents operations and their documented semantics. The
+contract is the trait signatures and the error variants they can produce.
+Formatting, conversions, and other implementations belong with the concrete
+type or a dedicated implementation module.
+
+An interface file holds no fields, implementation bodies, private helpers, or
+storage details.
 
 Place the concrete implementation with its state, implementation helpers, and
 construction. Construction that selects configuration, such as an explicit
@@ -218,6 +223,23 @@ Before writing one, try:
 
 Do not restate the method name, parameters, or return type. Do not describe
 implementation details or concepts the interface does not own.
+
+## Describe failure with types
+
+Give each operation an error type whose variants name that operation's failing
+conditions. Keep a shared low-level error small and opaque; do not leak
+positions, markers, checksums, or other implementation mechanics through it.
+
+Represent absence with `Option` rather than an error.
+
+## Keep abstractions proportional to their value
+
+Evaluate every wrapper, conversion, and helper type by whether it makes the
+code easier to understand and use. Keep those that earn their place.
+
+A type that only makes an invalid value unrepresentable while the consumer
+must still report the same failure adds a concept without removing work.
+Prefer the direct parameter and the error variant.
 
 ## Keep concepts together
 
@@ -253,6 +275,10 @@ When a simpler direction intentionally gives up a previous property:
 4. remove its code, tests, and authoritative documentation
 
 Do not continue defending or accommodating a superseded property after the tradeoff is accepted.
+
+Delete superseded formats and mechanisms outright. Compatibility or migration
+code needs a released representation and a current consumer; before the first
+release, remove the old path instead of carrying it forward.
 
 Architectural documents may contain future sections. Future sections do not constrain the current implementation unless the current milestone explicitly adopts them.
 
