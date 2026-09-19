@@ -207,8 +207,10 @@ construction. Construction that selects configuration, such as an explicit
 location or an environment-derived default, belongs to the concrete type, not
 the trait.
 
-Document each operation's meaning and guarantees at the contract, including
-failure behavior.
+Document only what the signature cannot express: meaning, guarantees, and
+failure behavior. Do not restate the method name, parameters, or return type.
+Prefer a descriptive name over a comment, and omit the comment when the name
+already conveys the operation.
 
 ## Keep concepts together
 
@@ -252,6 +254,7 @@ Architectural documents may contain future sections. Future sections do not cons
 Pause and reconsider when:
 
 * an interface file contains fields, implementation bodies, or private helpers
+* a comment restates the method name, parameters, or return type
 * a trait exposes construction or configuration that only one implementation can choose
 * a method is on the contract only because its implementation needs it
 * an invocation input contains object identity, history, model selection, and configuration

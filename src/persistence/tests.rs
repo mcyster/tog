@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use schemars::json_schema;
 use serde_json::{Map, Value, json};
 
-use super::{EventStore, FileEventStore, legacy, log};
+use super::{ConversationEventStore, FileEventStore, legacy, log};
 use crate::conversation::{
     AssistantResponse, ConversationCommandId, ConversationEvent, ConversationEventKind,
     ConversationEventRecord, ConversationFact, ConversationId, ConversationMessage,
@@ -57,10 +57,10 @@ fn event_store_assigns_canonical_envelope_metadata() {
     let conversation_id = ConversationId::new();
 
     let first_batch = store
-        .append_new_conversation_events(conversation_id, vec![user_fact("first")])
+        .append(conversation_id, vec![user_fact("first")])
         .expect("the first event should be persisted");
     let second_batch = store
-        .append_new_conversation_events(conversation_id, vec![user_fact("second")])
+        .append(conversation_id, vec![user_fact("second")])
         .expect("the second event should be persisted");
     let first_event = &first_batch[0];
     let second_event = &second_batch[0];
@@ -76,7 +76,7 @@ fn event_store_assigns_canonical_envelope_metadata() {
     assert_ne!(second_event.id, first_event.id);
 
     let conversation = store
-        .load_conversation(conversation_id)
+        .load(conversation_id)
         .expect("the conversation should load");
     assert_eq!(conversation.events()[0].position, 0);
     assert_eq!(conversation.events()[1].position, 1);
@@ -101,7 +101,7 @@ fn appending_an_event_batch_commits_its_events_in_order() {
     let conversation_id = ConversationId::new();
 
     let appended = store
-        .append_new_conversation_events(
+        .append(
             conversation_id,
             vec![user_fact("first"), user_fact("second"), user_fact("third")],
         )
@@ -115,7 +115,7 @@ fn appending_an_event_batch_commits_its_events_in_order() {
         [0, 1, 2]
     );
     let loaded = store
-        .load_conversation_log(conversation_id)
+        .load_events(conversation_id)
         .expect("the log should load");
     assert_eq!(loaded, appended);
 }
@@ -126,7 +126,7 @@ fn appending_an_empty_event_batch_is_rejected() {
     let conversation_id = ConversationId::new();
 
     let error = store
-        .append_new_conversation_events(conversation_id, Vec::new())
+        .append(conversation_id, Vec::new())
         .expect_err("an empty batch should be rejected");
 
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
@@ -150,7 +150,7 @@ fn event_store_rejects_committed_positions_with_a_gap() {
     .expect("the log should be written");
 
     let error = store
-        .load_conversation(conversation_id)
+        .load(conversation_id)
         .expect_err("the incomplete log should be rejected");
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     assert_eq!(
@@ -159,7 +159,7 @@ fn event_store_rejects_committed_positions_with_a_gap() {
     );
     assert!(
         store
-            .append_new_conversation_events(conversation_id, vec![user_fact("third")])
+            .append(conversation_id, vec![user_fact("third")])
             .is_err()
     );
 }
@@ -169,7 +169,7 @@ fn recovery_ignores_an_incomplete_trailing_batch() {
     let store = temporary_store();
     let conversation_id = ConversationId::new();
     store
-        .append_new_conversation_events(conversation_id, vec![user_fact("committed")])
+        .append(conversation_id, vec![user_fact("committed")])
         .expect("the committed event should be persisted");
     let log_path = conversation_event_log_path(&store, conversation_id);
     let torn_batch = log::encode_batch(&[ConversationEventRecord::new(
@@ -187,16 +187,16 @@ fn recovery_ignores_an_incomplete_trailing_batch() {
         .expect("the torn tail should be written");
 
     let loaded = store
-        .load_conversation_log(conversation_id)
+        .load_events(conversation_id)
         .expect("the committed log should load");
     assert_eq!(loaded.len(), 1);
     assert_eq!(loaded[0].position, 0);
 
     store
-        .append_new_conversation_events(conversation_id, vec![user_fact("after")])
+        .append(conversation_id, vec![user_fact("after")])
         .expect("the torn tail should be discarded");
     let loaded = store
-        .load_conversation_log(conversation_id)
+        .load_events(conversation_id)
         .expect("the log should load");
     assert_eq!(loaded.len(), 2);
     assert_eq!(loaded[1].position, 1);
@@ -207,7 +207,7 @@ fn recovery_ignores_a_complete_transaction_without_a_commit_marker() {
     let store = temporary_store();
     let conversation_id = ConversationId::new();
     store
-        .append_new_conversation_events(conversation_id, vec![user_fact("committed")])
+        .append(conversation_id, vec![user_fact("committed")])
         .expect("the committed event should be persisted");
     let log_path = conversation_event_log_path(&store, conversation_id);
     let mut uncommitted = Vec::new();
@@ -224,16 +224,16 @@ fn recovery_ignores_a_complete_transaction_without_a_commit_marker() {
         .expect("the uncommitted transaction should be written");
 
     let loaded = store
-        .load_conversation_log(conversation_id)
+        .load_events(conversation_id)
         .expect("the committed log should load");
     assert_eq!(loaded.len(), 1);
     assert_eq!(loaded[0].position, 0);
 
     store
-        .append_new_conversation_events(conversation_id, vec![user_fact("after")])
+        .append(conversation_id, vec![user_fact("after")])
         .expect("the uncommitted transaction should be discarded");
     let loaded = store
-        .load_conversation_log(conversation_id)
+        .load_events(conversation_id)
         .expect("the log should load");
     assert_eq!(loaded.len(), 2);
     assert_eq!(loaded[1].position, 1);
@@ -244,7 +244,7 @@ fn corruption_inside_committed_history_is_rejected() {
     let store = temporary_store();
     let conversation_id = ConversationId::new();
     store
-        .append_new_conversation_events(conversation_id, vec![user_fact("first")])
+        .append(conversation_id, vec![user_fact("first")])
         .expect("the event should be persisted");
     let log_path = conversation_event_log_path(&store, conversation_id);
     let mut bytes = std::fs::read(&log_path).expect("the log should be readable");
@@ -256,7 +256,7 @@ fn corruption_inside_committed_history_is_rejected() {
     std::fs::write(&log_path, &bytes).expect("the corrupted log should be written");
 
     let error = store
-        .load_conversation(conversation_id)
+        .load(conversation_id)
         .expect_err("corruption inside committed history should be rejected");
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
 }
@@ -281,11 +281,11 @@ fn event_store_persists_model_data_on_the_event_envelope() {
         turn_id: Some(ConversationTurnId::new()),
     });
     let batch = store
-        .append_new_conversation_events(conversation_id, vec![assistant])
+        .append(conversation_id, vec![assistant])
         .expect("the model event should be persisted");
 
     let conversation = store
-        .load_conversation(conversation_id)
+        .load(conversation_id)
         .expect("the conversation should load");
     assert_eq!(conversation.events()[0], batch[0]);
 }
@@ -319,7 +319,7 @@ fn event_store_round_trips_tool_definitions_requests_and_responses() {
     );
 
     store
-        .append_new_conversation_events(
+        .append(
             conversation_id,
             vec![ConversationEvent::Fact(ConversationFact::ToolsAvailable {
                 tools: vec![tool_definition.clone()],
@@ -327,7 +327,7 @@ fn event_store_round_trips_tool_definitions_requests_and_responses() {
         )
         .expect("the tool definitions should persist");
     store
-        .append_new_conversation_events(
+        .append(
             conversation_id,
             vec![ConversationEvent::Fact(ConversationFact::ToolRequest {
                 request: request.clone(),
@@ -336,7 +336,7 @@ fn event_store_round_trips_tool_definitions_requests_and_responses() {
         )
         .expect("the tool request should persist");
     store
-        .append_new_conversation_events(
+        .append(
             conversation_id,
             vec![ConversationEvent::Fact(ConversationFact::ToolResponse {
                 response: response.clone(),
@@ -346,7 +346,7 @@ fn event_store_round_trips_tool_definitions_requests_and_responses() {
         .expect("the tool response should persist");
 
     let conversation = store
-        .load_conversation(conversation_id)
+        .load(conversation_id)
         .expect("the conversation should load");
 
     assert_eq!(conversation.available_tools(), [tool_definition]);
@@ -381,17 +381,17 @@ fn event_store_migrates_legacy_per_event_files_on_append() {
     write_legacy_event(&legacy_directory, &second, "second");
 
     let loaded = store
-        .load_conversation_log(conversation_id)
+        .load_events(conversation_id)
         .expect("the legacy events should load");
     assert_eq!(loaded, vec![first.clone(), second.clone()]);
 
     let appended = store
-        .append_new_conversation_events(conversation_id, vec![user_fact("third")])
+        .append(conversation_id, vec![user_fact("third")])
         .expect("the new event should migrate the legacy log");
     assert_eq!(appended[0].position, 2);
 
     let loaded = store
-        .load_conversation_log(conversation_id)
+        .load_events(conversation_id)
         .expect("the migrated log should load");
     assert_eq!(loaded.len(), 3);
     assert_eq!(loaded[0], first);
@@ -410,7 +410,7 @@ fn set_event_timestamp(
     timestamp: time::OffsetDateTime,
 ) {
     let mut events = store
-        .load_conversation_log(event.conversation_id)
+        .load_events(event.conversation_id)
         .expect("the log should load");
     for loaded_event in &mut events {
         if loaded_event.id == event.id {
@@ -430,29 +430,29 @@ fn latest_conversation_is_the_most_recently_active_one() {
     let first_conversation_id = ConversationId::new();
     let second_conversation_id = ConversationId::new();
     let first_batch = store
-        .append_new_conversation_events(first_conversation_id, vec![user_fact("first")])
+        .append(first_conversation_id, vec![user_fact("first")])
         .expect("the first event should be persisted");
     let second_batch = store
-        .append_new_conversation_events(second_conversation_id, vec![user_fact("second")])
+        .append(second_conversation_id, vec![user_fact("second")])
         .expect("the second event should be persisted");
     set_event_timestamp(&store, &first_batch[0], timestamp(1));
     set_event_timestamp(&store, &second_batch[0], timestamp(2));
 
     assert_eq!(
         store
-            .latest_conversation_id()
+            .latest_id()
             .expect("the latest conversation should be found"),
         second_conversation_id
     );
 
     let third_batch = store
-        .append_new_conversation_events(first_conversation_id, vec![user_fact("third")])
+        .append(first_conversation_id, vec![user_fact("third")])
         .expect("the third event should be persisted");
     set_event_timestamp(&store, &third_batch[0], timestamp(3));
 
     assert_eq!(
         store
-            .latest_conversation_id()
+            .latest_id()
             .expect("the latest conversation should be found"),
         first_conversation_id
     );
@@ -463,7 +463,7 @@ fn latest_conversation_is_absent_without_conversations() {
     let store = temporary_store();
 
     let error = store
-        .latest_conversation_id()
+        .latest_id()
         .expect_err("the latest conversation should be missing");
 
     assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
@@ -475,7 +475,7 @@ fn latest_conversation_ignores_conversations_without_events() {
     let store = temporary_store();
     let conversation_id = ConversationId::new();
     store
-        .append_new_conversation_events(conversation_id, vec![user_fact("first")])
+        .append(conversation_id, vec![user_fact("first")])
         .expect("the event should be persisted");
     let empty_conversation_id = ConversationId::new();
     std::fs::create_dir_all(store.conversation_directory(empty_conversation_id))
@@ -483,7 +483,7 @@ fn latest_conversation_ignores_conversations_without_events() {
 
     assert_eq!(
         store
-            .latest_conversation_id()
+            .latest_id()
             .expect("the latest conversation should be found"),
         conversation_id
     );
@@ -507,18 +507,18 @@ fn latest_conversation_ignores_an_earlier_schema() {
     .expect("the earlier schema event should be written");
 
     let error = store
-        .latest_conversation_id()
+        .latest_id()
         .expect_err("the earlier schema should not count as a conversation");
     assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
 
     let current_conversation_id = ConversationId::new();
     store
-        .append_new_conversation_events(current_conversation_id, vec![user_fact("current")])
+        .append(current_conversation_id, vec![user_fact("current")])
         .expect("the event should be persisted");
 
     assert_eq!(
         store
-            .latest_conversation_id()
+            .latest_id()
             .expect("the latest conversation should be found"),
         current_conversation_id
     );

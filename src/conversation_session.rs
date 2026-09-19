@@ -10,7 +10,7 @@ use crate::conversation::{
     ConversationTurnId, ToolResponse, TurnOutcome, UserContent, UserMessageRequest, UserPrompt,
 };
 use crate::model_driver::{ModelDriver, ModelDriverError, ModelDriverOutput, TurnInput};
-use crate::persistence::EventStore;
+use crate::persistence::ConversationEventStore;
 use crate::tools::ToolRegistry;
 
 pub(crate) type ConversationSessionResult<T> = Result<T, Box<dyn Error>>;
@@ -23,14 +23,14 @@ pub(crate) enum ConversationSessionProgress {
     ProblemCompleted { problem: ConversationProblem },
 }
 
-pub(crate) struct ConversationSession<Store: EventStore> {
+pub(crate) struct ConversationSession<Store: ConversationEventStore> {
     conversation_id: ConversationId,
     event_store: Store,
     model_driver: Box<dyn ModelDriver>,
     tool_registry: ToolRegistry,
 }
 
-impl<Store: EventStore> ConversationSession<Store> {
+impl<Store: ConversationEventStore> ConversationSession<Store> {
     pub(crate) fn create(
         event_store: Store,
         model_driver: Box<dyn ModelDriver>,
@@ -50,7 +50,7 @@ impl<Store: EventStore> ConversationSession<Store> {
         model_driver: Box<dyn ModelDriver>,
         tool_registry: ToolRegistry,
     ) -> ConversationSessionResult<Self> {
-        event_store.load_conversation(conversation_id)?;
+        event_store.load(conversation_id)?;
         Ok(Self {
             conversation_id,
             event_store,
@@ -68,7 +68,7 @@ impl<Store: EventStore> ConversationSession<Store> {
         user_prompt: UserPrompt,
     ) -> ConversationSessionResult<ConversationCommandId> {
         let command_id = ConversationCommandId::new();
-        self.event_store.append_new_conversation_events(
+        self.event_store.append(
             self.conversation_id,
             vec![ConversationEvent::Command(
                 ConversationCommand::UserMessageRequested(UserMessageRequest {
@@ -85,7 +85,7 @@ impl<Store: EventStore> ConversationSession<Store> {
         mut report_progress: impl FnMut(ConversationSessionProgress) -> ConversationSessionResult<()>,
     ) -> ConversationSessionResult<TurnOutcome> {
         let turn_id = ConversationTurnId::new();
-        self.event_store.append_new_conversation_events(
+        self.event_store.append(
             self.conversation_id,
             vec![ConversationEvent::Command(
                 ConversationCommand::TurnRequested {
@@ -103,7 +103,7 @@ impl<Store: EventStore> ConversationSession<Store> {
             self.append_shared_fact(ConversationFact::ToolsAvailable {
                 tools: self.tool_registry.definitions(),
             })?;
-            let conversation = self.event_store.load_conversation(self.conversation_id)?;
+            let conversation = self.event_store.load(self.conversation_id)?;
             let pending_request_ids = conversation
                 .pending_user_requests()
                 .into_iter()
@@ -215,8 +215,7 @@ impl<Store: EventStore> ConversationSession<Store> {
                         }
                     }
                 }
-                self.event_store
-                    .append_new_conversation_events(self.conversation_id, events)?;
+                self.event_store.append(self.conversation_id, events)?;
                 for progress in progress_reports {
                     report_progress(progress)?;
                 }
@@ -262,10 +261,8 @@ impl<Store: EventStore> ConversationSession<Store> {
     }
 
     fn append_shared_fact(&self, fact: ConversationFact) -> ConversationSessionResult<()> {
-        self.event_store.append_new_conversation_events(
-            self.conversation_id,
-            vec![ConversationEvent::Fact(fact)],
-        )?;
+        self.event_store
+            .append(self.conversation_id, vec![ConversationEvent::Fact(fact)])?;
         Ok(())
     }
 }
@@ -317,7 +314,7 @@ mod tests {
         ModelDriver, ModelDriverError, ModelDriverOutput, ModelDriverOutputBatch,
         ModelOutputStream, TurnInput,
     };
-    use crate::persistence::{EventStore, FileEventStore};
+    use crate::persistence::{ConversationEventStore, FileEventStore};
     use crate::tools::{ExecutableTool, ShellTool, ToolRegistry};
 
     enum RecordingResponse {
@@ -609,7 +606,7 @@ mod tests {
     fn loaded_facts(directory: &Path, conversation_id: ConversationId) -> Vec<ConversationFact> {
         FileEventStore::new(directory.to_path_buf())
             .expect("the store should reopen")
-            .load_conversation(conversation_id)
+            .load(conversation_id)
             .expect("the conversation should load")
             .events()
             .iter()
@@ -732,7 +729,7 @@ mod tests {
 
         let conversation = FileEventStore::new(directory)
             .expect("the store should reopen")
-            .load_conversation(conversation_id)
+            .load(conversation_id)
             .expect("the conversation should load");
         let facts = conversation
             .events()

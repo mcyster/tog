@@ -4,7 +4,7 @@ use std::io;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-use super::EventStore;
+use super::ConversationEventStore;
 use super::{legacy, log};
 use crate::conversation::{
     Conversation, ConversationEvent, ConversationEventKind, ConversationEventRecord,
@@ -50,9 +50,9 @@ impl FileEventStore {
     }
 }
 
-impl EventStore for FileEventStore {
-    fn load_conversation(&self, conversation_id: ConversationId) -> io::Result<Conversation> {
-        let events = self.load_conversation_log(conversation_id)?;
+impl ConversationEventStore for FileEventStore {
+    fn load(&self, conversation_id: ConversationId) -> io::Result<Conversation> {
+        let events = self.load_events(conversation_id)?;
         let conversation = Conversation::from_events(events).map_err(invalid_conversation_data)?;
         if conversation.id() != conversation_id {
             return Err(io::Error::new(
@@ -63,7 +63,7 @@ impl EventStore for FileEventStore {
         Ok(conversation)
     }
 
-    fn load_conversation_log(
+    fn load_events(
         &self,
         conversation_id: ConversationId,
     ) -> io::Result<Vec<ConversationEventRecord>> {
@@ -80,7 +80,7 @@ impl EventStore for FileEventStore {
         ))
     }
 
-    fn latest_conversation_id(&self) -> io::Result<ConversationId> {
+    fn latest_id(&self) -> io::Result<ConversationId> {
         let conversations_directory = self.root_directory.join(CONVERSATIONS_DIRECTORY_NAME);
         let mut latest_event: Option<ConversationEventRecord> = None;
         for directory_entry in fs::read_dir(&conversations_directory)? {
@@ -103,7 +103,7 @@ impl EventStore for FileEventStore {
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no conversations found"))
     }
 
-    fn append_new_conversation_events(
+    fn append(
         &self,
         conversation_id: ConversationId,
         events: Vec<ConversationEvent>,
