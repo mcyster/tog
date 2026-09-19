@@ -39,8 +39,7 @@ line, and closes with a commit marker:
 transaction without a valid commit marker and treat corruption inside committed
 history as an error. The append boundary assigns event identities, timestamps,
 and positions, flushes, and syncs each transaction before acknowledging it.
-Appending rewrites nothing but an uncommitted tail. Existing per-event files
-remain readable and migrate into the log on the next append to that conversation.
+Appending rewrites nothing but an uncommitted tail.
 
 ## Consequences
 

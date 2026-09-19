@@ -3,11 +3,11 @@ use std::io;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
+use super::log;
 use super::{
     ConversationEventStore, ConversationStoreAppendError, ConversationStoreError,
     ConversationStoreLoadError,
 };
-use super::{legacy, log};
 use crate::conversation::{
     ConversationEvent, ConversationEventKind, ConversationEventRecord, ConversationId,
     StoredConversationEventKind,
@@ -56,15 +56,11 @@ impl ConversationEventStore for FileEventStore {
         conversation_id: ConversationId,
     ) -> Result<Vec<ConversationEventRecord>, ConversationStoreLoadError> {
         let conversation_directory = self.conversation_directory(conversation_id);
-        let events = if let Some(log) = log::read(&conversation_directory)? {
-            log.events
-        } else if let Some(events) = legacy::read_events(&conversation_directory)? {
-            events
-        } else {
+        let Some(log) = log::read(&conversation_directory)? else {
             return Err(ConversationStoreLoadError::NotFound(conversation_id));
         };
-        ensure_records_belong_to(conversation_id, &events)?;
-        Ok(events)
+        ensure_records_belong_to(conversation_id, &log.events)?;
+        Ok(log.events)
     }
 
     fn latest_id(&self) -> Result<Option<ConversationId>, ConversationStoreError> {
@@ -75,7 +71,7 @@ impl ConversationEventStore for FileEventStore {
             if !directory_entry.file_type()?.is_dir() {
                 continue;
             }
-            let Some(last_event) = read_last_conversation_event(&directory_entry.path())? else {
+            let Some(last_event) = read_last_event(&directory_entry.path())? else {
                 continue;
             };
             if latest_event
@@ -96,66 +92,32 @@ impl ConversationEventStore for FileEventStore {
         let kinds = stored_event_kinds(events)?;
         let conversation_directory = self.conversation_directory(conversation_id);
         create_private_directory(&conversation_directory)?;
-        let existing_events = read_stored_events(&conversation_directory)?;
-        let previous_position =
-            validate_existing_events(conversation_id, existing_events.events())?;
+        let existing_log = log::read(&conversation_directory)?;
+        let existing_events = existing_log
+            .as_ref()
+            .map(|log| log.events.as_slice())
+            .unwrap_or_default();
+        let previous_position = validate_existing_events(conversation_id, existing_events)?;
         let batch = build_event_batch(conversation_id, previous_position, kinds)?;
-        existing_events.commit(&conversation_directory, &batch)?;
+        commit_batch(&conversation_directory, existing_log, &batch)?;
         Ok(batch)
     }
 }
 
-enum StoredEvents {
-    Log(log::ConversationLog),
-    Legacy(Vec<ConversationEventRecord>),
-}
-
-impl StoredEvents {
-    fn events(&self) -> &[ConversationEventRecord] {
-        match self {
-            Self::Log(log) => &log.events,
-            Self::Legacy(events) => events,
-        }
-    }
-
-    fn commit(
-        self,
-        conversation_directory: &Path,
-        batch: &[ConversationEventRecord],
-    ) -> io::Result<()> {
-        let batch_bytes = log::encode_batch(batch)?;
-        match self {
-            Self::Log(log) => {
-                log::append(conversation_directory, log.committed_length, &batch_bytes)
-            }
-            Self::Legacy(events) if events.is_empty() => {
-                log::create(conversation_directory, &batch_bytes)
-            }
-            Self::Legacy(events) => {
-                log::create_migrated(conversation_directory, &events, &batch_bytes)?;
-                legacy::remove(conversation_directory);
-                Ok(())
-            }
-        }
-    }
-}
-
-fn read_stored_events(conversation_directory: &Path) -> io::Result<StoredEvents> {
-    match log::read(conversation_directory)? {
-        Some(log) => Ok(StoredEvents::Log(log)),
-        None => Ok(StoredEvents::Legacy(
-            legacy::read_events(conversation_directory)?.unwrap_or_default(),
-        )),
-    }
-}
-
-fn read_last_conversation_event(
+fn commit_batch(
     conversation_directory: &Path,
-) -> io::Result<Option<ConversationEventRecord>> {
-    if let Some(log) = log::read(conversation_directory)? {
-        return Ok(log.events.into_iter().last());
+    existing_log: Option<log::ConversationLog>,
+    batch: &[ConversationEventRecord],
+) -> io::Result<()> {
+    let batch_bytes = log::encode_batch(batch)?;
+    match existing_log {
+        Some(log) => log::append(conversation_directory, log.committed_length, &batch_bytes),
+        None => log::create(conversation_directory, &batch_bytes),
     }
-    legacy::read_last_event(conversation_directory)
+}
+
+fn read_last_event(conversation_directory: &Path) -> io::Result<Option<ConversationEventRecord>> {
+    Ok(log::read(conversation_directory)?.and_then(|log| log.events.into_iter().last()))
 }
 
 fn validate_existing_events(

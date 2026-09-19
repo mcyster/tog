@@ -1,6 +1,5 @@
 mod error;
 mod file_event_store;
-mod legacy;
 mod log;
 #[cfg(test)]
 mod tests;

@@ -1,12 +1,11 @@
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use schemars::json_schema;
 use serde_json::{Map, Value, json};
 
 use super::{
-    ConversationEventStore, ConversationStoreError, ConversationStoreLoadError, FileEventStore,
-    legacy, log,
+    ConversationEventStore, ConversationStoreError, ConversationStoreLoadError, FileEventStore, log,
 };
 use crate::conversation::{
     AssistantResponse, Conversation, ConversationCommandId, ConversationEvent,
@@ -22,13 +21,6 @@ fn temporary_store() -> FileEventStore {
 
 fn conversation_event_log_path(store: &FileEventStore, conversation_id: ConversationId) -> PathBuf {
     log::log_path(&store.conversation_directory(conversation_id))
-}
-
-fn write_legacy_event(directory: &Path, event: &ConversationEventRecord, identifier: &str) {
-    let path = directory.join(format!("{:020}-{identifier}.json", event.position));
-    let mut contents = serde_json::to_vec(event).expect("the legacy event should serialize");
-    contents.push(b'\n');
-    log::write_file_atomically(&path, &contents).expect("the legacy event should be written");
 }
 
 fn user_message_fact(content: &str) -> ConversationFact {
@@ -131,9 +123,9 @@ fn event_store_rejects_committed_positions_with_a_gap() {
     events[1].position = 2;
     std::fs::create_dir_all(store.conversation_directory(conversation_id))
         .expect("the conversation directory should be created");
-    log::write_file_atomically(
-        &conversation_event_log_path(&store, conversation_id),
-        &log::encode_batch(&events).expect("the batch should encode"),
+    std::fs::write(
+        conversation_event_log_path(&store, conversation_id),
+        log::encode_batch(&events).expect("the batch should encode"),
     )
     .expect("the log should be written");
 
@@ -357,38 +349,6 @@ fn event_store_round_trips_tool_definitions_requests_and_responses() {
     ));
 }
 
-#[test]
-fn event_store_migrates_legacy_per_event_files_on_append() {
-    let store = temporary_store();
-    let conversation_id = ConversationId::new();
-    let conversation_directory = store.conversation_directory(conversation_id);
-    let legacy_directory = legacy::events_directory(&conversation_directory);
-    std::fs::create_dir_all(&legacy_directory).expect("the legacy directory should be created");
-    let first = ConversationEventRecord::new(conversation_id, 0, user_kind("first"));
-    let second = ConversationEventRecord::new(conversation_id, 1, user_kind("second"));
-    write_legacy_event(&legacy_directory, &first, "first");
-    write_legacy_event(&legacy_directory, &second, "second");
-
-    let loaded = store
-        .load(conversation_id)
-        .expect("the legacy events should load");
-    assert_eq!(loaded, vec![first.clone(), second.clone()]);
-
-    let appended = store
-        .append(conversation_id, vec![user_fact("third")])
-        .expect("the new event should migrate the legacy log");
-    assert_eq!(appended[0].position, 2);
-
-    let loaded = store
-        .load(conversation_id)
-        .expect("the migrated log should load");
-    assert_eq!(loaded.len(), 3);
-    assert_eq!(loaded[0], first);
-    assert_eq!(loaded[1], second);
-    assert!(!legacy_directory.exists());
-    assert!(conversation_event_log_path(&store, conversation_id).exists());
-}
-
 fn timestamp(day: u64) -> time::OffsetDateTime {
     time::OffsetDateTime::UNIX_EPOCH + time::Duration::days(day as i64)
 }
@@ -406,9 +366,9 @@ fn set_event_timestamp(
             loaded_event.timestamp = timestamp;
         }
     }
-    log::write_file_atomically(
-        &conversation_event_log_path(store, event.conversation_id),
-        &log::encode_batch(&events).expect("the batch should encode"),
+    std::fs::write(
+        conversation_event_log_path(store, event.conversation_id),
+        log::encode_batch(&events).expect("the batch should encode"),
     )
     .expect("the event timestamp should be written");
 }
@@ -475,42 +435,5 @@ fn latest_conversation_ignores_conversations_without_events() {
             .latest_id()
             .expect("the latest conversation should be found"),
         Some(conversation_id)
-    );
-}
-
-#[test]
-fn latest_conversation_ignores_an_earlier_schema() {
-    let store = temporary_store();
-    let legacy_conversation_id = ConversationId::new();
-    let legacy_directory =
-        legacy::events_directory(&store.conversation_directory(legacy_conversation_id));
-    std::fs::create_dir_all(&legacy_directory).expect("the legacy directory should be created");
-    std::fs::write(
-        legacy_directory.join("00000000000000000000-01a00692c0dc7402a70f67ae862a5eb5.json"),
-        concat!(
-            r#"{"position":0,"id":"01a00692-c0dc-7402-a70f-67ae862a5eb5","#,
-            r#""timestamp_milliseconds":1786816676060,"schema_version":1,"#,
-            r#""event":{"type":"user","text":"test"}}"#
-        ),
-    )
-    .expect("the earlier schema event should be written");
-
-    assert_eq!(
-        store
-            .latest_id()
-            .expect("the earlier schema should be ignored"),
-        None
-    );
-
-    let current_conversation_id = ConversationId::new();
-    store
-        .append(current_conversation_id, vec![user_fact("current")])
-        .expect("the event should be persisted");
-
-    assert_eq!(
-        store
-            .latest_id()
-            .expect("the latest conversation should be found"),
-        Some(current_conversation_id)
     );
 }
