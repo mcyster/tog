@@ -54,10 +54,10 @@ The loop is bounded to
 `MAXIMUM_TOOL_CONTINUATION_ROUNDS = 8` completed tool rounds. Reaching the limit
 records a failed turn and returns an explicit continuation-limit error. There
 is no daemon, dispatcher, parallel execution, command group, join, automatic
-recovery, or automatic retry. Requests are persisted before execution and
-responses before continuation using the current one-file-per-event store;
-sequential writes are not an atomic transaction, and re-executing shell
-commands after a crash is not crash-safe.
+recovery, or automatic retry. Requests are persisted before execution and each
+driver event batch is committed atomically; tool execution and result appends
+remain sequential and outside that transaction, so re-executing shell commands
+after a crash is not crash-safe.
 
 ## Shell tool
 

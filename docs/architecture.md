@@ -65,9 +65,9 @@ the turn even when earlier output was already produced.
 
 `ConversationSession` is the caller-facing interface. `add_user_request` records
 and queues user input. `invoke` records a turn request, supplies the existing
-conversation and pending user requests to the driver, persists permitted driver
-output as it arrives, and records the turn outcome after the driver stream ends.
-`Conversation` remains immutable history.
+conversation and pending user requests to the driver, commits each driver batch
+atomically before presenting its events, and records the turn outcome after the
+driver stream ends. `Conversation` remains immutable history.
 
 The driver records its own invocation event, including a stable
 `ModelInvocationId`, as an opaque driver event. Returned model facts reference
@@ -121,8 +121,8 @@ The event store assigns that envelope metadata at the shared append boundary.
 ```text
 immutable Conversation
     -> ModelDriver invocation
-    -> permitted conversation messages and driver events
-    -> session appends facts and records the turn outcome
+    -> ordered batches of permitted conversation messages and driver events
+    -> session commits each batch atomically, then records the turn outcome
     -> append boundary assigns record metadata
     -> log and presentation projections
 ```

@@ -5,12 +5,12 @@ use std::fmt::{Display, Formatter};
 use futures_util::StreamExt;
 
 use crate::conversation::{
-    ConversationCommand, ConversationCommandId, ConversationEvent, ConversationFact,
+    Conversation, ConversationCommand, ConversationCommandId, ConversationEvent, ConversationFact,
     ConversationId, ConversationLifecycle, ConversationMessage, ConversationProblem,
     ConversationTurnId, ToolResponse, TurnOutcome, UserContent, UserMessageRequest, UserPrompt,
 };
 use crate::model_driver::{ModelDriver, ModelDriverError, ModelDriverOutput, TurnInput};
-use crate::persistence::EventStore;
+use crate::persistence::ConversationEventStore;
 use crate::tools::ToolRegistry;
 
 pub(crate) type ConversationSessionResult<T> = Result<T, Box<dyn Error>>;
@@ -23,16 +23,16 @@ pub(crate) enum ConversationSessionProgress {
     ProblemCompleted { problem: ConversationProblem },
 }
 
-pub(crate) struct ConversationSession {
+pub(crate) struct ConversationSession<Store: ConversationEventStore> {
     conversation_id: ConversationId,
-    event_store: EventStore,
+    event_store: Store,
     model_driver: Box<dyn ModelDriver>,
     tool_registry: ToolRegistry,
 }
 
-impl ConversationSession {
+impl<Store: ConversationEventStore> ConversationSession<Store> {
     pub(crate) fn create(
-        event_store: EventStore,
+        event_store: Store,
         model_driver: Box<dyn ModelDriver>,
         tool_registry: ToolRegistry,
     ) -> Self {
@@ -46,11 +46,11 @@ impl ConversationSession {
 
     pub(crate) fn open(
         conversation_id: ConversationId,
-        event_store: EventStore,
+        event_store: Store,
         model_driver: Box<dyn ModelDriver>,
         tool_registry: ToolRegistry,
     ) -> ConversationSessionResult<Self> {
-        event_store.load_conversation(conversation_id)?;
+        Conversation::from_events(event_store.load(conversation_id)?)?;
         Ok(Self {
             conversation_id,
             event_store,
@@ -68,14 +68,14 @@ impl ConversationSession {
         user_prompt: UserPrompt,
     ) -> ConversationSessionResult<ConversationCommandId> {
         let command_id = ConversationCommandId::new();
-        self.event_store.append_new_conversation_event(
+        self.event_store.append(
             self.conversation_id,
-            ConversationEvent::Command(ConversationCommand::UserMessageRequested(
-                UserMessageRequest {
+            vec![ConversationEvent::Command(
+                ConversationCommand::UserMessageRequested(UserMessageRequest {
                     content: vec![UserContent::Text(user_prompt.text().to_owned())],
                     command_id,
-                },
-            )),
+                }),
+            )],
         )?;
         Ok(command_id)
     }
@@ -85,12 +85,14 @@ impl ConversationSession {
         mut report_progress: impl FnMut(ConversationSessionProgress) -> ConversationSessionResult<()>,
     ) -> ConversationSessionResult<TurnOutcome> {
         let turn_id = ConversationTurnId::new();
-        self.event_store.append_new_conversation_event(
+        self.event_store.append(
             self.conversation_id,
-            ConversationEvent::Command(ConversationCommand::TurnRequested {
-                command_id: ConversationCommandId::new(),
-                turn_id,
-            }),
+            vec![ConversationEvent::Command(
+                ConversationCommand::TurnRequested {
+                    command_id: ConversationCommandId::new(),
+                    turn_id,
+                },
+            )],
         )?;
         let source = self.model_driver.source().clone();
         let mut assistant_responded = false;
@@ -98,13 +100,11 @@ impl ConversationSession {
         let mut completed_tool_rounds = 0_u32;
 
         loop {
-            self.event_store.append_new_conversation_event(
-                self.conversation_id,
-                ConversationEvent::Fact(ConversationFact::ToolsAvailable {
-                    tools: self.tool_registry.definitions(),
-                }),
-            )?;
-            let conversation = self.event_store.load_conversation(self.conversation_id)?;
+            self.append_shared_fact(ConversationFact::ToolsAvailable {
+                tools: self.tool_registry.definitions(),
+            })?;
+            let conversation =
+                Conversation::from_events(self.event_store.load(self.conversation_id)?)?;
             let pending_request_ids = conversation
                 .pending_user_requests()
                 .into_iter()
@@ -121,97 +121,104 @@ impl ConversationSession {
             let mut accepted_request_ids = HashSet::new();
             let mut tool_requests = Vec::new();
 
-            while let Some(output) = output_stream.next().await {
-                let output = output?;
-                match output {
-                    ModelDriverOutput::Message(ConversationMessage::User {
-                        caused_by,
-                        content,
-                    }) => {
-                        let Some(command_id) = caused_by else {
-                            return Err(Box::new(ModelDriverError::UnassociatedUserMessage));
-                        };
-                        if !pending_request_ids.contains(&command_id)
-                            || !accepted_request_ids.insert(command_id)
-                        {
-                            return Err(Box::new(ModelDriverError::UnexpectedUserRequest {
-                                command_id,
+            while let Some(output_batch) = output_stream.next().await {
+                let output_batch = output_batch?;
+                let mut events = Vec::new();
+                let mut progress_reports = Vec::new();
+                for output in output_batch.into_outputs() {
+                    match output {
+                        ModelDriverOutput::Message(ConversationMessage::User {
+                            caused_by,
+                            content,
+                        }) => {
+                            let Some(command_id) = caused_by else {
+                                return Err(Box::new(ModelDriverError::UnassociatedUserMessage));
+                            };
+                            if !pending_request_ids.contains(&command_id)
+                                || !accepted_request_ids.insert(command_id)
+                            {
+                                return Err(Box::new(ModelDriverError::UnexpectedUserRequest {
+                                    command_id,
+                                }));
+                            }
+                            events.push(ConversationEvent::Fact(ConversationFact::Message {
+                                message: ConversationMessage::User {
+                                    caused_by: Some(command_id),
+                                    content,
+                                },
+                                turn_id: None,
                             }));
                         }
-                        self.append_shared_fact(ConversationFact::Message {
-                            message: ConversationMessage::User {
-                                caused_by: Some(command_id),
-                                content,
-                            },
-                            turn_id: None,
-                        })?;
-                    }
-                    ModelDriverOutput::Message(ConversationMessage::AssistantResponse {
-                        invocation_id,
-                        data,
-                        response,
-                    }) => {
-                        assistant_responded = true;
-                        self.report_shared_fact(
-                            ConversationFact::Message {
+                        ModelDriverOutput::Message(ConversationMessage::AssistantResponse {
+                            invocation_id,
+                            data,
+                            response,
+                        }) => {
+                            assistant_responded = true;
+                            let fact = ConversationFact::Message {
                                 message: ConversationMessage::AssistantResponse {
                                     invocation_id,
                                     data,
                                     response,
                                 },
                                 turn_id: Some(turn_id),
-                            },
-                            &mut report_progress,
-                        )?;
-                    }
-                    ModelDriverOutput::Message(ConversationMessage::Communication {
-                        invocation_id,
-                        data,
-                        communication,
-                    }) => {
-                        self.report_shared_fact(
-                            ConversationFact::Message {
+                            };
+                            progress_reports.push(ConversationSessionProgress::EventCompleted {
+                                event: fact.clone(),
+                            });
+                            events.push(ConversationEvent::Fact(fact));
+                        }
+                        ModelDriverOutput::Message(ConversationMessage::Communication {
+                            invocation_id,
+                            data,
+                            communication,
+                        }) => {
+                            let fact = ConversationFact::Message {
                                 message: ConversationMessage::Communication {
                                     invocation_id,
                                     data,
                                     communication,
                                 },
                                 turn_id: Some(turn_id),
-                            },
-                            &mut report_progress,
-                        )?;
-                    }
-                    ModelDriverOutput::Message(ConversationMessage::Problem {
-                        invocation_id,
-                        data,
-                        problem,
-                    }) => {
-                        turn_failed = true;
-                        self.report_shared_fact(
-                            ConversationFact::Message {
+                            };
+                            progress_reports.push(ConversationSessionProgress::EventCompleted {
+                                event: fact.clone(),
+                            });
+                            events.push(ConversationEvent::Fact(fact));
+                        }
+                        ModelDriverOutput::Message(ConversationMessage::Problem {
+                            invocation_id,
+                            data,
+                            problem,
+                        }) => {
+                            turn_failed = true;
+                            progress_reports.push(ConversationSessionProgress::ProblemCompleted {
+                                problem: problem.clone(),
+                            });
+                            events.push(ConversationEvent::Fact(ConversationFact::Message {
                                 message: ConversationMessage::Problem {
                                     invocation_id,
                                     data,
                                     problem,
                                 },
                                 turn_id: Some(turn_id),
-                            },
-                            &mut report_progress,
-                        )?;
+                            }));
+                        }
+                        ModelDriverOutput::ToolRequest(request) => {
+                            events.push(ConversationEvent::Fact(ConversationFact::ToolRequest {
+                                request: request.clone(),
+                                turn_id: Some(turn_id),
+                            }));
+                            tool_requests.push(request);
+                        }
+                        ModelDriverOutput::Command(event) | ModelDriverOutput::Extension(event) => {
+                            events.push(ConversationEvent::Extension(event));
+                        }
                     }
-                    ModelDriverOutput::ToolRequest(request) => {
-                        self.append_shared_fact(ConversationFact::ToolRequest {
-                            request: request.clone(),
-                            turn_id: Some(turn_id),
-                        })?;
-                        tool_requests.push(request);
-                    }
-                    ModelDriverOutput::Command(event) | ModelDriverOutput::Extension(event) => {
-                        self.event_store.append_new_conversation_event(
-                            self.conversation_id,
-                            ConversationEvent::Extension(event),
-                        )?;
-                    }
+                }
+                self.event_store.append(self.conversation_id, events)?;
+                for progress in progress_reports {
+                    report_progress(progress)?;
                 }
             }
 
@@ -229,13 +236,12 @@ impl ConversationSession {
             assistant_responded = false;
             completed_tool_rounds += 1;
             if completed_tool_rounds >= MAXIMUM_TOOL_CONTINUATION_ROUNDS {
-                self.report_shared_fact(
-                    ConversationFact::Lifecycle(ConversationLifecycle::TurnCompleted {
+                self.append_shared_fact(ConversationFact::Lifecycle(
+                    ConversationLifecycle::TurnCompleted {
                         turn_id,
                         outcome: TurnOutcome::Failed,
-                    }),
-                    &mut report_progress,
-                )?;
+                    },
+                ))?;
                 return Err(Box::new(
                     ConversationSessionError::ToolContinuationLimitReached {
                         limit: MAXIMUM_TOOL_CONTINUATION_ROUNDS,
@@ -249,58 +255,15 @@ impl ConversationSession {
             (false, true) => TurnOutcome::Succeeded,
             (false, false) => return Err(Box::new(ModelDriverError::IncompleteTurn)),
         };
-        self.report_shared_fact(
-            ConversationFact::Lifecycle(ConversationLifecycle::TurnCompleted { turn_id, outcome }),
-            &mut report_progress,
-        )?;
+        self.append_shared_fact(ConversationFact::Lifecycle(
+            ConversationLifecycle::TurnCompleted { turn_id, outcome },
+        ))?;
         Ok(outcome)
     }
 
     fn append_shared_fact(&self, fact: ConversationFact) -> ConversationSessionResult<()> {
         self.event_store
-            .append_new_conversation_event(self.conversation_id, ConversationEvent::Fact(fact))?;
-        Ok(())
-    }
-
-    fn report_shared_fact(
-        &self,
-        fact: ConversationFact,
-        report_progress: &mut impl FnMut(ConversationSessionProgress) -> ConversationSessionResult<()>,
-    ) -> ConversationSessionResult<()> {
-        match &fact {
-            ConversationFact::Message {
-                message:
-                    ConversationMessage::AssistantResponse { .. }
-                    | ConversationMessage::Communication { .. },
-                ..
-            } => {
-                let progress = ConversationSessionProgress::EventCompleted {
-                    event: fact.clone(),
-                };
-                self.append_shared_fact(fact)?;
-                report_progress(progress)?;
-            }
-            ConversationFact::Message {
-                message: ConversationMessage::Problem { problem, .. },
-                ..
-            } => {
-                let progress = ConversationSessionProgress::ProblemCompleted {
-                    problem: problem.clone(),
-                };
-                self.append_shared_fact(fact)?;
-                report_progress(progress)?;
-            }
-            ConversationFact::Message {
-                message: ConversationMessage::User { .. },
-                ..
-            }
-            | ConversationFact::Lifecycle(_)
-            | ConversationFact::ToolsAvailable { .. }
-            | ConversationFact::ToolRequest { .. }
-            | ConversationFact::ToolResponse { .. } => {
-                self.append_shared_fact(fact)?;
-            }
-        }
+            .append(self.conversation_id, vec![ConversationEvent::Fact(fact)])?;
         Ok(())
     }
 }
@@ -349,9 +312,10 @@ mod tests {
         ToolExecutionProblemKind, ToolName, ToolOutcome, ToolRequest, TurnOutcome, UserPrompt,
     };
     use crate::model_driver::{
-        ModelDriver, ModelDriverError, ModelDriverOutput, ModelOutputStream, TurnInput,
+        ModelDriver, ModelDriverError, ModelDriverOutput, ModelDriverOutputBatch,
+        ModelOutputStream, TurnInput,
     };
-    use crate::persistence::EventStore;
+    use crate::persistence::{ConversationEventStore, FileEventStore};
     use crate::tools::{ExecutableTool, ShellTool, ToolRegistry};
 
     enum RecordingResponse {
@@ -390,25 +354,36 @@ mod tests {
                 .lock()
                 .expect("the pending request list should lock")
                 .push(pending_requests.len());
-            let mut output = pending_requests
+            let mut batches = Vec::new();
+            let pending_user_events = pending_requests
                 .into_iter()
                 .map(|request| {
-                    Ok(ModelDriverOutput::Message(ConversationMessage::User {
+                    ModelDriverOutput::Message(ConversationMessage::User {
                         caused_by: Some(request.command_id),
                         content: request.content,
-                    }))
+                    })
                 })
                 .collect::<Vec<_>>();
+            if !pending_user_events.is_empty() {
+                batches.push(
+                    ModelDriverOutputBatch::try_new(pending_user_events)
+                        .expect("the pending user events should form a batch"),
+                );
+            }
             match self.response {
-                RecordingResponse::Assistant => output.push(Ok(assistant_response())),
-                RecordingResponse::Problem => output.push(Ok(problem_message())),
-                RecordingResponse::AssistantThenProblem => {
-                    output.push(Ok(assistant_response()));
-                    output.push(Ok(problem_message()));
+                RecordingResponse::Assistant => {
+                    batches.push(ModelDriverOutputBatch::from(assistant_response()));
                 }
+                RecordingResponse::Problem => {
+                    batches.push(ModelDriverOutputBatch::from(problem_message()));
+                }
+                RecordingResponse::AssistantThenProblem => batches.push(
+                    ModelDriverOutputBatch::try_new(vec![assistant_response(), problem_message()])
+                        .expect("the response and problem should form a batch"),
+                ),
                 RecordingResponse::Nothing => {}
             }
-            async move { Ok(stream::iter(output).boxed()) }.boxed()
+            async move { Ok(stream::iter(batches.into_iter().map(Ok)).boxed()) }.boxed()
         }
     }
 
@@ -506,25 +481,35 @@ mod tests {
                     tool_responses,
                 });
             let pending_requests = input.pending_user_requests().to_vec();
-            let mut output: Vec<Result<ModelDriverOutput, ModelDriverError>> = pending_requests
+            let mut batches = Vec::new();
+            let pending_user_events = pending_requests
                 .into_iter()
                 .map(|request| {
-                    Ok(ModelDriverOutput::Message(ConversationMessage::User {
+                    ModelDriverOutput::Message(ConversationMessage::User {
                         caused_by: Some(request.command_id),
                         content: request.content,
-                    }))
+                    })
                 })
-                .collect();
-            output.extend(
-                self.script
-                    .lock()
-                    .expect("the script should lock")
-                    .pop_front()
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(Ok),
-            );
-            async move { Ok(stream::iter(output).boxed()) }.boxed()
+                .collect::<Vec<_>>();
+            if !pending_user_events.is_empty() {
+                batches.push(
+                    ModelDriverOutputBatch::try_new(pending_user_events)
+                        .expect("the pending user events should form a batch"),
+                );
+            }
+            let scripted_outputs = self
+                .script
+                .lock()
+                .expect("the script should lock")
+                .pop_front()
+                .unwrap_or_default();
+            if !scripted_outputs.is_empty() {
+                batches.push(
+                    ModelDriverOutputBatch::try_new(scripted_outputs)
+                        .expect("the scripted outputs should form a batch"),
+                );
+            }
+            async move { Ok(stream::iter(batches.into_iter().map(Ok)).boxed()) }.boxed()
         }
     }
 
@@ -620,11 +605,10 @@ mod tests {
     }
 
     fn loaded_facts(directory: &Path, conversation_id: ConversationId) -> Vec<ConversationFact> {
-        EventStore::new(directory.to_path_buf())
+        FileEventStore::new(directory.to_path_buf())
             .expect("the store should reopen")
-            .load_conversation(conversation_id)
+            .load(conversation_id)
             .expect("the conversation should load")
-            .events()
             .iter()
             .filter_map(|event| match &event.kind {
                 StoredConversationEventKind::Shared(ConversationEventKind::Fact(fact)) => {
@@ -641,7 +625,7 @@ mod tests {
         let directory = temporary_directory();
         let pending_counts = Arc::new(Mutex::new(Vec::new()));
         let session = ConversationSession::create(
-            EventStore::new(directory.clone()).expect("the store should be created"),
+            FileEventStore::new(directory.clone()).expect("the store should be created"),
             Box::new(RecordingDriver {
                 source: source(),
                 pending_counts: Arc::clone(&pending_counts),
@@ -663,7 +647,7 @@ mod tests {
 
         let reopened = ConversationSession::open(
             conversation_id,
-            EventStore::new(directory).expect("the store should reopen"),
+            FileEventStore::new(directory).expect("the store should reopen"),
             Box::new(RecordingDriver {
                 source: source(),
                 pending_counts: Arc::clone(&pending_counts),
@@ -697,7 +681,7 @@ mod tests {
     #[tokio::test]
     async fn a_failed_turn_outcome_is_returned_to_the_caller() {
         let session = ConversationSession::create(
-            EventStore::new(temporary_directory()).expect("the store should be created"),
+            FileEventStore::new(temporary_directory()).expect("the store should be created"),
             Box::new(RecordingDriver {
                 source: source(),
                 pending_counts: Arc::new(Mutex::new(Vec::new())),
@@ -722,7 +706,7 @@ mod tests {
     async fn a_late_problem_fails_the_turn_but_preserves_earlier_output() {
         let directory = temporary_directory();
         let session = ConversationSession::create(
-            EventStore::new(directory.clone()).expect("the store should be created"),
+            FileEventStore::new(directory.clone()).expect("the store should be created"),
             Box::new(RecordingDriver {
                 source: source(),
                 pending_counts: Arc::new(Mutex::new(Vec::new())),
@@ -743,12 +727,11 @@ mod tests {
             TurnOutcome::Failed
         );
 
-        let conversation = EventStore::new(directory)
+        let conversation = FileEventStore::new(directory)
             .expect("the store should reopen")
-            .load_conversation(conversation_id)
+            .load(conversation_id)
             .expect("the conversation should load");
         let facts = conversation
-            .events()
             .iter()
             .filter_map(|event| match &event.kind {
                 StoredConversationEventKind::Shared(ConversationEventKind::Fact(fact)) => {
@@ -786,7 +769,7 @@ mod tests {
     #[tokio::test]
     async fn a_driver_that_ends_without_output_is_an_incomplete_turn() {
         let session = ConversationSession::create(
-            EventStore::new(temporary_directory()).expect("the store should be created"),
+            FileEventStore::new(temporary_directory()).expect("the store should be created"),
             Box::new(RecordingDriver {
                 source: source(),
                 pending_counts: Arc::new(Mutex::new(Vec::new())),
@@ -815,7 +798,7 @@ mod tests {
         registry.register(ObservingTool::new());
         let driver = Arc::new(ScriptedDriver::new(vec![vec![assistant_response()]]));
         let session = ConversationSession::create(
-            EventStore::new(directory.clone()).expect("the store should be created"),
+            FileEventStore::new(directory.clone()).expect("the store should be created"),
             Box::new(SharedScriptedDriver(Arc::clone(&driver))),
             registry,
         );
@@ -867,7 +850,7 @@ mod tests {
             vec![assistant_response()],
         ]));
         let session = ConversationSession::create(
-            EventStore::new(directory.clone()).expect("the store should be created"),
+            FileEventStore::new(directory.clone()).expect("the store should be created"),
             Box::new(SharedScriptedDriver(Arc::clone(&driver))),
             shell_registry(),
         );
@@ -923,7 +906,7 @@ mod tests {
             vec![assistant_response()],
         ]));
         let session = ConversationSession::create(
-            EventStore::new(directory.clone()).expect("the store should be created"),
+            FileEventStore::new(directory.clone()).expect("the store should be created"),
             Box::new(SharedScriptedDriver(Arc::clone(&driver))),
             registry,
         );
@@ -969,7 +952,7 @@ mod tests {
         let mut registry = ToolRegistry::default();
         registry.register(ObservingTool::new());
         let session = ConversationSession::create(
-            EventStore::new(directory.clone()).expect("the store should be created"),
+            FileEventStore::new(directory.clone()).expect("the store should be created"),
             Box::new(SharedScriptedDriver(Arc::clone(&driver))),
             registry,
         );
@@ -1038,7 +1021,7 @@ mod tests {
         let mut registry = ToolRegistry::default();
         registry.register(ObservingTool::new());
         let session = ConversationSession::create(
-            EventStore::new(temporary_directory()).expect("the store should be created"),
+            FileEventStore::new(temporary_directory()).expect("the store should be created"),
             Box::new(SharedScriptedDriver(Arc::clone(&driver))),
             registry,
         );
@@ -1066,7 +1049,7 @@ mod tests {
             vec![assistant_response()],
         ]));
         let session = ConversationSession::create(
-            EventStore::new(directory.clone()).expect("the store should be created"),
+            FileEventStore::new(directory.clone()).expect("the store should be created"),
             Box::new(SharedScriptedDriver(Arc::clone(&driver))),
             ToolRegistry::default(),
         );
@@ -1125,7 +1108,7 @@ mod tests {
             .collect();
         let driver = Arc::new(ScriptedDriver::new(script));
         let session = ConversationSession::create(
-            EventStore::new(directory.clone()).expect("the store should be created"),
+            FileEventStore::new(directory.clone()).expect("the store should be created"),
             Box::new(SharedScriptedDriver(Arc::clone(&driver))),
             ToolRegistry::default(),
         );

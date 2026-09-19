@@ -1,6 +1,6 @@
 # Use Asynchronous Streaming ModelDriver Invocations
 
-> Superseded by [Record Commands And Turn Lifecycle](../notes/2026-09-05-record-commands-and-turn-lifecycle.md) for the durable record shape and append boundary. The asynchronous streaming choice remains current.
+> Superseded by [Record Commands And Turn Lifecycle](../notes/2026-09-05-record-commands-and-turn-lifecycle.md) for the durable record shape and append boundary, and refined by [Commit Driver Event Batches Atomically](2026-09-19-commit-driver-event-batches-atomically.md) for the stream item. The asynchronous streaming choice remains current.
 
 ## Why
 
@@ -32,7 +32,7 @@ pub(crate) trait ModelDriver {
 }
 ```
 
-This has the conceptual shape `Future<Stream<ConversationEvent>>`, or `Mono<Flux<ConversationEvent>>` in Reactor terminology. The outer future constructs the request and establishes the provider invocation. It may fail before a stream exists because of request construction, authentication, connection, or HTTP errors. Once established, the stream yields `Result<ConversationEvent, ModelDriverError>` because the invocation may fail after streaming begins. The consumer controls demand by polling for the next event. A caller that needs batch behavior may collect the stream; no separate batch interface is required. The driver-boundary decision clarifies that provider-native intermediate events remain private to each concrete driver.
+This has the conceptual shape `Future<Stream<ConversationEvent>>`, or `Mono<Flux<ConversationEvent>>` in Reactor terminology. The outer future constructs the request and establishes the provider invocation. It may fail before a stream exists because of request construction, authentication, connection, or HTTP errors. Once established, the stream yields `Result<ConversationEvent, ModelDriverError>` because the invocation may fail after streaming begins. The consumer controls demand by polling for the next item. The stream item is now an atomic batch; see [Commit Driver Event Batches Atomically](2026-09-19-commit-driver-event-batches-atomically.md). The driver-boundary decision clarifies that provider-native intermediate events remain private to each concrete driver.
 
 For OpenAI, one invocation uses one REST request and one SSE response stream. Consuming several events from that stream does not make several model requests. Provider protocol events, raw text deltas, and intermediate driver events remain private to the concrete driver. The driver aggregates provider deltas and returns only completed `ConversationEvent`s. `ModelEvent::Assistant` and `ModelEvent::Communication` are successful model events; semantic model issues are top-level problem events. Raw SSE deltas are not `ConversationEvent`s and are not persisted merely because they arrived.
 

@@ -181,17 +181,52 @@ Do not nest or re-export a concrete implementation from the neutral contract mer
 
 Do not allow concrete provider request types, response types, or configuration to define the neutral abstraction.
 
-## Demand evidence for traits
+## Justify a trait by its contract
 
-Prefer a concrete type until there is a demonstrated reason for a trait.
+Introduce a trait when it lets readers understand the available operations
+independently of an implementation.
 
 Acceptable evidence includes:
 
+* a readable contract that exposes operations and their semantics
 * two current implementations
 * tests that substitute behavior at an intentional boundary
 * an explicit accepted architectural requirement, such as provider switching
 
-Even with evidence, keep the trait smaller than its first implementation. A trait describes what callers may rely on, not everything the concrete type can do.
+A second implementation is not required. Keep the trait smaller than its first
+implementation. A trait describes what callers may rely on, not everything the
+concrete type can do.
+
+## Keep the interface file to the contract
+
+An interface file presents operations and their documented semantics. It holds
+no fields, implementation bodies, private helpers, or storage details.
+
+Place the concrete implementation with its state, implementation helpers, and
+construction. Construction that selects configuration, such as an explicit
+location or an environment-derived default, belongs to the concrete type, not
+the trait.
+
+Prefer no comments. Treat a comment as a last resort for meaning that no name
+or type can carry.
+
+Before writing one, try:
+
+* a more specific method or type name
+* a stronger parameter or return type that makes the condition impossible
+* an error type whose variants name each failing condition
+
+Do not restate the method name, parameters, or return type. Do not describe
+implementation details or concepts the interface does not own.
+
+## Keep concepts together
+
+Identifiers and supporting types belong alongside the concept they describe.
+A consumer reading one concept should not need to open an unrelated module to
+find its types.
+
+Extract by responsibility. Split cohesive responsibilities, rather than
+grouping unrelated items by technical form.
 
 ## Reset after structural feedback
 
@@ -225,6 +260,12 @@ Architectural documents may contain future sections. Future sections do not cons
 
 Pause and reconsider when:
 
+* an interface file contains fields, implementation bodies, or private helpers
+* a comment restates the method name, parameters, or return type
+* a comment describes implementation details or concepts the interface does not own
+* a failure condition exists only in a comment instead of the return type
+* a trait exposes construction or configuration that only one implementation can choose
+* a method is on the contract only because its implementation needs it
 * an invocation input contains object identity, history, model selection, and configuration
 * the callee receives values it never reads
 * a trait method repeats values already stored by the implementor

@@ -118,6 +118,12 @@ arrive during the same model call, including after earlier tools finish. Progres
 and results become visible immediately after commit. Closing the call seals its
 ordered outputs; it does not imply that all requested tools have finished.
 
+Whether a driver can make a tool request durable before the call ends is driver
+capability, not an event-model requirement. A provider stream that announces calls
+incrementally may emit each one mid-call; a driver that only observes them at
+completion emits them with the call's output. The engine schedules continuations
+from committed facts and must remain correct for either emission order.
+
 ## Interleaved example
 
 The user asks: "List my home directory files, show the working directory, and read

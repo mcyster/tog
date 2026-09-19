@@ -35,17 +35,17 @@ Conversation Log
     durable replay source
 ```
 
-A `ModelDriver` consumes an immutable reference to the reconstructed conversation. One asynchronous invocation establishes a stream that yields completed semantic event kinds:
+A `ModelDriver` consumes an immutable reference to the reconstructed conversation. One asynchronous invocation establishes a stream of ordered, nonempty batches of completed semantic events:
 
 ```text
 immutable Conversation
     → asynchronous ModelDriver invocation
-    → stream of completed semantic facts
-    → append boundary assigns record metadata
-    → facts appended and presented incrementally
+    → stream of atomic batches of completed semantic facts
+    → append boundary commits each batch
+    → committed facts presented incrementally
 ```
 
-One invocation is one provider/model invocation. For OpenAI, it is one REST request with one SSE response stream; consuming several semantic events from that stream does not make several model requests.
+One invocation is one provider/model invocation. For OpenAI, it is one REST request with one SSE response stream; consuming several semantic events or batches from that stream does not make several model requests.
 
 Provider-specific details such as OpenAI Responses events, response IDs, token timing, reasoning protocol state, and HTTP diagnostics are **not part of the Phase 1 semantic replay contract**.
 
@@ -208,11 +208,13 @@ impl ConversationSession {
 
 `ModelDriver` receives a `TurnInput` constructed from the immutable conversation
 and turn identity. `TurnInput` derives the pending user requests from that same
-snapshot. Its output stream returns `ModelDriverOutput` values: shared
-`ConversationMessage` content or driver-defined invocation and extension events.
-It cannot return session-owned commands or turn lifecycle facts. The session
-converts those outputs into the persisted event vocabulary and records
-`TurnCompleted` from its completion policy.
+snapshot. Its output stream returns nonempty ordered batches of `ModelDriverOutput`
+values: shared `ConversationMessage` content or driver-defined invocation and
+extension events. The driver groups events that must become visible together, and
+single-event batches are the normal case. It cannot return session-owned commands
+or turn lifecycle facts. The session commits each batch atomically before reporting
+any of its events, converts those outputs into the persisted event vocabulary, and
+records `TurnCompleted` from its completion policy.
 
 ---
 
@@ -284,6 +286,8 @@ We do not need locks, distributed sequencing, compare-and-append, or a global ev
 The invariant is simply:
 
 > Replay the Conversation Log in position order.
+
+Phase 1 stores one append-only JSON Lines log file per conversation. A transaction opens with a `begin` marker line, carries one event record per line, and closes with a `commit` marker line containing the event count, position range, and a CRC32 of the transaction's event-line bytes. The log is directly readable and queryable with tools such as `jq`. A reader ignores a trailing transaction without a valid commit marker and rejects corruption inside committed history. The append boundary flushes and syncs each transaction before it is acknowledged. Existing per-event files remain readable and migrate into the log on the next append.
 
 Future persistence implementations may strengthen atomic allocation without changing the semantic model.
 
@@ -715,7 +719,7 @@ use futures_util::future::BoxFuture;
 use futures_util::stream::BoxStream;
 
 type ModelOutputStream =
-    BoxStream<'static, Result<ModelDriverOutput, ModelDriverError>>;
+    BoxStream<'static, Result<ModelDriverOutputBatch, ModelDriverError>>;
 
 struct TurnInput<'conversation> {
     conversation: &'conversation Conversation,
@@ -738,8 +742,13 @@ enum ConversationMessage {
 
 enum ModelDriverOutput {
     Message(ConversationMessage),
+    ToolRequest(ToolRequest),
     Command(Box<dyn ConversationEventExtension>),
     Extension(Box<dyn ConversationEventExtension>),
+}
+
+struct ModelDriverOutputBatch {
+    outputs: Vec<ModelDriverOutput>,
 }
 
 trait ConversationEventExtension: Send {
@@ -777,7 +786,7 @@ enum ModelDriverError {
 }
 ```
 
-This is conceptually `Future<Stream<ModelDriverOutput>>`, or `Mono<Flux<ModelDriverOutput>>` in Reactor terminology. The caller supplies only the immutable conversation and turn identity. The driver creates invocation identities, driver events, and invocation-specific data. Shared messages remain concrete and portable and are defined by the conversation vocabulary. Every output is converted into a durable event and persisted through the shared record boundary.
+This is conceptually `Future<Stream<ModelDriverOutputBatch>>`, or `Mono<Flux<ModelDriverOutputBatch>>` in Reactor terminology. The caller supplies only the immutable conversation and turn identity. The driver creates invocation identities, driver events, and invocation-specific data. Shared messages remain concrete and portable and are defined by the conversation vocabulary. The driver groups outputs into ordered nonempty batches: a batch contains events that must become visible together, and single-event batches are the normal case. The session commits each batch atomically before converting and persisting its events through the shared record boundary.
 
 `ModelDriverError` describes only failures of this shared contract. Provider
 failures that the driver can describe are emitted as portable `Problem` messages.
@@ -790,20 +799,21 @@ The important Phase 1 properties are:
 - input is a complete immutable conversation reconstructed from conversation events
 - the driver owns and exposes its stable provider/model source
 - invocation is asynchronous and stream-first
-- the stream yields only permitted conversation messages: accepted user content, assistant responses, communications, problems, and driver-defined events
-- the consumer controls demand by polling for the next event
+- the stream yields ordered nonempty batches of permitted conversation messages: accepted user content, assistant responses, communications, problems, and driver-defined events
+- the consumer controls demand by polling for the next batch
+- the session commits a batch atomically before reporting any of its events
 - the caller owns the outer model/tool loop, the turn request, and the turn lifecycle
 - the driver owns invocation identities and invocation-specific records
 - expected failures are strongly typed
 - provider SDK types do not cross the boundary
 
-A caller that wants batch behavior can collect the stream. No separate batch interface is required. Later implementation experience may still pressure the interface.
+A batch does not necessarily end a message, model call, or turn. Later implementation experience may still pressure the interface.
 
 ---
 
 ## 23. Returned event persistence
 
-User input and `TurnRequested` are appended before invocation. The driver maps provider-native activity to driver-defined records and permitted conversation messages, including driver-created `ModelInvocationId` values and event-specific `ModelData` where applicable. The session converts those messages into the persisted event vocabulary. The append boundary assigns canonical envelope metadata. The caller persists and may display each returned semantic event immediately while the invocation remains active.
+User input and `TurnRequested` are appended before invocation. The driver maps provider-native activity to driver-defined records and permitted conversation messages, including driver-created `ModelInvocationId` values and event-specific `ModelData` where applicable. The session converts each batch of messages into the persisted event vocabulary and commits the whole batch as one transaction. The append boundary assigns canonical envelope metadata. The session may display a batch's events immediately after the commit, while the invocation remains active.
 
 Provider protocol events and raw text deltas remain internal to the driver. They
 are not conversation events and are not persisted merely because they arrived.
@@ -827,30 +837,30 @@ await ModelDriver invocation
     ↓
 poll stream
     ↓
-permitted conversation message
-    → display and persist the converted event
+permitted conversation message in a batch
+    → commit the whole batch, then display and persist its converted events
     ↓
 later stream failure
-    → completed events remain durable
+    → completed and committed events remain durable
     → incomplete provider deltas are discarded
     → driver yields sanitized Problem(problem=Invocation(...)) on its stream
     ↓
 session records TurnCompleted with the resulting outcome
 ```
 
-This supersedes the previous batch contract, which returned all model events only after the complete invocation succeeded and discarded every model event after a late provider failure. Incremental append does not imply rollback: already appended semantic facts remain durable.
+This supersedes the earlier contract, which returned all model events only after the complete invocation succeeded and discarded every model event after a late provider failure. Incremental commit does not imply rollback: already committed semantic facts remain durable.
 
 ---
 
 ## 24. ModelDriver stream
 
-An established invocation yields permitted conversation messages incrementally:
+An established invocation yields ordered nonempty batches of permitted conversation messages incrementally:
 
 ```rust
-Result<ModelDriverOutput, ModelDriverError>
+Result<ModelDriverOutputBatch, ModelDriverError>
 ```
 
-This supports assistant responses, auxiliary communications, model-reported problems, and driver-defined invocation events. The session converts those messages into durable events, and the append boundary owns durable envelope construction. Stored driver envelopes remain opaque when their decoder is unavailable. Stream polling supplies demand and natural backpressure at this boundary. The session records `TurnCompleted` after the stream ends; stream exhaustion without an assistant response or problem is incomplete execution, not success.
+This supports assistant responses, auxiliary communications, model-reported problems, and driver-defined invocation events. The session commits each batch atomically, converts those messages into durable events, and the append boundary owns durable envelope construction. Stored driver envelopes remain opaque when their decoder is unavailable. Stream polling supplies demand and natural backpressure at this boundary. The session records `TurnCompleted` after the stream ends; stream exhaustion without an assistant response or problem is incomplete execution, not success.
 
 ---
 
@@ -861,7 +871,7 @@ Contract failures are explicit both while establishing the invocation and while 
 ```rust
 BoxFuture<'invoke, Result<ModelOutputStream, ModelDriverError>>
 
-BoxStream<'static, Result<ModelDriverOutput, ModelDriverError>>
+BoxStream<'static, Result<ModelDriverOutputBatch, ModelDriverError>>
 ```
 
 The shared contract error model is:

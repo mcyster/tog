@@ -85,6 +85,7 @@ impl Conversation {
         })
     }
 
+    #[allow(dead_code)]
     pub(crate) fn id(&self) -> ConversationId {
         self.id
     }
