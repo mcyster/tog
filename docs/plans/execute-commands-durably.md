@@ -1,122 +1,182 @@
 # Execute commands durably from the conversation log
 
 Build toward a single-user daemon with CLI clients, one append-only file per
-conversation, and independent asynchronous command execution. Commands and facts
-share that log. The command queue and model-visible history are derived views;
-neither needs a second authoritative file or an external broker.
+conversation, and independent asynchronous execution. Requests and observed
+outcomes share that log. The command queue and model-visible history are derived
+views; neither needs a second authoritative file or an external broker.
 
-This is intended work following the driver/session boundary in
-[PR #5](https://github.com/mcyster/tog/pull/5). At that baseline,
-[EventStore](../../src/persistence.rs) writes one JSON file per event and
-[ConversationSession](../../src/conversation_session.rs) consumes a driver stream
-directly. Transactional batches, a dispatcher, and command groups are not yet
-implemented. Preserve portable conversation meaning and driver-owned invocation
-details while introducing execution responsibilities.
+This plan describes intended work, not the implemented API. Replace the earlier
+operation/command-group model for model attempts with `ModelCallRequest` and
+`ModelCallResponse`. A turn spans model attempts, tool execution, retries, and an
+explicit terminal outcome. A model call can finish while tools it requested are
+still running; no fixed group membership is required before streaming begins.
+
+The current [driver](../../src/model_driver.rs) still uses driver-owned invocation
+details and a turn-oriented input. Introduce the common call lifecycle below
+without making the conversation vocabulary depend on driver types.
 
 ## Commit intent before execution
 
 The storage contract must commit a set of events as one transaction within a
 conversation. Readers and executors see all of a committed batch or none of it.
-Assign ordered positions at the append boundary. A context position must refer to
+Assign ordered positions at the append boundary. An input position must refer to
 a committed boundary, never a partly visible transaction.
 
 For files, define batch framing, integrity checks, a commit marker, flushing, and
 recovery from an incomplete trailing batch before dispatch is enabled. A successful
 commit must survive the documented crash model. Do not silently discard corruption
 inside committed history. A crash after commit but before acknowledgment is
-ambiguous to the caller: stable batch/command identities must make retry safe.
+ambiguous to the caller: stable batch/request identities must make retry safe.
+Resolve migration from the existing per-event files before switching storage.
 
-Commit together when the application intends these transitions together:
+Commit together when the application intends transitions together, such as a user
+request and its immediate turn request, or the final prerequisite outcome and an
+eligible continuation request. When prerequisites finish separately, recovery must
+still derive the missing continuation without creating it twice.
 
-- A user request and its immediate turn request. Queued input alone is valid.
-- Group membership and the commands to dispatch.
-- Group completion and the next operation's request.
+Only committed requests may execute. Do not hold a transaction open during a model
+call or while tools run. External side effects are outside the file transaction;
+the log cannot prove that an interrupted external operation never happened.
 
-Only committed commands may execute. Do not hold a transaction open while tools
-run. External side effects are outside the file transaction; the log cannot prove
-that an interrupted external operation never happened.
+## Common model-call lifecycle
 
-## Turns, groups, and commands
+Use `ModelCallRequest` / `ModelCallResponse`, consistently with
+`ToolRequest` / `ToolResponse`. The model-call request's durable event ID
+identifies one attempt; a retry is another request in the same turn.
 
-A turn is requested work through an explicit terminal outcome. It can contain
-several model calls and command groups. A group is a join over a fixed set of
-logical command IDs, associated with a turn. It may be only a subset of the work
-outstanding in the conversation.
+| Event | Tog-owned meaning | Optional driver data |
+| --- | --- | --- |
+| ModelCallRequest | Turn association, model/driver identity, fixed `inputThrough` position, dependencies, retry relationship | Provider options, continuation state, provider-specific input metadata |
+| ModelCallResponse | Request reference, observed outcome, ordered `outputEvents`, known usage and its completeness | Provider request ID, raw finish reason, additional usage details |
 
-Use the names `command_group_start` and `command_group_end`. Start establishes
-membership before members are dispatched; end establishes that all members have
-terminal outcomes. Failure and cancellation can be terminal outcomes. An attempt
-that will be retried is not a terminal logical-command outcome.
+Tog owns these event types and their lifecycle. Drivers interpret providers and
+supply output and metadata; the engine records requests and terminal responses,
+including when a driver fails or times out. A driver cannot redefine completion,
+failure, retry eligibility, or dependency satisfaction through an opaque payload.
+Scheduling-relevant meaning must have a common typed representation.
 
-An illustrative successful flow, with IDs shortened:
+Use optional `ModelData` for provider-specific payloads. Preserve that data through
+serialization and replay even when its driver is unavailable; interpretation may
+require the driver. Provider invocation IDs remain metadata, not substitutes for
+the common request reference. These are extensible payloads within a stable
+lifecycle, not driver-defined replacements for the lifecycle events.
 
-| Batch | Events |
-| --- | --- |
-| 1 | user request; turn request |
-| 2 | accepted user fact; turn_start with input position |
-| 3 | command_group_start(G, [A, B]); tool requests A and B |
-| 4 | tool A start with attempt identity and input |
-| 5 | tool B start with attempt identity and input |
-| 6 | tool A result |
-| 7 | tool B result |
-| 8 | command_group_end(G); continuation request |
-| 9+ | continuation start; assistant response; explicit turn completion |
+Streamed model outputs reference their `ModelCallRequest`. Each tool response
+references its particular tool request. The model-call response lists only outputs
+produced by that call, in order, in `outputEvents`; it excludes tool responses
+even when they arrive during the call. Validate that output ownership and the
+ordered list agree.
 
-The lifecycle names here describe the intended vocabulary, not a mandate to
-rename existing serialized turn events. Results arrive independently and become
-durable immediately. Group completion does not itself merge context or complete
-the turn. Record enough continuation information to schedule the next operation
-after recovery; an in-memory callback is insufficient.
+The engine records one terminal response per model-call request. A timeout closes
+the engine's attempt; it does not assert that the provider stopped, that no side
+effects occurred, or that token usage was zero. Late output cannot silently extend
+a closed attempt or release a continuation again. Specify how late provider
+information is retained before implementing that path.
 
-## One lifecycle for all requested work
+## Fixed input and tool dependencies
 
-Recovery must cover user-request handling, turn execution, groups, tools, and
-continuations. It cannot begin only after a group has started.
+`inputThrough` bounds the committed conversation used to construct a call's
+input. It does not mean every preceding event is sent verbatim to the provider.
+Capture this position after prerequisites are recorded and before invoking the
+driver; concurrent appends must not change that call's selected input.
 
-Specific events should expose shared typed lifecycle capabilities:
+`dependsOn` uses tool-request IDs to identify operations. Each dependency is
+satisfied when its correlated `ToolResponse` is recorded, including a failure
+response. Satisfaction means the result is available, not that the tool succeeded;
+the continuation/retry policy decides how to handle it.
 
-| Role | Required meaning |
-| --- | --- |
-| Requested | Command ID, requested operation, parent association where applicable, start conditions, input-selection policy |
-| Started | Command ID, attempt ID, actual selected input boundary or explicit arguments |
-| Done | Command ID, attempt ID, structured outcome and failure details |
-| Logical completion | Whether the command is terminal or another attempt remains eligible |
+Wait for the preceding model call's terminal response and all required tool
+responses before recording the next model-call request. Dependencies do not
+extend input beyond `inputThrough`. Scheduling intent for work whose prerequisites
+are still pending is separate from the fixed-input model-call request.
 
-Keep Command/Fact classification separate: a request is a command; started and
-done records are facts. Shared and driver-defined execution events must expose
-enough common lifecycle information for scheduling without interpreting arbitrary
-provider payloads. Final Rust trait names and placement should be settled in the
-first implementation slice; the table defines their responsibilities.
+Tools may start as their complete requests become durable. More tool requests may
+arrive during the same model call, including after earlier tools finish. Progress
+and results become visible immediately after commit. Closing the call seals its
+ordered outputs; it does not imply that all requested tools have finished.
 
-A done attempt does not automatically complete its logical command. Preserve the
-logical ID across retries and distinguish attempts so late or duplicate results
-cannot complete the command twice or release a join twice. Normal group retry
-resumes coordination and retries eligible unfinished members; it does not rerun
-successful side effects. Explicitly rerunning completed work is a new request.
+## Interleaved example
 
-Failure results need a portable category, useful message, retry guidance, and
-known versus uncertain execution outcome. The runtime applies bounded retries,
-backoff, deadlines, and cancellation policy. A missing start is recoverable queued
-work; a start without a result is uncertain work, not proof of nonexecution.
-Use tool-side idempotency or reconciliation where available. Otherwise require
-explicit recovery for unsafe retries.
+The user asks: "List my home directory files, show the working directory, and read
+the first line of ~/README.md." IDs below show arrival order; `call` references a
+model-call request and `tool` references a tool request. Everything from
+`TurnStart` onward is associated with turn 2. These labels illustrate intended
+semantics rather than mandate renaming existing serialized turn/message events.
 
-## Dispatch, notifications, and completion
+| ID | Event | References | Content |
+| --- | --- | --- | --- |
+| 1 | User | — | The request above |
+| 2 | TurnStart | user:1 | |
+| 3 | ModelCallRequest | inputThrough:2 | retryCount:0 |
+| 4 | Thinking | call:3 | I'll check the directory and working location. |
+| 5 | ToolRequest | call:3 | ls ~ |
+| 6 | ToolRequest | call:3 | pwd |
+| 7 | ToolResponse | tool:6 | /home/mcyster |
+| 8 | Thinking | call:3 | I'll also read the README. |
+| 9 | ToolRequest | call:3 | Read first line of ~/README.md |
+| 10 | ToolResponse | tool:9 | My personal notes |
+| 11 | ModelCallResponse | call:3; outputEvents:[4,5,6,8,9] | Successful; input:1,000, output:200 |
+| 12 | ToolResponse | tool:5 | README.md, notes.txt |
+| 13 | ModelCallRequest | inputThrough:12; dependsOn:[5,6,9] | retryCount:0 |
+| 14 | Thinking | call:13 | I'll summarize the results. |
+| 15 | ModelCallResponse | call:13; outputEvents:[14] | Timeout; usage unknown |
+| 16 | ModelCallRequest | inputThrough:15; dependsOn:[5,6,9] | retryOf:13; retryCount:1 |
+| 17 | Thinking | call:16 | I have the directory results. |
+| 18 | AssistantResponse | call:16 | Files: README.md, notes.txt. Working directory: /home/mcyster. README begins: "My personal notes". |
+| 19 | ModelCallResponse | call:16; outputEvents:[17,18] | Successful; input:1,400, output:300 |
+| 20 | TurnCompleted | turn:2; assistantResponse:18 | Successful |
+
+Call 3 finishes at 11, while its directory listing finishes at 12. Request 13 uses
+`inputThrough:12` so its fixed input includes all three tool responses.
+Call 16 is another potentially billable attempt and reuses those recorded results;
+it does not rerun the tools. `retryOf` makes that relationship explicit.
+
+Turn usage is three model attempts, 2,900 known tokens, and incomplete total
+usage: call 3 reports 1,200, call 13 is unknown, and call 16 reports 1,700.
+Unknown usage must not be counted as zero or presented as a complete total.
+
+When preparing the next model input, reconstruct call 3's output in order
+4,5,6,8,9, then supply tool responses in request order 5,6,9 (response events
+12,7,10). The UI can retain actual arrival order.
+
+Preserve partial output from unsuccessful attempts in the log and UI. Exclude
+incomplete-attempt thinking such as event 14 from subsequent model input by
+default. Tool requests already acted upon and their results must remain accounted
+for. A timeout after emitting a tool request is a required design/validation case:
+settle its model-input projection and recovery policy before enabling automatic
+retries for that case; do not discard evidence of side effects.
+
+## Recovery, retries, and notifications
+
+Recovery must cover user-request handling, turns, model calls, tools, and
+continuations. It cannot begin only after a model call has started. Reconstruct
+committed requests, accepted outcomes, dependencies, cancellations, and continuation
+eligibility before dispatching after restart.
+
+Keep request identity, attempt identity, and logical completion distinct where
+retries require them. A completed model attempt need not complete its turn.
+Correlate tool failures to `ToolResponse`; separate conversation problems describe
+failures outside a tool call. Failure details need a portable category, useful
+message, retry guidance, and known versus uncertain execution outcome.
+
+The runtime applies bounded retries, backoff, deadlines, and cancellation policy.
+A recorded request without an outcome does not prove that external execution never
+began. Reuse recorded successful tool results; do not rerun successful side effects
+as part of model-call retry. Use tool-side idempotency or reconciliation where
+available; otherwise require explicit recovery for unsafe retries. Specify
+tool-attempt retry correlation before implementing it, so an earlier response
+cannot accidentally satisfy a later attempt's dependency.
 
 Provide a small runtime-facing notification/completion interface. Accept wakeups
-from committed log changes, scheduler deadlines, and running-command signals, but
-keep wakeups, progress, and terminal outcomes distinct.
+from committed log changes, scheduler deadlines, and running-operation signals.
+Keep wakeups, progress, and terminal outcomes distinct. Notifications only prompt
+another read; the committed log is the source of truth. The runtime validates and
+commits outcomes before publishing them or releasing dependents.
 
-The dispatcher reads committed events from a position. Notifications only prompt
-another read; they are not the source of truth. Completion reports carry command
-and attempt identity. The runtime validates and commits outcomes before publishing
-them or releasing dependents. Recover deadlines and eligibility from durable
-state, not only in-memory timers.
-
-Rebuild requests, attempts, group membership, accepted results, cancellations, and
-continuations before dispatching after restart. A log-position reader must avoid
-the gap between replaying history and subscribing. Duplicate notifications and
-results must not duplicate execution decisions.
+The dispatcher reads committed events from a position. Avoid the gap between
+replaying history and subscribing. Recover deadlines and eligibility from durable
+state, not only in-memory timers. Duplicate notifications or stale/duplicate
+responses must not duplicate execution decisions or continuation requests.
 
 Use one daemon authority to serialize each conversation's append and scheduling
 decisions; prevent competing daemon writers. This does not require a thread per
@@ -124,9 +184,9 @@ conversation. REST tools await nonblocking I/O; subprocess tools await process
 completion. Bound concurrency and isolate blocking or CPU-heavy implementations.
 Tools return results through the runtime interface rather than owning log writes.
 
-## Context selection and cancellation
+## Turn context and cancellation
 
-Separate eligibility from input selection:
+Separate turn eligibility from input selection:
 
 | Requested behavior | Eligible when | Context |
 | --- | --- | --- |
@@ -134,13 +194,10 @@ Separate eligibility from input selection:
 | Run now using available history | Now | Position captured when requested |
 | Run after an active turn finishes | Dependency is terminal | Position captured when eligible |
 
-`turn_start` and `command_group_start` record their selected input positions.
-Individual commands also identify their actual inputs when these differ from
-group context. The current user request and command arguments remain explicit
-inputs even when the historical context position predates them. A continuation
-selects a new boundary that includes the relevant results; it does not silently
-reuse the group's original boundary. Log position identifies available history,
-not necessarily every item selected by a model projection.
+Turn start records its selected input position; each model-call request records
+its own `inputThrough`. The current user request and explicit arguments remain
+inputs even when the historical context predates them. A continuation selects a
+new boundary including its required results.
 
 Support turn cancellation and conversation-wide cancellation requests outside
 individual tools. Cancellation is durable intent, not proof that remote work has
@@ -156,22 +213,30 @@ cancelled predecessor. Do not choose these policies implicitly.
 ## Implementation and acceptance
 
 Implement in reviewable slices: transactional file storage and recovery first;
-typed lifecycle and input contracts next; then dispatcher/group coordination;
-then retries, deadlines, and cancellation. Resolve the file-format migration from
-existing per-event files before switching storage. Keep snapshots, distributed
-workers, Kafka, and generalized graph scheduling outside the initial scope.
+common model-call lifecycle, references, input projection, and usage next; then
+dispatch and dependency coordination; then retries, deadlines, and cancellation.
+Keep snapshots, distributed workers, Kafka, and generalized graph scheduling
+outside the initial scope.
 
-Verify the observable boundaries:
+Verify these observable boundaries when implementing:
 
-- A torn batch never dispatches tools or exposes partial group membership.
-- A crash after commit but before notification still recovers eligible commands.
-- Fast, duplicate, and reordered results release a group only once.
-- Group completion cannot lose or duplicate its continuation across restart.
-- Recovery covers a requested turn or continuation that never started.
-- Retrying an attempt preserves successful siblings and rejects stale outcomes.
-- Context positions remain stable while concurrent turns append new facts.
+- A torn batch never dispatches tools or exposes partial output.
+- Crash recovery finds requests and eligible continuations that never started.
+- Streaming tools and results interleave as in the example, while call completion
+  and tool completion remain independent.
+- Fast, duplicate, and reordered results release a continuation only once.
+- A continuation requires both call closure and its correlated tool responses.
+- Input positions remain stable during concurrent appends and include every
+  required result; model projection and UI arrival order remain distinct.
+- Output references agree with ownership and ordering; a closed call cannot gain
+  additional output or a second terminal response.
+- A model retry preserves recorded tool results and separately accounts for usage.
+- Timeout after tool dispatch preserves side-effect evidence and follows the
+  explicitly chosen recovery/projection policy.
+- Optional driver data round-trips without loading its driver; common lifecycle
+  handling does not require interpreting that data.
 - Cancellation, restart during backoff, and late results obey the selected policy.
 
-Ordinary replay reconstructs state without executing commands. Recovery then
+Ordinary replay reconstructs state without executing requests. Recovery then
 explicitly schedules eligible work. This plan does not promise deterministic
 model responses or exactly-once external side effects.
