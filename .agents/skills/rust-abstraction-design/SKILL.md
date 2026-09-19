@@ -226,9 +226,11 @@ implementation details or concepts the interface does not own.
 
 ## Describe failure with types
 
-Give each operation an error type whose variants name that operation's failing
-conditions. Keep a shared low-level error small and opaque; do not leak
-positions, markers, checksums, or other implementation mechanics through it.
+Give an operation its own error type when operations fail in different ways.
+When every operation fails for the same reasons, one shared error is enough.
+
+Keep a shared low-level error small and opaque; do not leak positions, markers,
+checksums, or other implementation mechanics through it.
 
 Represent absence with `Option` rather than an error.
 
@@ -237,9 +239,9 @@ Represent absence with `Option` rather than an error.
 Evaluate every wrapper, conversion, and helper type by whether it makes the
 code easier to understand and use. Keep those that earn their place.
 
-A type that only makes an invalid value unrepresentable while the consumer
-must still report the same failure adds a concept without removing work.
-Prefer the direct parameter and the error variant.
+Removing a type rarely proves anything by itself. Readability, preventing an
+invalid state, or naming a concept can justify a type even when the program
+would work without it.
 
 ## Keep concepts together
 
@@ -317,6 +319,6 @@ Before completing an abstraction change, verify:
 7. Failure behavior is explicit and tested.
 8. Persistence, logging, CLI, and provider policy remain outside unless they are the abstraction's stated responsibility.
 9. Dependency arrows point from integrations to contracts.
-10. Removing any type would make a current requirement impossible.
+10. Every type provides enough value to justify its complexity.
 11. Every explored but unaccepted idea has been excluded from implementation.
 12. Superseded guarantees have been removed from code, tests, and authoritative documentation.
