@@ -22,6 +22,13 @@ or turn. The session commits each batch as one storage transaction and only then
 reports its events. Yielding a batch does not acknowledge its commit, and no
 driver acknowledgment protocol exists.
 
+The storage contract accepts a `ConversationEventBatch`: an ordered, nonempty
+set of conversation events committed as one atomic, durable transaction.
+Constructing a batch from a vector rejects empty input with
+`EmptyConversationEventBatch`; constructing one from a single event is infallible.
+Callers cannot pass an empty batch to `ConversationEventStore::append`.
+A successful append returns the committed records in input order.
+
 Phase 1 storage keeps one append-only JSON Lines log per conversation. A
 transaction opens with `{"transaction":"begin"}`, carries one event record per
 line, and closes with a commit marker:

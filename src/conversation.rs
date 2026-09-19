@@ -1,4 +1,5 @@
 mod event;
+mod event_batch;
 mod id;
 mod model;
 mod model_data;
@@ -20,6 +21,7 @@ pub(crate) use event::{
     ModelCommunication, ModelEvent, ModelEventImportance, StoredConversationEventKind, TurnOutcome,
     UserContent, UserMessageRequest,
 };
+pub(crate) use event_batch::ConversationEventBatch;
 pub(crate) use id::{
     ConversationCommandId, ConversationEventId, ConversationId, ConversationTurnId,
     ModelInvocationId, ToolCallId,

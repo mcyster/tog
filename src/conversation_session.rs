@@ -5,9 +5,10 @@ use std::fmt::{Display, Formatter};
 use futures_util::StreamExt;
 
 use crate::conversation::{
-    ConversationCommand, ConversationCommandId, ConversationEvent, ConversationFact,
-    ConversationId, ConversationLifecycle, ConversationMessage, ConversationProblem,
-    ConversationTurnId, ToolResponse, TurnOutcome, UserContent, UserMessageRequest, UserPrompt,
+    ConversationCommand, ConversationCommandId, ConversationEvent, ConversationEventBatch,
+    ConversationFact, ConversationId, ConversationLifecycle, ConversationMessage,
+    ConversationProblem, ConversationTurnId, ToolResponse, TurnOutcome, UserContent,
+    UserMessageRequest, UserPrompt,
 };
 use crate::model_driver::{ModelDriver, ModelDriverError, ModelDriverOutput, TurnInput};
 use crate::persistence::ConversationEventStore;
@@ -70,12 +71,12 @@ impl<Store: ConversationEventStore> ConversationSession<Store> {
         let command_id = ConversationCommandId::new();
         self.event_store.append(
             self.conversation_id,
-            vec![ConversationEvent::Command(
+            ConversationEventBatch::from(ConversationEvent::Command(
                 ConversationCommand::UserMessageRequested(UserMessageRequest {
                     content: vec![UserContent::Text(user_prompt.text().to_owned())],
                     command_id,
                 }),
-            )],
+            )),
         )?;
         Ok(command_id)
     }
@@ -87,12 +88,12 @@ impl<Store: ConversationEventStore> ConversationSession<Store> {
         let turn_id = ConversationTurnId::new();
         self.event_store.append(
             self.conversation_id,
-            vec![ConversationEvent::Command(
+            ConversationEventBatch::from(ConversationEvent::Command(
                 ConversationCommand::TurnRequested {
                     command_id: ConversationCommandId::new(),
                     turn_id,
                 },
-            )],
+            )),
         )?;
         let source = self.model_driver.source().clone();
         let mut assistant_responded = false;
@@ -215,7 +216,10 @@ impl<Store: ConversationEventStore> ConversationSession<Store> {
                         }
                     }
                 }
-                self.event_store.append(self.conversation_id, events)?;
+                self.event_store.append(
+                    self.conversation_id,
+                    ConversationEventBatch::try_from(events)?,
+                )?;
                 for progress in progress_reports {
                     report_progress(progress)?;
                 }
@@ -261,8 +265,10 @@ impl<Store: ConversationEventStore> ConversationSession<Store> {
     }
 
     fn append_shared_fact(&self, fact: ConversationFact) -> ConversationSessionResult<()> {
-        self.event_store
-            .append(self.conversation_id, vec![ConversationEvent::Fact(fact)])?;
+        self.event_store.append(
+            self.conversation_id,
+            ConversationEventBatch::from(ConversationEvent::Fact(fact)),
+        )?;
         Ok(())
     }
 }

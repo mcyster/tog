@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 use super::ConversationEventStore;
 use super::{legacy, log};
 use crate::conversation::{
-    Conversation, ConversationEvent, ConversationEventKind, ConversationEventRecord,
-    ConversationId, StoredConversationEventKind,
+    Conversation, ConversationEvent, ConversationEventBatch, ConversationEventKind,
+    ConversationEventRecord, ConversationId, StoredConversationEventKind,
 };
 
 const CONVERSATIONS_DIRECTORY_NAME: &str = "conversations";
@@ -24,8 +24,6 @@ impl FileEventStore {
         Ok(Self { root_directory })
     }
 
-    /// Selects the storage location from `TOG_DATA_DIR`, then `XDG_DATA_HOME/tog`,
-    /// then `HOME/.local/share/tog`.
     pub(crate) fn from_environment() -> io::Result<Self> {
         let root_directory = if let Some(configured_directory) = std::env::var_os("TOG_DATA_DIR") {
             PathBuf::from(configured_directory)
@@ -106,7 +104,7 @@ impl ConversationEventStore for FileEventStore {
     fn append(
         &self,
         conversation_id: ConversationId,
-        events: Vec<ConversationEvent>,
+        events: ConversationEventBatch,
     ) -> io::Result<Vec<ConversationEventRecord>> {
         let kinds = stored_event_kinds(events)?;
         let conversation_directory = self.conversation_directory(conversation_id);
@@ -218,15 +216,9 @@ fn build_event_batch(
 }
 
 fn stored_event_kinds(
-    events: Vec<ConversationEvent>,
+    events: ConversationEventBatch,
 ) -> io::Result<Vec<StoredConversationEventKind>> {
-    if events.is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "an appended event batch must not be empty",
-        ));
-    }
-    events.into_iter().map(stored_kind).collect()
+    events.into_events().into_iter().map(stored_kind).collect()
 }
 
 fn stored_kind(event: ConversationEvent) -> io::Result<StoredConversationEventKind> {
