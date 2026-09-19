@@ -26,13 +26,16 @@ a driver batch across transactions.
   do not satisfy the contract.
 - Keep explicit model-call and turn completion distinct from batch completion.
   A batch does not necessarily end a message, model call, or turn. The engine
-  records `ModelCallRequest` with fixed `inputThrough` before invocation, attaches
+  records `ModelCallRequest` with an explicit turn reference and fixed `inputThrough`
+  before invocation, attaches
   its reference to streamed outputs, and records `ModelCallResponse` with ordered
-  `outputEvents`, outcome, and usage when the attempt closes. Optional driver data
-  extends these common events without redefining their lifecycle.
+  `outputEventIds`, outcome, and usage when the attempt closes. Optional driver data
+  extends these common events without redefining their lifecycle. Dependent events
+  inherit turn membership through call/tool references, regardless of batch or
+  arrival order.
 - Preserve immediate progress: commit completed tool requests and dispatch eligible
   tools while the model call continues. Tool responses reference their own requests
-  and are not part of the call's `outputEvents`. Call completion does not wait for
+  and are not part of the call's `outputEventIds`. Call completion does not wait for
   tool completion; the next call waits for both and captures an input boundary
   including the required results.
 - Update the supporting API documentation to state this boundary consistently.
