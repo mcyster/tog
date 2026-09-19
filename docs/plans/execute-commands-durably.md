@@ -47,7 +47,7 @@ identifies one attempt; a retry is another request in the same turn.
 | Event | Tog-owned meaning | Optional driver data |
 | --- | --- | --- |
 | ModelCallRequest | Turn association, model/driver identity, fixed `inputThrough` position, dependencies, retry relationship | Provider options, continuation state, provider-specific input metadata |
-| ModelCallResponse | Request reference, observed outcome, ordered `outputEvents`, known usage and its completeness | Provider request ID, raw finish reason, additional usage details |
+| ModelCallResponse | Request reference, observed outcome, ordered `outputEventIds`, known usage and its completeness | Provider request ID, raw finish reason, additional usage details |
 
 Tog owns these event types and their lifecycle. Drivers interpret providers and
 supply output and metadata; the engine records requests and terminal responses,
@@ -63,15 +63,38 @@ lifecycle, not driver-defined replacements for the lifecycle events.
 
 Streamed model outputs reference their `ModelCallRequest`. Each tool response
 references its particular tool request. The model-call response lists only outputs
-produced by that call, in order, in `outputEvents`; it excludes tool responses
+produced by that call, in order, in `outputEventIds`; it excludes tool responses
 even when they arrive during the call. Validate that output ownership and the
-ordered list agree.
+ordered list agree. `outputEventIds` contains durable event references, not
+embedded event payloads.
 
 The engine records one terminal response per model-call request. A timeout closes
 the engine's attempt; it does not assert that the provider stopped, that no side
 effects occurred, or that token usage was zero. Late output cannot silently extend
 a closed attempt or release a continuation again. Specify how late provider
 information is retained before implementing that path.
+
+## Turn membership and completion
+
+Each `ModelCallRequest` explicitly references its turn. Other call-related events
+inherit turn membership through their references:
+
+| Event | Path to its turn |
+| --- | --- |
+| Thinking, tool request, assistant response | Model-call request → turn |
+| Tool response | Tool request → model-call request → turn |
+| Model-call response | Model-call request → turn |
+
+Do not repeat turn references on these dependent events. Arrival order does not
+establish membership: events from concurrent turns can interleave. Resolve and
+validate the reference chain when reconstructing the conversation.
+
+Retain explicit `TurnStart` and `TurnCompleted` lifecycle events.
+`TurnCompleted` references its turn and, on successful completion, the final
+assistant response belonging to that turn. The engine records the terminal turn
+outcome; it is not inferred from an assistant message or model-call completion
+alone. A failed model attempt can be followed by a successful retry in the same
+successful turn.
 
 ## Fixed input and tool dependencies
 
@@ -106,8 +129,8 @@ semantics rather than mandate renaming existing serialized turn/message events.
 | ID | Event | References | Content |
 | --- | --- | --- | --- |
 | 1 | User | — | The request above |
-| 2 | TurnStart | user:1 | |
-| 3 | ModelCallRequest | inputThrough:2 | retryCount:0 |
+| 2 | TurnStart | user:1 | Starts turn 2 |
+| 3 | ModelCallRequest | turn:2; inputThrough:2 | retryCount:0 |
 | 4 | Thinking | call:3 | I'll check the directory and working location. |
 | 5 | ToolRequest | call:3 | ls ~ |
 | 6 | ToolRequest | call:3 | pwd |
@@ -115,15 +138,15 @@ semantics rather than mandate renaming existing serialized turn/message events.
 | 8 | Thinking | call:3 | I'll also read the README. |
 | 9 | ToolRequest | call:3 | Read first line of ~/README.md |
 | 10 | ToolResponse | tool:9 | My personal notes |
-| 11 | ModelCallResponse | call:3; outputEvents:[4,5,6,8,9] | Successful; input:1,000, output:200 |
+| 11 | ModelCallResponse | call:3; outputEventIds:[4,5,6,8,9] | Successful; input:1,000, output:200 |
 | 12 | ToolResponse | tool:5 | README.md, notes.txt |
-| 13 | ModelCallRequest | inputThrough:12; dependsOn:[5,6,9] | retryCount:0 |
+| 13 | ModelCallRequest | turn:2; inputThrough:12; dependsOn:[5,6,9] | retryCount:0 |
 | 14 | Thinking | call:13 | I'll summarize the results. |
-| 15 | ModelCallResponse | call:13; outputEvents:[14] | Timeout; usage unknown |
-| 16 | ModelCallRequest | inputThrough:15; dependsOn:[5,6,9] | retryOf:13; retryCount:1 |
+| 15 | ModelCallResponse | call:13; outputEventIds:[14] | Timeout; usage unknown |
+| 16 | ModelCallRequest | turn:2; inputThrough:15; dependsOn:[5,6,9] | retryOf:13; retryCount:1 |
 | 17 | Thinking | call:16 | I have the directory results. |
 | 18 | AssistantResponse | call:16 | Files: README.md, notes.txt. Working directory: /home/mcyster. README begins: "My personal notes". |
-| 19 | ModelCallResponse | call:16; outputEvents:[17,18] | Successful; input:1,400, output:300 |
+| 19 | ModelCallResponse | call:16; outputEventIds:[17,18] | Successful; input:1,400, output:300 |
 | 20 | TurnCompleted | turn:2; assistantResponse:18 | Successful |
 
 Call 3 finishes at 11, while its directory listing finishes at 12. Request 13 uses
@@ -131,9 +154,11 @@ Call 3 finishes at 11, while its directory listing finishes at 12. Request 13 us
 Call 16 is another potentially billable attempt and reuses those recorded results;
 it does not rerun the tools. `retryOf` makes that relationship explicit.
 
-Turn usage is three model attempts, 2,900 known tokens, and incomplete total
-usage: call 3 reports 1,200, call 13 is unknown, and call 16 reports 1,700.
-Unknown usage must not be counted as zero or presented as a complete total.
+The derived view of turn 2 is successful, with three model attempts, 2,900 known
+tokens, and incomplete total usage: call 3 reports 1,200, call 13 is unknown, and
+call 16 reports 1,700. The view combines the explicit turn outcome with usage
+across its referenced calls. Unknown usage must not be counted as zero or presented
+as a complete total.
 
 When preparing the next model input, reconstruct call 3's output in order
 4,5,6,8,9, then supply tool responses in request order 5,6,9 (response events
@@ -230,7 +255,10 @@ Verify these observable boundaries when implementing:
   required result; model projection and UI arrival order remain distinct.
 - Output references agree with ownership and ordering; a closed call cannot gain
   additional output or a second terminal response.
-- A model retry preserves recorded tool results and separately accounts for usage.
+- Turn membership follows references even when multiple turns interleave; a final
+  assistant response referenced by `TurnCompleted` belongs to that turn.
+- A model retry preserves recorded tool results and separately accounts for usage;
+  a successful turn can include failed attempts and incomplete total usage.
 - Timeout after tool dispatch preserves side-effect evidence and follows the
   explicitly chosen recovery/projection policy.
 - Optional driver data round-trips without loading its driver; common lifecycle
