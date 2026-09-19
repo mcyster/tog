@@ -10,9 +10,10 @@ each batch atomically, preserving event and batch order, before publishing or
 presenting its events. Single-event batches are the normal case. Earlier batches
 remain durable if a later batch or the model call fails.
 
-The driver owns provider interpretation, invocation identities, and semantic
-grouping. It does not persist events or assign durable record IDs, positions, or
-timestamps. The caller and event store own those responsibilities. The caller may
+The driver owns provider interpretation, provider invocation identities, and semantic
+grouping. Tog owns the common model-call request identity and lifecycle described
+in [Execute commands durably](execute-commands-durably.md). The driver does not
+persist events or assign durable record IDs, positions, or timestamps. The caller and event store own those responsibilities. The caller may
 include related orchestration records in the same transaction, but must not split
 a driver batch across transactions.
 
@@ -23,8 +24,17 @@ a driver batch across transactions.
 - Adapt the session to commit a complete batch before reporting any of its events.
   Coordinate this with atomic batch support in storage; sequential per-event writes
   do not satisfy the contract.
-- Keep explicit turn completion distinct from batch completion. A batch does not
-  necessarily end a message, model call, or turn.
+- Keep explicit model-call and turn completion distinct from batch completion.
+  A batch does not necessarily end a message, model call, or turn. The engine
+  records `ModelCallRequest` with fixed `inputThrough` before invocation, attaches
+  its reference to streamed outputs, and records `ModelCallResponse` with ordered
+  `outputEvents`, outcome, and usage when the attempt closes. Optional driver data
+  extends these common events without redefining their lifecycle.
+- Preserve immediate progress: commit completed tool requests and dispatch eligible
+  tools while the model call continues. Tool responses reference their own requests
+  and are not part of the call's `outputEvents`. Call completion does not wait for
+  tool completion; the next call waits for both and captures an input boundary
+  including the required results.
 - Update the supporting API documentation to state this boundary consistently.
 
 Yielding a batch does not acknowledge that it has been committed. Add no driver
