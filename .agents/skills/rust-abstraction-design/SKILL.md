@@ -199,8 +199,13 @@ concrete type can do.
 
 ## Keep the interface file to the contract
 
-An interface file presents operations and their documented semantics. It holds
-no fields, implementation bodies, private helpers, or storage details.
+An interface file presents operations and their documented semantics. The
+contract is the trait signatures and the error variants they can produce.
+Formatting, conversions, and other implementations belong with the concrete
+type or a dedicated implementation module.
+
+An interface file holds no fields, implementation bodies, private helpers, or
+storage details.
 
 Place the concrete implementation with its state, implementation helpers, and
 construction. Construction that selects configuration, such as an explicit
@@ -218,6 +223,25 @@ Before writing one, try:
 
 Do not restate the method name, parameters, or return type. Do not describe
 implementation details or concepts the interface does not own.
+
+## Describe failure with types
+
+Give an operation its own error type when operations fail in different ways.
+When every operation fails for the same reasons, one shared error is enough.
+
+Keep a shared low-level error small and opaque; do not leak positions, markers,
+checksums, or other implementation mechanics through it.
+
+Represent absence with `Option` rather than an error.
+
+## Keep abstractions proportional to their value
+
+Evaluate every wrapper, conversion, and helper type by whether it makes the
+code easier to understand and use. Keep those that earn their place.
+
+Removing a type rarely proves anything by itself. Readability, preventing an
+invalid state, or naming a concept can justify a type even when the program
+would work without it.
 
 ## Keep concepts together
 
@@ -253,6 +277,10 @@ When a simpler direction intentionally gives up a previous property:
 4. remove its code, tests, and authoritative documentation
 
 Do not continue defending or accommodating a superseded property after the tradeoff is accepted.
+
+Delete superseded formats and mechanisms outright. Compatibility or migration
+code needs a released representation and a current consumer; before the first
+release, remove the old path instead of carrying it forward.
 
 Architectural documents may contain future sections. Future sections do not constrain the current implementation unless the current milestone explicitly adopts them.
 
@@ -291,6 +319,6 @@ Before completing an abstraction change, verify:
 7. Failure behavior is explicit and tested.
 8. Persistence, logging, CLI, and provider policy remain outside unless they are the abstraction's stated responsibility.
 9. Dependency arrows point from integrations to contracts.
-10. Removing any type would make a current requirement impossible.
+10. Every type provides enough value to justify its complexity.
 11. Every explored but unaccepted idea has been excluded from implementation.
 12. Superseded guarantees have been removed from code, tests, and authoritative documentation.

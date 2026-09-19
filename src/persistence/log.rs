@@ -1,11 +1,10 @@
-use std::fs::{self, File, OpenOptions};
+use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use uuid::Uuid;
 
 use crate::conversation::ConversationEventRecord;
 
@@ -104,32 +103,6 @@ pub(super) fn create(conversation_directory: &Path, batch_bytes: &[u8]) -> io::R
         .open(&path)?;
     log_file.write_all(batch_bytes)?;
     log_file.sync_all()?;
-    File::open(parent_directory)?.sync_all()
-}
-
-pub(super) fn create_migrated(
-    conversation_directory: &Path,
-    legacy_events: &[ConversationEventRecord],
-    batch_bytes: &[u8],
-) -> io::Result<()> {
-    let mut contents = encode_batch(legacy_events)?;
-    contents.extend_from_slice(batch_bytes);
-    write_file_atomically(&log_path(conversation_directory), &contents)
-}
-
-pub(super) fn write_file_atomically(path: &Path, contents: &[u8]) -> io::Result<()> {
-    let parent_directory = path
-        .parent()
-        .ok_or_else(|| io::Error::other("persisted file has no parent directory"))?;
-    let temporary_path = parent_directory.join(format!(".tmp-{}", Uuid::now_v7().simple()));
-    let mut temporary_file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&temporary_path)?;
-    temporary_file.write_all(contents)?;
-    temporary_file.sync_all()?;
-    fs::rename(&temporary_path, path)?;
     File::open(parent_directory)?.sync_all()
 }
 

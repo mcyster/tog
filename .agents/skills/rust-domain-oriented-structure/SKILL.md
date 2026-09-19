@@ -123,6 +123,17 @@ The domain module should expose the types that form its useful interface.
 
 This allows internal organization to evolve without forcing unrelated code changes.
 
+## Minimize navigation
+
+Organize so a reader can understand a concept and its contract with minimal
+navigation. Put the contract and its supporting types where a reader looking
+for the concept finds them first, and keep implementation mechanics in child
+modules opened only when needed.
+
+Evaluate each module by whether it helps a reader find and understand a
+concept. Split cohesive responsibilities rather than grouping unrelated items
+by technical form.
+
 ## Domain abstractions and integrations
 
 Keep model independent domain concepts separate from provider specific integrations.

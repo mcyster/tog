@@ -71,6 +71,10 @@ crate::conversation::event::ConversationEvent
 crate::conversation::id::ConversationId
 ```
 
+A module root may present a contract rather than an implementation: trait
+signatures and error variants, with concrete implementations and mechanics in
+child modules. Keep the root understandable without opening its children.
+
 ## Naming
 
 Prefer meaningful domain names over generic module filenames.

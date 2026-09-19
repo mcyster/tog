@@ -287,7 +287,7 @@ The invariant is simply:
 
 > Replay the Conversation Log in position order.
 
-Phase 1 stores one append-only JSON Lines log file per conversation. A transaction opens with a `begin` marker line, carries one event record per line, and closes with a `commit` marker line containing the event count, position range, and a CRC32 of the transaction's event-line bytes. The log is directly readable and queryable with tools such as `jq`. A reader ignores a trailing transaction without a valid commit marker and rejects corruption inside committed history. The append boundary flushes and syncs each transaction before it is acknowledged. Existing per-event files remain readable and migrate into the log on the next append.
+Phase 1 stores one append-only JSON Lines log file per conversation. A transaction opens with a `begin` marker line, carries one event record per line, and closes with a `commit` marker line containing the event count, position range, and a CRC32 of the transaction's event-line bytes. The log is directly readable and queryable with tools such as `jq`. A reader ignores a trailing transaction without a valid commit marker and rejects corruption inside committed history. The append boundary flushes and syncs each transaction before it is acknowledged.
 
 Future persistence implementations may strengthen atomic allocation without changing the semantic model.
 

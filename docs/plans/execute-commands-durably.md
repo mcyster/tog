@@ -27,7 +27,6 @@ recovery from an incomplete trailing batch before dispatch is enabled. A success
 commit must survive the documented crash model. Do not silently discard corruption
 inside committed history. A crash after commit but before acknowledgment is
 ambiguous to the caller: stable batch/request identities must make retry safe.
-Resolve migration from the existing per-event files before switching storage.
 
 Commit together when the application intends transitions together, such as a user
 request and its immediate turn request, or the final prerequisite outcome and an
