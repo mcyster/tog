@@ -19,7 +19,7 @@ async fn main() -> ExitCode {
         | Ok(CommandOutcome::ConversationLogged) => ExitCode::SUCCESS,
         Ok(CommandOutcome::Turn(TurnOutcome::Failed)) => ExitCode::FAILURE,
         Err(error) => {
-            eprintln!("Error: {error:?}");
+            eprintln!("Error: {error}");
             ExitCode::FAILURE
         }
     }

@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use schemars::json_schema;
 use serde_json::{Map, Value, json};
 
-use super::{ConversationEventStore, FileEventStore, legacy, log};
+use super::{ConversationEventStore, ConversationEventStoreError, FileEventStore, legacy, log};
 use crate::conversation::{
     AssistantResponse, ConversationCommandId, ConversationEvent, ConversationEventBatch,
     ConversationEventKind, ConversationEventRecord, ConversationFact, ConversationId,
@@ -151,7 +151,11 @@ fn event_store_rejects_committed_positions_with_a_gap() {
     let error = store
         .load(conversation_id)
         .expect_err("the incomplete log should be rejected");
-    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert!(matches!(
+        error,
+        ConversationEventStoreError::Storage(ref storage_error)
+            if storage_error.kind() == std::io::ErrorKind::InvalidData
+    ));
     assert_eq!(
         error.to_string(),
         "expected conversation event position 1, found 2"
@@ -275,7 +279,11 @@ fn corruption_inside_committed_history_is_rejected() {
     let error = store
         .load(conversation_id)
         .expect_err("corruption inside committed history should be rejected");
-    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert!(matches!(
+        error,
+        ConversationEventStoreError::Storage(ref storage_error)
+            if storage_error.kind() == std::io::ErrorKind::InvalidData
+    ));
 }
 
 #[test]
@@ -497,7 +505,10 @@ fn latest_conversation_is_absent_without_conversations() {
         .latest_id()
         .expect_err("the latest conversation should be missing");
 
-    assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+    assert!(matches!(
+        error,
+        ConversationEventStoreError::NoConversations
+    ));
     assert_eq!(error.to_string(), "no conversations found");
 }
 
@@ -543,7 +554,10 @@ fn latest_conversation_ignores_an_earlier_schema() {
     let error = store
         .latest_id()
         .expect_err("the earlier schema should not count as a conversation");
-    assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+    assert!(matches!(
+        error,
+        ConversationEventStoreError::NoConversations
+    ));
 
     let current_conversation_id = ConversationId::new();
     store

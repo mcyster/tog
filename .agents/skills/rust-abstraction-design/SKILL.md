@@ -207,10 +207,17 @@ construction. Construction that selects configuration, such as an explicit
 location or an environment-derived default, belongs to the concrete type, not
 the trait.
 
-Document only what the signature cannot express: meaning, guarantees, and
-failure behavior. Do not restate the method name, parameters, or return type.
-Prefer a descriptive name over a comment, and omit the comment when the name
-already conveys the operation.
+Prefer no comments. Treat a comment as a last resort for meaning that no name
+or type can carry.
+
+Before writing one, try:
+
+* a more specific method or type name
+* a stronger parameter or return type that makes the condition impossible
+* an error type whose variants name each failing condition
+
+Do not restate the method name, parameters, or return type. Do not describe
+implementation details or concepts the interface does not own.
 
 ## Keep concepts together
 
@@ -255,6 +262,8 @@ Pause and reconsider when:
 
 * an interface file contains fields, implementation bodies, or private helpers
 * a comment restates the method name, parameters, or return type
+* a comment describes implementation details or concepts the interface does not own
+* a failure condition exists only in a comment instead of the return type
 * a trait exposes construction or configuration that only one implementation can choose
 * a method is on the contract only because its implementation needs it
 * an invocation input contains object identity, history, model selection, and configuration

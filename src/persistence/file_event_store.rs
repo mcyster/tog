@@ -1,10 +1,9 @@
-use std::error::Error;
 use std::fs;
 use std::io;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-use super::ConversationEventStore;
+use super::{ConversationEventStore, ConversationEventStoreError};
 use super::{legacy, log};
 use crate::conversation::{
     Conversation, ConversationEvent, ConversationEventBatch, ConversationEventKind,
@@ -49,14 +48,18 @@ impl FileEventStore {
 }
 
 impl ConversationEventStore for FileEventStore {
-    fn load(&self, conversation_id: ConversationId) -> io::Result<Conversation> {
+    fn load(
+        &self,
+        conversation_id: ConversationId,
+    ) -> Result<Conversation, ConversationEventStoreError> {
         let events = self.load_events(conversation_id)?;
-        let conversation = Conversation::from_events(events).map_err(invalid_conversation_data)?;
+        let conversation = Conversation::from_events(events)
+            .map_err(ConversationEventStoreError::InvalidConversation)?;
         if conversation.id() != conversation_id {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("loaded {}, expected {conversation_id}", conversation.id()),
-            ));
+            return Err(ConversationEventStoreError::ConversationMismatch {
+                expected: conversation_id,
+                found: conversation.id(),
+            });
         }
         Ok(conversation)
     }
@@ -64,7 +67,7 @@ impl ConversationEventStore for FileEventStore {
     fn load_events(
         &self,
         conversation_id: ConversationId,
-    ) -> io::Result<Vec<ConversationEventRecord>> {
+    ) -> Result<Vec<ConversationEventRecord>, ConversationEventStoreError> {
         let conversation_directory = self.conversation_directory(conversation_id);
         if let Some(log) = log::read(&conversation_directory)? {
             return Ok(log.events);
@@ -72,13 +75,12 @@ impl ConversationEventStore for FileEventStore {
         if let Some(events) = legacy::read_events(&conversation_directory)? {
             return Ok(events);
         }
-        Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("no events found for {conversation_id}"),
+        Err(ConversationEventStoreError::ConversationNotFound(
+            conversation_id,
         ))
     }
 
-    fn latest_id(&self) -> io::Result<ConversationId> {
+    fn latest_id(&self) -> Result<ConversationId, ConversationEventStoreError> {
         let conversations_directory = self.root_directory.join(CONVERSATIONS_DIRECTORY_NAME);
         let mut latest_event: Option<ConversationEventRecord> = None;
         for directory_entry in fs::read_dir(&conversations_directory)? {
@@ -98,14 +100,14 @@ impl ConversationEventStore for FileEventStore {
         }
         latest_event
             .map(|event| event.conversation_id)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no conversations found"))
+            .ok_or(ConversationEventStoreError::NoConversations)
     }
 
     fn append(
         &self,
         conversation_id: ConversationId,
         events: ConversationEventBatch,
-    ) -> io::Result<Vec<ConversationEventRecord>> {
+    ) -> Result<Vec<ConversationEventRecord>, ConversationEventStoreError> {
         let kinds = stored_event_kinds(events)?;
         let conversation_directory = self.conversation_directory(conversation_id);
         create_private_directory(&conversation_directory)?;
@@ -174,17 +176,17 @@ fn read_last_conversation_event(
 fn validate_existing_events(
     conversation_id: ConversationId,
     existing_events: &[ConversationEventRecord],
-) -> io::Result<Option<u64>> {
+) -> Result<Option<u64>, ConversationEventStoreError> {
     if existing_events.is_empty() {
         return Ok(None);
     }
-    let conversation =
-        Conversation::from_events(existing_events.to_vec()).map_err(invalid_conversation_data)?;
+    let conversation = Conversation::from_events(existing_events.to_vec())
+        .map_err(ConversationEventStoreError::InvalidConversation)?;
     if conversation.id() != conversation_id {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("loaded {}, expected {conversation_id}", conversation.id()),
-        ));
+        return Err(ConversationEventStoreError::ConversationMismatch {
+            expected: conversation_id,
+            found: conversation.id(),
+        });
     }
     log::ensure_contiguous_positions(existing_events)?;
     Ok(existing_events.last().map(|event| event.position))
@@ -248,8 +250,4 @@ fn next_position(previous_position: Option<u64>) -> io::Result<u64> {
 fn create_private_directory(path: &Path) -> io::Result<()> {
     fs::create_dir_all(path)?;
     fs::set_permissions(path, fs::Permissions::from_mode(0o700))
-}
-
-fn invalid_conversation_data(error: impl Error + Send + Sync + 'static) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, error)
 }
