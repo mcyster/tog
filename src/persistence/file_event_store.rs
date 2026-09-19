@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use super::{ConversationEventStore, ConversationEventStoreError};
 use super::{legacy, log};
 use crate::conversation::{
-    Conversation, ConversationEvent, ConversationEventBatch, ConversationEventKind,
-    ConversationEventRecord, ConversationId, StoredConversationEventKind,
+    ConversationEvent, ConversationEventKind, ConversationEventRecord, ConversationId,
+    StoredConversationEventKind,
 };
 
 const CONVERSATIONS_DIRECTORY_NAME: &str = "conversations";
@@ -51,33 +51,19 @@ impl ConversationEventStore for FileEventStore {
     fn load(
         &self,
         conversation_id: ConversationId,
-    ) -> Result<Conversation, ConversationEventStoreError> {
-        let events = self.load_events(conversation_id)?;
-        let conversation = Conversation::from_events(events)
-            .map_err(ConversationEventStoreError::InvalidConversation)?;
-        if conversation.id() != conversation_id {
-            return Err(ConversationEventStoreError::ConversationMismatch {
-                expected: conversation_id,
-                found: conversation.id(),
-            });
-        }
-        Ok(conversation)
-    }
-
-    fn load_events(
-        &self,
-        conversation_id: ConversationId,
     ) -> Result<Vec<ConversationEventRecord>, ConversationEventStoreError> {
         let conversation_directory = self.conversation_directory(conversation_id);
-        if let Some(log) = log::read(&conversation_directory)? {
-            return Ok(log.events);
-        }
-        if let Some(events) = legacy::read_events(&conversation_directory)? {
-            return Ok(events);
-        }
-        Err(ConversationEventStoreError::ConversationNotFound(
-            conversation_id,
-        ))
+        let events = if let Some(log) = log::read(&conversation_directory)? {
+            log.events
+        } else if let Some(events) = legacy::read_events(&conversation_directory)? {
+            events
+        } else {
+            return Err(ConversationEventStoreError::ConversationNotFound(
+                conversation_id,
+            ));
+        };
+        ensure_records_belong_to(conversation_id, &events)?;
+        Ok(events)
     }
 
     fn latest_id(&self) -> Result<ConversationId, ConversationEventStoreError> {
@@ -106,7 +92,7 @@ impl ConversationEventStore for FileEventStore {
     fn append(
         &self,
         conversation_id: ConversationId,
-        events: ConversationEventBatch,
+        events: Vec<ConversationEvent>,
     ) -> Result<Vec<ConversationEventRecord>, ConversationEventStoreError> {
         let kinds = stored_event_kinds(events)?;
         let conversation_directory = self.conversation_directory(conversation_id);
@@ -180,16 +166,24 @@ fn validate_existing_events(
     if existing_events.is_empty() {
         return Ok(None);
     }
-    let conversation = Conversation::from_events(existing_events.to_vec())
-        .map_err(ConversationEventStoreError::InvalidConversation)?;
-    if conversation.id() != conversation_id {
-        return Err(ConversationEventStoreError::ConversationMismatch {
-            expected: conversation_id,
-            found: conversation.id(),
-        });
-    }
+    ensure_records_belong_to(conversation_id, existing_events)?;
     log::ensure_contiguous_positions(existing_events)?;
     Ok(existing_events.last().map(|event| event.position))
+}
+
+fn ensure_records_belong_to(
+    conversation_id: ConversationId,
+    events: &[ConversationEventRecord],
+) -> Result<(), ConversationEventStoreError> {
+    for event in events {
+        if event.conversation_id != conversation_id {
+            return Err(ConversationEventStoreError::ConversationMismatch {
+                expected: conversation_id,
+                found: event.conversation_id,
+            });
+        }
+    }
+    Ok(())
 }
 
 fn build_event_batch(
@@ -218,9 +212,16 @@ fn build_event_batch(
 }
 
 fn stored_event_kinds(
-    events: ConversationEventBatch,
-) -> io::Result<Vec<StoredConversationEventKind>> {
-    events.into_events().into_iter().map(stored_kind).collect()
+    events: Vec<ConversationEvent>,
+) -> Result<Vec<StoredConversationEventKind>, ConversationEventStoreError> {
+    if events.is_empty() {
+        return Err(ConversationEventStoreError::EmptyBatch);
+    }
+    events
+        .into_iter()
+        .map(stored_kind)
+        .collect::<io::Result<Vec<_>>>()
+        .map_err(ConversationEventStoreError::Storage)
 }
 
 fn stored_kind(event: ConversationEvent) -> io::Result<StoredConversationEventKind> {

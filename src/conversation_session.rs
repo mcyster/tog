@@ -5,10 +5,9 @@ use std::fmt::{Display, Formatter};
 use futures_util::StreamExt;
 
 use crate::conversation::{
-    ConversationCommand, ConversationCommandId, ConversationEvent, ConversationEventBatch,
-    ConversationFact, ConversationId, ConversationLifecycle, ConversationMessage,
-    ConversationProblem, ConversationTurnId, ToolResponse, TurnOutcome, UserContent,
-    UserMessageRequest, UserPrompt,
+    Conversation, ConversationCommand, ConversationCommandId, ConversationEvent, ConversationFact,
+    ConversationId, ConversationLifecycle, ConversationMessage, ConversationProblem,
+    ConversationTurnId, ToolResponse, TurnOutcome, UserContent, UserMessageRequest, UserPrompt,
 };
 use crate::model_driver::{ModelDriver, ModelDriverError, ModelDriverOutput, TurnInput};
 use crate::persistence::ConversationEventStore;
@@ -51,7 +50,7 @@ impl<Store: ConversationEventStore> ConversationSession<Store> {
         model_driver: Box<dyn ModelDriver>,
         tool_registry: ToolRegistry,
     ) -> ConversationSessionResult<Self> {
-        event_store.load(conversation_id)?;
+        Conversation::from_events(event_store.load(conversation_id)?)?;
         Ok(Self {
             conversation_id,
             event_store,
@@ -71,12 +70,12 @@ impl<Store: ConversationEventStore> ConversationSession<Store> {
         let command_id = ConversationCommandId::new();
         self.event_store.append(
             self.conversation_id,
-            ConversationEventBatch::from(ConversationEvent::Command(
+            vec![ConversationEvent::Command(
                 ConversationCommand::UserMessageRequested(UserMessageRequest {
                     content: vec![UserContent::Text(user_prompt.text().to_owned())],
                     command_id,
                 }),
-            )),
+            )],
         )?;
         Ok(command_id)
     }
@@ -88,12 +87,12 @@ impl<Store: ConversationEventStore> ConversationSession<Store> {
         let turn_id = ConversationTurnId::new();
         self.event_store.append(
             self.conversation_id,
-            ConversationEventBatch::from(ConversationEvent::Command(
+            vec![ConversationEvent::Command(
                 ConversationCommand::TurnRequested {
                     command_id: ConversationCommandId::new(),
                     turn_id,
                 },
-            )),
+            )],
         )?;
         let source = self.model_driver.source().clone();
         let mut assistant_responded = false;
@@ -104,7 +103,8 @@ impl<Store: ConversationEventStore> ConversationSession<Store> {
             self.append_shared_fact(ConversationFact::ToolsAvailable {
                 tools: self.tool_registry.definitions(),
             })?;
-            let conversation = self.event_store.load(self.conversation_id)?;
+            let conversation =
+                Conversation::from_events(self.event_store.load(self.conversation_id)?)?;
             let pending_request_ids = conversation
                 .pending_user_requests()
                 .into_iter()
@@ -216,10 +216,7 @@ impl<Store: ConversationEventStore> ConversationSession<Store> {
                         }
                     }
                 }
-                self.event_store.append(
-                    self.conversation_id,
-                    ConversationEventBatch::try_from(events)?,
-                )?;
+                self.event_store.append(self.conversation_id, events)?;
                 for progress in progress_reports {
                     report_progress(progress)?;
                 }
@@ -265,10 +262,8 @@ impl<Store: ConversationEventStore> ConversationSession<Store> {
     }
 
     fn append_shared_fact(&self, fact: ConversationFact) -> ConversationSessionResult<()> {
-        self.event_store.append(
-            self.conversation_id,
-            ConversationEventBatch::from(ConversationEvent::Fact(fact)),
-        )?;
+        self.event_store
+            .append(self.conversation_id, vec![ConversationEvent::Fact(fact)])?;
         Ok(())
     }
 }
@@ -614,7 +609,6 @@ mod tests {
             .expect("the store should reopen")
             .load(conversation_id)
             .expect("the conversation should load")
-            .events()
             .iter()
             .filter_map(|event| match &event.kind {
                 StoredConversationEventKind::Shared(ConversationEventKind::Fact(fact)) => {
@@ -738,7 +732,6 @@ mod tests {
             .load(conversation_id)
             .expect("the conversation should load");
         let facts = conversation
-            .events()
             .iter()
             .filter_map(|event| match &event.kind {
                 StoredConversationEventKind::Shared(ConversationEventKind::Fact(fact)) => {

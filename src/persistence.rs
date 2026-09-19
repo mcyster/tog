@@ -1,3 +1,4 @@
+mod error;
 mod file_event_store;
 mod legacy;
 mod log;
@@ -6,19 +7,12 @@ mod tests;
 
 pub(crate) use file_event_store::FileEventStore;
 
-use std::error::Error;
-use std::fmt::{Display, Formatter};
 use std::io;
 
-use crate::conversation::{
-    Conversation, ConversationEventBatch, ConversationEventRecord, ConversationId,
-    InvalidConversation,
-};
+use crate::conversation::{ConversationEvent, ConversationEventRecord, ConversationId};
 
 pub(crate) trait ConversationEventStore {
-    fn load(&self, id: ConversationId) -> Result<Conversation, ConversationEventStoreError>;
-
-    fn load_events(
+    fn load(
         &self,
         id: ConversationId,
     ) -> Result<Vec<ConversationEventRecord>, ConversationEventStoreError>;
@@ -28,7 +22,7 @@ pub(crate) trait ConversationEventStore {
     fn append(
         &self,
         id: ConversationId,
-        events: ConversationEventBatch,
+        events: Vec<ConversationEvent>,
     ) -> Result<Vec<ConversationEventRecord>, ConversationEventStoreError>;
 }
 
@@ -40,28 +34,6 @@ pub(crate) enum ConversationEventStoreError {
         expected: ConversationId,
         found: ConversationId,
     },
-    InvalidConversation(InvalidConversation),
+    EmptyBatch,
     Storage(io::Error),
-}
-
-impl Display for ConversationEventStoreError {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::NoConversations => write!(formatter, "no conversations found"),
-            Self::ConversationNotFound(id) => write!(formatter, "no events found for {id}"),
-            Self::ConversationMismatch { expected, found } => {
-                write!(formatter, "loaded {found}, expected {expected}")
-            }
-            Self::InvalidConversation(error) => Display::fmt(error, formatter),
-            Self::Storage(error) => Display::fmt(error, formatter),
-        }
-    }
-}
-
-impl Error for ConversationEventStoreError {}
-
-impl From<io::Error> for ConversationEventStoreError {
-    fn from(error: io::Error) -> Self {
-        Self::Storage(error)
-    }
 }

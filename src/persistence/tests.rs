@@ -6,7 +6,7 @@ use serde_json::{Map, Value, json};
 
 use super::{ConversationEventStore, ConversationEventStoreError, FileEventStore, legacy, log};
 use crate::conversation::{
-    AssistantResponse, ConversationCommandId, ConversationEvent, ConversationEventBatch,
+    AssistantResponse, Conversation, ConversationCommandId, ConversationEvent,
     ConversationEventKind, ConversationEventRecord, ConversationFact, ConversationId,
     ConversationMessage, ConversationTurnId, ModelData, ModelInvocationId, ToolCallId,
     ToolDefinition, ToolName, ToolOutcome, ToolRequest, ToolResponse, UserContent,
@@ -57,16 +57,10 @@ fn event_store_assigns_canonical_envelope_metadata() {
     let conversation_id = ConversationId::new();
 
     let first_batch = store
-        .append(
-            conversation_id,
-            ConversationEventBatch::from(user_fact("first")),
-        )
+        .append(conversation_id, vec![user_fact("first")])
         .expect("the first event should be persisted");
     let second_batch = store
-        .append(
-            conversation_id,
-            ConversationEventBatch::from(user_fact("second")),
-        )
+        .append(conversation_id, vec![user_fact("second")])
         .expect("the second event should be persisted");
     let first_event = &first_batch[0];
     let second_event = &second_batch[0];
@@ -81,14 +75,13 @@ fn event_store_assigns_canonical_envelope_metadata() {
     assert_ne!(second_event.timestamp, time::OffsetDateTime::UNIX_EPOCH);
     assert_ne!(second_event.id, first_event.id);
 
-    let conversation = store
+    let events = store
         .load(conversation_id)
         .expect("the conversation should load");
-    assert_eq!(conversation.events()[0].position, 0);
-    assert_eq!(conversation.events()[1].position, 1);
+    assert_eq!(events[0].position, 0);
+    assert_eq!(events[1].position, 1);
     assert!(
-        conversation
-            .events()
+        events
             .iter()
             .all(|event| event.conversation_id == conversation_id)
     );
@@ -109,12 +102,7 @@ fn appending_an_event_batch_commits_its_events_in_order() {
     let appended = store
         .append(
             conversation_id,
-            ConversationEventBatch::try_from(vec![
-                user_fact("first"),
-                user_fact("second"),
-                user_fact("third"),
-            ])
-            .expect("the batch should not be empty"),
+            vec![user_fact("first"), user_fact("second"), user_fact("third")],
         )
         .expect("the batch should be persisted");
 
@@ -125,9 +113,7 @@ fn appending_an_event_batch_commits_its_events_in_order() {
             .collect::<Vec<_>>(),
         [0, 1, 2]
     );
-    let loaded = store
-        .load_events(conversation_id)
-        .expect("the log should load");
+    let loaded = store.load(conversation_id).expect("the log should load");
     assert_eq!(loaded, appended);
 }
 
@@ -162,10 +148,7 @@ fn event_store_rejects_committed_positions_with_a_gap() {
     );
     assert!(
         store
-            .append(
-                conversation_id,
-                ConversationEventBatch::from(user_fact("third"))
-            )
+            .append(conversation_id, vec![user_fact("third")])
             .is_err()
     );
 }
@@ -175,10 +158,7 @@ fn recovery_ignores_an_incomplete_trailing_batch() {
     let store = temporary_store();
     let conversation_id = ConversationId::new();
     store
-        .append(
-            conversation_id,
-            ConversationEventBatch::from(user_fact("committed")),
-        )
+        .append(conversation_id, vec![user_fact("committed")])
         .expect("the committed event should be persisted");
     let log_path = conversation_event_log_path(&store, conversation_id);
     let torn_batch = log::encode_batch(&[ConversationEventRecord::new(
@@ -196,20 +176,15 @@ fn recovery_ignores_an_incomplete_trailing_batch() {
         .expect("the torn tail should be written");
 
     let loaded = store
-        .load_events(conversation_id)
+        .load(conversation_id)
         .expect("the committed log should load");
     assert_eq!(loaded.len(), 1);
     assert_eq!(loaded[0].position, 0);
 
     store
-        .append(
-            conversation_id,
-            ConversationEventBatch::from(user_fact("after")),
-        )
+        .append(conversation_id, vec![user_fact("after")])
         .expect("the torn tail should be discarded");
-    let loaded = store
-        .load_events(conversation_id)
-        .expect("the log should load");
+    let loaded = store.load(conversation_id).expect("the log should load");
     assert_eq!(loaded.len(), 2);
     assert_eq!(loaded[1].position, 1);
 }
@@ -219,10 +194,7 @@ fn recovery_ignores_a_complete_transaction_without_a_commit_marker() {
     let store = temporary_store();
     let conversation_id = ConversationId::new();
     store
-        .append(
-            conversation_id,
-            ConversationEventBatch::from(user_fact("committed")),
-        )
+        .append(conversation_id, vec![user_fact("committed")])
         .expect("the committed event should be persisted");
     let log_path = conversation_event_log_path(&store, conversation_id);
     let mut uncommitted = Vec::new();
@@ -239,20 +211,15 @@ fn recovery_ignores_a_complete_transaction_without_a_commit_marker() {
         .expect("the uncommitted transaction should be written");
 
     let loaded = store
-        .load_events(conversation_id)
+        .load(conversation_id)
         .expect("the committed log should load");
     assert_eq!(loaded.len(), 1);
     assert_eq!(loaded[0].position, 0);
 
     store
-        .append(
-            conversation_id,
-            ConversationEventBatch::from(user_fact("after")),
-        )
+        .append(conversation_id, vec![user_fact("after")])
         .expect("the uncommitted transaction should be discarded");
-    let loaded = store
-        .load_events(conversation_id)
-        .expect("the log should load");
+    let loaded = store.load(conversation_id).expect("the log should load");
     assert_eq!(loaded.len(), 2);
     assert_eq!(loaded[1].position, 1);
 }
@@ -262,10 +229,7 @@ fn corruption_inside_committed_history_is_rejected() {
     let store = temporary_store();
     let conversation_id = ConversationId::new();
     store
-        .append(
-            conversation_id,
-            ConversationEventBatch::from(user_fact("first")),
-        )
+        .append(conversation_id, vec![user_fact("first")])
         .expect("the event should be persisted");
     let log_path = conversation_event_log_path(&store, conversation_id);
     let mut bytes = std::fs::read(&log_path).expect("the log should be readable");
@@ -306,13 +270,13 @@ fn event_store_persists_model_data_on_the_event_envelope() {
         turn_id: Some(ConversationTurnId::new()),
     });
     let batch = store
-        .append(conversation_id, ConversationEventBatch::from(assistant))
+        .append(conversation_id, vec![assistant])
         .expect("the model event should be persisted");
 
-    let conversation = store
+    let loaded = store
         .load(conversation_id)
         .expect("the conversation should load");
-    assert_eq!(conversation.events()[0], batch[0]);
+    assert_eq!(loaded[0], batch[0]);
 }
 
 #[test]
@@ -346,35 +310,35 @@ fn event_store_round_trips_tool_definitions_requests_and_responses() {
     store
         .append(
             conversation_id,
-            ConversationEventBatch::from(ConversationEvent::Fact(
-                ConversationFact::ToolsAvailable {
-                    tools: vec![tool_definition.clone()],
-                },
-            )),
+            vec![ConversationEvent::Fact(ConversationFact::ToolsAvailable {
+                tools: vec![tool_definition.clone()],
+            })],
         )
         .expect("the tool definitions should persist");
     store
         .append(
             conversation_id,
-            ConversationEventBatch::from(ConversationEvent::Fact(ConversationFact::ToolRequest {
+            vec![ConversationEvent::Fact(ConversationFact::ToolRequest {
                 request: request.clone(),
                 turn_id: Some(turn_id),
-            })),
+            })],
         )
         .expect("the tool request should persist");
     store
         .append(
             conversation_id,
-            ConversationEventBatch::from(ConversationEvent::Fact(ConversationFact::ToolResponse {
+            vec![ConversationEvent::Fact(ConversationFact::ToolResponse {
                 response: response.clone(),
                 turn_id: Some(turn_id),
-            })),
+            })],
         )
         .expect("the tool response should persist");
 
-    let conversation = store
+    let events = store
         .load(conversation_id)
         .expect("the conversation should load");
+    let conversation =
+        Conversation::from_events(events).expect("the stored events should reconstruct");
 
     assert_eq!(conversation.available_tools(), [tool_definition]);
     assert!(matches!(
@@ -408,20 +372,17 @@ fn event_store_migrates_legacy_per_event_files_on_append() {
     write_legacy_event(&legacy_directory, &second, "second");
 
     let loaded = store
-        .load_events(conversation_id)
+        .load(conversation_id)
         .expect("the legacy events should load");
     assert_eq!(loaded, vec![first.clone(), second.clone()]);
 
     let appended = store
-        .append(
-            conversation_id,
-            ConversationEventBatch::from(user_fact("third")),
-        )
+        .append(conversation_id, vec![user_fact("third")])
         .expect("the new event should migrate the legacy log");
     assert_eq!(appended[0].position, 2);
 
     let loaded = store
-        .load_events(conversation_id)
+        .load(conversation_id)
         .expect("the migrated log should load");
     assert_eq!(loaded.len(), 3);
     assert_eq!(loaded[0], first);
@@ -440,7 +401,7 @@ fn set_event_timestamp(
     timestamp: time::OffsetDateTime,
 ) {
     let mut events = store
-        .load_events(event.conversation_id)
+        .load(event.conversation_id)
         .expect("the log should load");
     for loaded_event in &mut events {
         if loaded_event.id == event.id {
@@ -460,16 +421,10 @@ fn latest_conversation_is_the_most_recently_active_one() {
     let first_conversation_id = ConversationId::new();
     let second_conversation_id = ConversationId::new();
     let first_batch = store
-        .append(
-            first_conversation_id,
-            ConversationEventBatch::from(user_fact("first")),
-        )
+        .append(first_conversation_id, vec![user_fact("first")])
         .expect("the first event should be persisted");
     let second_batch = store
-        .append(
-            second_conversation_id,
-            ConversationEventBatch::from(user_fact("second")),
-        )
+        .append(second_conversation_id, vec![user_fact("second")])
         .expect("the second event should be persisted");
     set_event_timestamp(&store, &first_batch[0], timestamp(1));
     set_event_timestamp(&store, &second_batch[0], timestamp(2));
@@ -482,10 +437,7 @@ fn latest_conversation_is_the_most_recently_active_one() {
     );
 
     let third_batch = store
-        .append(
-            first_conversation_id,
-            ConversationEventBatch::from(user_fact("third")),
-        )
+        .append(first_conversation_id, vec![user_fact("third")])
         .expect("the third event should be persisted");
     set_event_timestamp(&store, &third_batch[0], timestamp(3));
 
@@ -517,10 +469,7 @@ fn latest_conversation_ignores_conversations_without_events() {
     let store = temporary_store();
     let conversation_id = ConversationId::new();
     store
-        .append(
-            conversation_id,
-            ConversationEventBatch::from(user_fact("first")),
-        )
+        .append(conversation_id, vec![user_fact("first")])
         .expect("the event should be persisted");
     let empty_conversation_id = ConversationId::new();
     std::fs::create_dir_all(store.conversation_directory(empty_conversation_id))
@@ -561,10 +510,7 @@ fn latest_conversation_ignores_an_earlier_schema() {
 
     let current_conversation_id = ConversationId::new();
     store
-        .append(
-            current_conversation_id,
-            ConversationEventBatch::from(user_fact("current")),
-        )
+        .append(current_conversation_id, vec![user_fact("current")])
         .expect("the event should be persisted");
 
     assert_eq!(

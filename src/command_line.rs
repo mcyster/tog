@@ -85,7 +85,7 @@ impl CommandLine {
                     Some(conversation_id) => conversation_id,
                     None => event_store.latest_id()?,
                 };
-                let events = event_store.load_events(conversation_id)?;
+                let events = event_store.load(conversation_id)?;
                 let standard_output = io::stdout();
                 let mut standard_output = standard_output.lock();
                 write_conversation_log(&events, &mut standard_output)?;
