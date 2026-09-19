@@ -1,5 +1,4 @@
-use super::ModelDriverOutputBatch;
-use super::output::EmptyModelDriverOutputBatch;
+use super::{EmptyModelDriverOutputBatch, ModelDriverOutputBatch};
 
 #[test]
 fn an_empty_output_batch_is_rejected() {

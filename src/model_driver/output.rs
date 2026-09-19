@@ -1,7 +1,6 @@
-use std::error::Error;
-use std::fmt::{Display, Formatter};
-
 use crate::conversation::{ConversationEventExtension, ConversationMessage, ToolRequest};
+
+use super::EmptyModelDriverOutputBatch;
 
 pub(crate) enum ModelDriverOutput {
     Message(ConversationMessage),
@@ -37,14 +36,3 @@ impl From<ModelDriverOutput> for ModelDriverOutputBatch {
         }
     }
 }
-
-#[derive(Debug, Eq, PartialEq)]
-pub(crate) struct EmptyModelDriverOutputBatch;
-
-impl Display for EmptyModelDriverOutputBatch {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "a model driver output batch must not be empty")
-    }
-}
-
-impl Error for EmptyModelDriverOutputBatch {}

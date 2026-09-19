@@ -30,3 +30,6 @@ pub(crate) enum ModelDriverError {
     UnexpectedUserRequest { command_id: ConversationCommandId },
     IncompleteTurn,
 }
+
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct EmptyModelDriverOutputBatch;
