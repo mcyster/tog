@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use uuid::Uuid;
 
 use crate::conversation::{
@@ -16,9 +17,6 @@ use crate::conversation::{
 const CONVERSATIONS_DIRECTORY_NAME: &str = "conversations";
 const EVENT_LOG_FILE_NAME: &str = "events.log";
 const LEGACY_EVENTS_DIRECTORY_NAME: &str = "events";
-const EVENT_FRAME_KIND: u8 = 1;
-const COMMIT_FRAME_KIND: u8 = 2;
-const FRAME_HEADER_LENGTH: usize = 9;
 const CRC32_IEEE_POLYNOMIAL: u32 = 0xedb8_8320;
 
 pub(crate) struct EventStore {
@@ -195,10 +193,18 @@ struct ConversationLog {
 }
 
 #[derive(Deserialize, Serialize)]
+#[serde(tag = "transaction", rename_all = "snake_case")]
+enum ConversationLogMarker {
+    Begin,
+    Commit(ConversationEventBatchCommit),
+}
+
+#[derive(Deserialize, Serialize)]
 struct ConversationEventBatchCommit {
     event_count: u64,
     first_position: u64,
     last_position: u64,
+    crc: String,
 }
 
 fn stored_kind(event: ConversationEvent) -> io::Result<StoredConversationEventKind> {
@@ -251,31 +257,63 @@ fn read_conversation_log(path: &Path) -> io::Result<Option<ConversationLog>> {
 fn decode_log(bytes: &[u8]) -> io::Result<ConversationLog> {
     let mut events = Vec::new();
     let mut pending_events: Vec<ConversationEventRecord> = Vec::new();
+    let mut pending_bytes: Vec<u8> = Vec::new();
+    let mut transaction_open = false;
     let mut committed_length = 0_u64;
     let mut offset = 0_usize;
-    while let Some((kind, payload, frame_end)) = next_frame(bytes, offset)? {
-        match kind {
-            EVENT_FRAME_KIND => {
-                let event = serde_json::from_slice(payload).map_err(io::Error::other)?;
-                pending_events.push(event);
+    while let Some(line_length) = bytes[offset..].iter().position(|byte| *byte == b'\n') {
+        let line_end = offset + line_length;
+        let line = &bytes[offset..line_end];
+        let line_bytes = &bytes[offset..=line_end];
+        let value: Value = serde_json::from_slice(line).map_err(|error| {
+            corruption(format!(
+                "conversation log line at byte {offset} is not valid JSON: {error}"
+            ))
+        })?;
+        if value.get("transaction").is_some() {
+            let marker: ConversationLogMarker = serde_json::from_value(value).map_err(|error| {
+                corruption(format!(
+                    "conversation log marker at byte {offset} is invalid: {error}"
+                ))
+            })?;
+            match marker {
+                ConversationLogMarker::Begin => {
+                    if transaction_open {
+                        return Err(corruption(format!(
+                            "conversation log line at byte {offset} opens a transaction while one is open"
+                        )));
+                    }
+                    transaction_open = true;
+                }
+                ConversationLogMarker::Commit(commit) => {
+                    if !transaction_open {
+                        return Err(corruption(format!(
+                            "conversation log line at byte {offset} commits without an open transaction"
+                        )));
+                    }
+                    validate_batch_commit(&commit, &pending_events, &pending_bytes)?;
+                    events.append(&mut pending_events);
+                    pending_bytes.clear();
+                    transaction_open = false;
+                    committed_length = u64::try_from(line_end + 1).map_err(io::Error::other)?;
+                }
             }
-            COMMIT_FRAME_KIND => {
-                let commit: ConversationEventBatchCommit =
-                    serde_json::from_slice(payload).map_err(io::Error::other)?;
-                validate_batch_commit(&commit, &pending_events)?;
-                events.append(&mut pending_events);
-                committed_length = u64::try_from(frame_end).map_err(io::Error::other)?;
+        } else {
+            if !transaction_open {
+                return Err(corruption(format!(
+                    "conversation log event at byte {offset} is outside a transaction"
+                )));
             }
-            unknown_kind => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!(
-                        "conversation log frame at byte {offset} has unknown kind {unknown_kind}"
-                    ),
-                ));
-            }
+            let event: ConversationEventRecord =
+                serde_json::from_value(value).map_err(|error| {
+                    corruption(format!(
+                        "conversation log event at byte {offset} is invalid: {error}"
+                    ))
+                })?;
+            pending_events.push(event);
+            pending_bytes.extend_from_slice(line_bytes);
         }
-        offset = frame_end;
+        offset = line_end + 1;
     }
     Ok(ConversationLog {
         events,
@@ -283,57 +321,23 @@ fn decode_log(bytes: &[u8]) -> io::Result<ConversationLog> {
     })
 }
 
-fn next_frame(bytes: &[u8], offset: usize) -> io::Result<Option<(u8, &[u8], usize)>> {
-    let Some(header_end) = offset.checked_add(FRAME_HEADER_LENGTH) else {
-        return Ok(None);
-    };
-    if header_end > bytes.len() {
-        return Ok(None);
-    }
-    let kind = bytes[offset];
-    let payload_length = u32::from_be_bytes([
-        bytes[offset + 1],
-        bytes[offset + 2],
-        bytes[offset + 3],
-        bytes[offset + 4],
-    ]) as usize;
-    let expected_crc = u32::from_be_bytes([
-        bytes[offset + 5],
-        bytes[offset + 6],
-        bytes[offset + 7],
-        bytes[offset + 8],
-    ]);
-    let Some(frame_end) = header_end.checked_add(payload_length) else {
-        return Ok(None);
-    };
-    if frame_end > bytes.len() {
-        return Ok(None);
-    }
-    let payload = &bytes[header_end..frame_end];
-    if crc32(payload) != expected_crc {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("conversation log frame at byte {offset} failed its checksum"),
-        ));
-    }
-    Ok(Some((kind, payload, frame_end)))
-}
-
 fn validate_batch_commit(
     commit: &ConversationEventBatchCommit,
     pending_events: &[ConversationEventRecord],
+    pending_bytes: &[u8],
 ) -> io::Result<()> {
     let event_count = u64::try_from(pending_events.len()).map_err(io::Error::other)?;
     let first_position = pending_events.first().map(|event| event.position);
     let last_position = pending_events.last().map(|event| event.position);
+    let expected_crc = format!("{:08x}", crc32(pending_bytes));
     if commit.event_count == 0
         || commit.event_count != event_count
         || Some(commit.first_position) != first_position
         || Some(commit.last_position) != last_position
+        || commit.crc != expected_crc
     {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "a conversation log commit marker does not match its batch",
+        return Err(corruption(
+            "a conversation log commit marker does not match its transaction",
         ));
     }
     Ok(())
@@ -346,34 +350,29 @@ fn encode_event_batch(events: &[ConversationEventRecord]) -> io::Result<Vec<u8>>
             "an encoded event batch must not be empty",
         ));
     };
+    let mut event_lines = Vec::new();
+    for event in events {
+        serde_json::to_writer(&mut event_lines, event).map_err(io::Error::other)?;
+        event_lines.push(b'\n');
+    }
     let commit = ConversationEventBatchCommit {
         event_count: u64::try_from(events.len()).map_err(io::Error::other)?,
         first_position: first_event.position,
         last_position: last_event.position,
+        crc: format!("{:08x}", crc32(&event_lines)),
     };
     let mut bytes = Vec::new();
-    for event in events {
-        let payload = serde_json::to_vec(event).map_err(io::Error::other)?;
-        bytes.extend_from_slice(&encode_frame(EVENT_FRAME_KIND, &payload)?);
-    }
-    let payload = serde_json::to_vec(&commit).map_err(io::Error::other)?;
-    bytes.extend_from_slice(&encode_frame(COMMIT_FRAME_KIND, &payload)?);
+    serde_json::to_writer(&mut bytes, &ConversationLogMarker::Begin).map_err(io::Error::other)?;
+    bytes.push(b'\n');
+    bytes.extend_from_slice(&event_lines);
+    serde_json::to_writer(&mut bytes, &ConversationLogMarker::Commit(commit))
+        .map_err(io::Error::other)?;
+    bytes.push(b'\n');
     Ok(bytes)
 }
 
-fn encode_frame(kind: u8, payload: &[u8]) -> io::Result<Vec<u8>> {
-    let payload_length = u32::try_from(payload.len()).map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "a conversation log frame exceeds the maximum payload length",
-        )
-    })?;
-    let mut frame = Vec::with_capacity(FRAME_HEADER_LENGTH + payload.len());
-    frame.push(kind);
-    frame.extend_from_slice(&payload_length.to_be_bytes());
-    frame.extend_from_slice(&crc32(payload).to_be_bytes());
-    frame.extend_from_slice(payload);
-    Ok(frame)
+fn corruption(message: impl Into<String>) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, message.into())
 }
 
 fn crc32(bytes: &[u8]) -> u32 {
@@ -555,8 +554,8 @@ mod tests {
     use serde_json::{Map, Value, json};
 
     use super::{
-        EVENT_LOG_FILE_NAME, EventStore, FRAME_HEADER_LENGTH, LEGACY_EVENTS_DIRECTORY_NAME,
-        encode_event_batch, event_path, write_file_atomically, write_json_atomically,
+        EVENT_LOG_FILE_NAME, EventStore, LEGACY_EVENTS_DIRECTORY_NAME, encode_event_batch,
+        event_path, write_file_atomically, write_json_atomically,
     };
     use crate::conversation::{
         AssistantResponse, ConversationCommandId, ConversationEvent, ConversationEventKind,
@@ -751,6 +750,43 @@ mod tests {
     }
 
     #[test]
+    fn recovery_ignores_a_complete_transaction_without_a_commit_marker() {
+        let store = temporary_store();
+        let conversation_id = ConversationId::new();
+        store
+            .append_new_conversation_events(conversation_id, vec![user_fact("committed")])
+            .expect("the committed event should be persisted");
+        let log_path = conversation_event_log_path(&store, conversation_id);
+        let mut uncommitted = Vec::new();
+        uncommitted.extend_from_slice(b"{\"transaction\":\"begin\"}\n");
+        let event = ConversationEventRecord::new(conversation_id, 1, user_kind("uncommitted"));
+        serde_json::to_writer(&mut uncommitted, &event).expect("the event should encode");
+        uncommitted.push(b'\n');
+        let mut log_file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&log_path)
+            .expect("the log should open");
+        log_file
+            .write_all(&uncommitted)
+            .expect("the uncommitted transaction should be written");
+
+        let loaded = store
+            .load_conversation_log(conversation_id)
+            .expect("the committed log should load");
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].position, 0);
+
+        store
+            .append_new_conversation_events(conversation_id, vec![user_fact("after")])
+            .expect("the uncommitted transaction should be discarded");
+        let loaded = store
+            .load_conversation_log(conversation_id)
+            .expect("the log should load");
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded[1].position, 1);
+    }
+
+    #[test]
     fn corruption_inside_committed_history_is_rejected() {
         let store = temporary_store();
         let conversation_id = ConversationId::new();
@@ -759,7 +795,11 @@ mod tests {
             .expect("the event should be persisted");
         let log_path = conversation_event_log_path(&store, conversation_id);
         let mut bytes = std::fs::read(&log_path).expect("the log should be readable");
-        bytes[FRAME_HEADER_LENGTH + 2] ^= 0xff;
+        let content_offset = bytes
+            .windows(b"first".len())
+            .position(|window| window == b"first")
+            .expect("the event content should be present");
+        bytes[content_offset] = b'F';
         std::fs::write(&log_path, &bytes).expect("the corrupted log should be written");
 
         let error = store

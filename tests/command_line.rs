@@ -253,38 +253,19 @@ fn persisted_events(data_directory: &Path, conversation_id: &str) -> Vec<Value> 
 }
 
 fn committed_events(bytes: &[u8]) -> Vec<Value> {
-    const EVENT_FRAME_KIND: u8 = 1;
-    const COMMIT_FRAME_KIND: u8 = 2;
-    const FRAME_HEADER_LENGTH: usize = 9;
-
     let mut events = Vec::new();
     let mut pending_events = Vec::new();
-    let mut offset = 0;
-    while offset + FRAME_HEADER_LENGTH <= bytes.len() {
-        let kind = bytes[offset];
-        let payload_length = u32::from_be_bytes([
-            bytes[offset + 1],
-            bytes[offset + 2],
-            bytes[offset + 3],
-            bytes[offset + 4],
-        ]) as usize;
-        let Some(frame_end) = offset
-            .checked_add(FRAME_HEADER_LENGTH)
-            .and_then(|start| start.checked_add(payload_length))
-        else {
-            break;
-        };
-        if frame_end > bytes.len() {
-            break;
+    for line in String::from_utf8(bytes.to_vec())
+        .expect("the conversation log should be UTF-8")
+        .lines()
+    {
+        let value: Value = serde_json::from_str(line).expect("each log line should be JSON");
+        match value["transaction"].as_str() {
+            Some("begin") => pending_events.clear(),
+            Some("commit") => events.append(&mut pending_events),
+            Some(other) => panic!("unknown conversation log marker {other}"),
+            None => pending_events.push(value),
         }
-        let payload = &bytes[offset + FRAME_HEADER_LENGTH..frame_end];
-        match kind {
-            EVENT_FRAME_KIND => pending_events
-                .push(serde_json::from_slice(payload).expect("the persisted event should be JSON")),
-            COMMIT_FRAME_KIND => events.append(&mut pending_events),
-            unknown_kind => panic!("unknown conversation log frame kind {unknown_kind}"),
-        }
-        offset = frame_end;
     }
     events
 }
