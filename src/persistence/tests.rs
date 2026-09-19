@@ -4,7 +4,10 @@ use std::path::{Path, PathBuf};
 use schemars::json_schema;
 use serde_json::{Map, Value, json};
 
-use super::{ConversationEventStore, ConversationEventStoreError, FileEventStore, legacy, log};
+use super::{
+    ConversationEventStore, ConversationStoreError, ConversationStoreLoadError, FileEventStore,
+    legacy, log,
+};
 use crate::conversation::{
     AssistantResponse, Conversation, ConversationCommandId, ConversationEvent,
     ConversationEventKind, ConversationEventRecord, ConversationFact, ConversationId,
@@ -139,13 +142,9 @@ fn event_store_rejects_committed_positions_with_a_gap() {
         .expect_err("the incomplete log should be rejected");
     assert!(matches!(
         error,
-        ConversationEventStoreError::Storage(ref storage_error)
-            if storage_error.kind() == std::io::ErrorKind::InvalidData
+        ConversationStoreLoadError::Store(ConversationStoreError::CorruptData)
     ));
-    assert_eq!(
-        error.to_string(),
-        "expected conversation event position 1, found 2"
-    );
+    assert_eq!(error.to_string(), "corrupt conversation data");
     assert!(
         store
             .append(conversation_id, vec![user_fact("third")])
@@ -245,8 +244,7 @@ fn corruption_inside_committed_history_is_rejected() {
         .expect_err("corruption inside committed history should be rejected");
     assert!(matches!(
         error,
-        ConversationEventStoreError::Storage(ref storage_error)
-            if storage_error.kind() == std::io::ErrorKind::InvalidData
+        ConversationStoreLoadError::Store(ConversationStoreError::CorruptData)
     ));
 }
 
@@ -433,7 +431,7 @@ fn latest_conversation_is_the_most_recently_active_one() {
         store
             .latest_id()
             .expect("the latest conversation should be found"),
-        second_conversation_id
+        Some(second_conversation_id)
     );
 
     let third_batch = store
@@ -445,7 +443,7 @@ fn latest_conversation_is_the_most_recently_active_one() {
         store
             .latest_id()
             .expect("the latest conversation should be found"),
-        first_conversation_id
+        Some(first_conversation_id)
     );
 }
 
@@ -453,15 +451,12 @@ fn latest_conversation_is_the_most_recently_active_one() {
 fn latest_conversation_is_absent_without_conversations() {
     let store = temporary_store();
 
-    let error = store
-        .latest_id()
-        .expect_err("the latest conversation should be missing");
-
-    assert!(matches!(
-        error,
-        ConversationEventStoreError::NoConversations
-    ));
-    assert_eq!(error.to_string(), "no conversations found");
+    assert_eq!(
+        store
+            .latest_id()
+            .expect("the latest conversation should be absent"),
+        None
+    );
 }
 
 #[test]
@@ -479,7 +474,7 @@ fn latest_conversation_ignores_conversations_without_events() {
         store
             .latest_id()
             .expect("the latest conversation should be found"),
-        conversation_id
+        Some(conversation_id)
     );
 }
 
@@ -500,13 +495,12 @@ fn latest_conversation_ignores_an_earlier_schema() {
     )
     .expect("the earlier schema event should be written");
 
-    let error = store
-        .latest_id()
-        .expect_err("the earlier schema should not count as a conversation");
-    assert!(matches!(
-        error,
-        ConversationEventStoreError::NoConversations
-    ));
+    assert_eq!(
+        store
+            .latest_id()
+            .expect("the earlier schema should be ignored"),
+        None
+    );
 
     let current_conversation_id = ConversationId::new();
     store
@@ -517,6 +511,6 @@ fn latest_conversation_ignores_an_earlier_schema() {
         store
             .latest_id()
             .expect("the latest conversation should be found"),
-        current_conversation_id
+        Some(current_conversation_id)
     );
 }

@@ -83,7 +83,9 @@ impl CommandLine {
                 let event_store = FileEventStore::from_environment()?;
                 let conversation_id = match arguments.conversation_id {
                     Some(conversation_id) => conversation_id,
-                    None => event_store.latest_id()?,
+                    None => event_store.latest_id()?.ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::NotFound, "no conversations found")
+                    })?,
                 };
                 let events = event_store.load(conversation_id)?;
                 let standard_output = io::stdout();

@@ -15,25 +15,31 @@ pub(crate) trait ConversationEventStore {
     fn load(
         &self,
         id: ConversationId,
-    ) -> Result<Vec<ConversationEventRecord>, ConversationEventStoreError>;
+    ) -> Result<Vec<ConversationEventRecord>, ConversationStoreLoadError>;
 
-    fn latest_id(&self) -> Result<ConversationId, ConversationEventStoreError>;
+    fn latest_id(&self) -> Result<Option<ConversationId>, ConversationStoreError>;
 
     fn append(
         &self,
         id: ConversationId,
         events: Vec<ConversationEvent>,
-    ) -> Result<Vec<ConversationEventRecord>, ConversationEventStoreError>;
+    ) -> Result<Vec<ConversationEventRecord>, ConversationStoreAppendError>;
 }
 
 #[derive(Debug)]
-pub(crate) enum ConversationEventStoreError {
-    NoConversations,
-    ConversationNotFound(ConversationId),
-    ConversationMismatch {
-        expected: ConversationId,
-        found: ConversationId,
-    },
+pub(crate) enum ConversationStoreLoadError {
+    NotFound(ConversationId),
+    Store(ConversationStoreError),
+}
+
+#[derive(Debug)]
+pub(crate) enum ConversationStoreAppendError {
     EmptyBatch,
-    Storage(io::Error),
+    Store(ConversationStoreError),
+}
+
+#[derive(Debug)]
+pub(crate) enum ConversationStoreError {
+    Io(io::Error),
+    CorruptData,
 }

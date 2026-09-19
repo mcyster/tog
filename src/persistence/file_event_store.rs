@@ -3,7 +3,10 @@ use std::io;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-use super::{ConversationEventStore, ConversationEventStoreError};
+use super::{
+    ConversationEventStore, ConversationStoreAppendError, ConversationStoreError,
+    ConversationStoreLoadError,
+};
 use super::{legacy, log};
 use crate::conversation::{
     ConversationEvent, ConversationEventKind, ConversationEventRecord, ConversationId,
@@ -51,22 +54,20 @@ impl ConversationEventStore for FileEventStore {
     fn load(
         &self,
         conversation_id: ConversationId,
-    ) -> Result<Vec<ConversationEventRecord>, ConversationEventStoreError> {
+    ) -> Result<Vec<ConversationEventRecord>, ConversationStoreLoadError> {
         let conversation_directory = self.conversation_directory(conversation_id);
         let events = if let Some(log) = log::read(&conversation_directory)? {
             log.events
         } else if let Some(events) = legacy::read_events(&conversation_directory)? {
             events
         } else {
-            return Err(ConversationEventStoreError::ConversationNotFound(
-                conversation_id,
-            ));
+            return Err(ConversationStoreLoadError::NotFound(conversation_id));
         };
         ensure_records_belong_to(conversation_id, &events)?;
         Ok(events)
     }
 
-    fn latest_id(&self) -> Result<ConversationId, ConversationEventStoreError> {
+    fn latest_id(&self) -> Result<Option<ConversationId>, ConversationStoreError> {
         let conversations_directory = self.root_directory.join(CONVERSATIONS_DIRECTORY_NAME);
         let mut latest_event: Option<ConversationEventRecord> = None;
         for directory_entry in fs::read_dir(&conversations_directory)? {
@@ -84,16 +85,14 @@ impl ConversationEventStore for FileEventStore {
                 latest_event = Some(last_event);
             }
         }
-        latest_event
-            .map(|event| event.conversation_id)
-            .ok_or(ConversationEventStoreError::NoConversations)
+        Ok(latest_event.map(|event| event.conversation_id))
     }
 
     fn append(
         &self,
         conversation_id: ConversationId,
         events: Vec<ConversationEvent>,
-    ) -> Result<Vec<ConversationEventRecord>, ConversationEventStoreError> {
+    ) -> Result<Vec<ConversationEventRecord>, ConversationStoreAppendError> {
         let kinds = stored_event_kinds(events)?;
         let conversation_directory = self.conversation_directory(conversation_id);
         create_private_directory(&conversation_directory)?;
@@ -162,7 +161,7 @@ fn read_last_conversation_event(
 fn validate_existing_events(
     conversation_id: ConversationId,
     existing_events: &[ConversationEventRecord],
-) -> Result<Option<u64>, ConversationEventStoreError> {
+) -> Result<Option<u64>, ConversationStoreError> {
     if existing_events.is_empty() {
         return Ok(None);
     }
@@ -174,13 +173,10 @@ fn validate_existing_events(
 fn ensure_records_belong_to(
     conversation_id: ConversationId,
     events: &[ConversationEventRecord],
-) -> Result<(), ConversationEventStoreError> {
+) -> Result<(), ConversationStoreError> {
     for event in events {
         if event.conversation_id != conversation_id {
-            return Err(ConversationEventStoreError::ConversationMismatch {
-                expected: conversation_id,
-                found: event.conversation_id,
-            });
+            return Err(ConversationStoreError::CorruptData);
         }
     }
     Ok(())
@@ -213,15 +209,15 @@ fn build_event_batch(
 
 fn stored_event_kinds(
     events: Vec<ConversationEvent>,
-) -> Result<Vec<StoredConversationEventKind>, ConversationEventStoreError> {
+) -> Result<Vec<StoredConversationEventKind>, ConversationStoreAppendError> {
     if events.is_empty() {
-        return Err(ConversationEventStoreError::EmptyBatch);
+        return Err(ConversationStoreAppendError::EmptyBatch);
     }
     events
         .into_iter()
         .map(stored_kind)
         .collect::<io::Result<Vec<_>>>()
-        .map_err(ConversationEventStoreError::Storage)
+        .map_err(ConversationStoreAppendError::from)
 }
 
 fn stored_kind(event: ConversationEvent) -> io::Result<StoredConversationEventKind> {

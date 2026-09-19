@@ -63,7 +63,8 @@ pub(super) fn remove(conversation_directory: &Path) {
 
 fn read_json<T: DeserializeOwned>(path: &Path) -> io::Result<T> {
     let file = File::open(path)?;
-    serde_json::from_reader(BufReader::new(file)).map_err(io::Error::other)
+    serde_json::from_reader(BufReader::new(file))
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
 fn read_json_directory<T: DeserializeOwned>(directory: &Path) -> io::Result<Vec<T>> {
