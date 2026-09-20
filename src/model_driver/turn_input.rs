@@ -2,14 +2,14 @@ use crate::conversation::Conversation;
 use crate::conversation_event::{ConversationTurnId, UserMessageRequest};
 
 pub(crate) struct TurnInput<'conversation> {
-    conversation: &'conversation Conversation,
+    conversation: &'conversation dyn Conversation,
     pending_user_requests: Vec<UserMessageRequest>,
     turn_id: ConversationTurnId,
 }
 
 impl<'conversation> TurnInput<'conversation> {
     pub(crate) fn new(
-        conversation: &'conversation Conversation,
+        conversation: &'conversation dyn Conversation,
         turn_id: ConversationTurnId,
     ) -> Self {
         Self {
@@ -19,7 +19,7 @@ impl<'conversation> TurnInput<'conversation> {
         }
     }
 
-    pub(crate) fn conversation(&self) -> &'conversation Conversation {
+    pub(crate) fn conversation(&self) -> &'conversation dyn Conversation {
         self.conversation
     }
 

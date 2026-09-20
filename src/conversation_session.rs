@@ -4,7 +4,7 @@ use std::fmt::{Display, Formatter};
 
 use futures_util::StreamExt;
 
-use crate::conversation::{Conversation, ConversationId, UserPrompt};
+use crate::conversation::{Conversation, ConversationHistory, ConversationId, UserPrompt};
 use crate::conversation_event::{
     ConversationCommand, ConversationCommandId, ConversationEvent, ConversationFact,
     ConversationLifecycle, ConversationMessage, ConversationProblem, ConversationTurnId,
@@ -51,7 +51,7 @@ impl<Store: ConversationEventStore> ConversationSession<Store> {
         model_driver: Box<dyn ModelDriver>,
         tool_registry: ToolRegistry,
     ) -> ConversationSessionResult<Self> {
-        Conversation::from_events(event_store.load(conversation_id)?)?;
+        ConversationHistory::from_events(event_store.load(conversation_id)?)?;
         Ok(Self {
             conversation_id,
             event_store,
@@ -105,7 +105,7 @@ impl<Store: ConversationEventStore> ConversationSession<Store> {
                 tools: self.tool_registry.definitions(),
             })?;
             let conversation =
-                Conversation::from_events(self.event_store.load(self.conversation_id)?)?;
+                ConversationHistory::from_events(self.event_store.load(self.conversation_id)?)?;
             let pending_request_ids = conversation
                 .pending_user_requests()
                 .into_iter()

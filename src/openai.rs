@@ -287,7 +287,7 @@ impl ConversationEventReader for OpenAiModelDriver {
 }
 
 fn semantic_input(
-    conversation: &Conversation,
+    conversation: &dyn Conversation,
     pending_user_requests: &[UserMessageRequest],
 ) -> Value {
     let provider_call_ids = provider_tool_call_ids(conversation);
@@ -372,7 +372,7 @@ fn provider_schema(schema: &Schema) -> Value {
     schema
 }
 
-fn provider_tool_call_ids(conversation: &Conversation) -> HashMap<ToolCallId, String> {
+fn provider_tool_call_ids(conversation: &dyn Conversation) -> HashMap<ToolCallId, String> {
     conversation
         .events()
         .iter()
@@ -1689,7 +1689,7 @@ mod tests {
     use serde_json::{Map, Value, json};
     use time::OffsetDateTime;
 
-    use crate::conversation::{Conversation, ConversationId};
+    use crate::conversation::{Conversation, ConversationHistory, ConversationId};
     use crate::conversation_event::{
         AssistantResponse, ConversationEventId, ConversationEventKind, ConversationEventRecord,
         ConversationFact, ConversationMessage, ConversationProblem, ConversationTurnId,
@@ -1731,7 +1731,7 @@ mod tests {
         .expect("the model data should be valid");
         let turn_id = ConversationTurnId::new();
         let invocation_id = ModelInvocationId::new();
-        let conversation = Conversation::from_events(vec![
+        let conversation = ConversationHistory::from_events(vec![
             conversation_event(
                 conversation_id,
                 0,
@@ -1845,7 +1845,7 @@ mod tests {
                 value: json!({ "stdout": "/tmp\n" }),
             },
         );
-        let conversation = Conversation::from_events(vec![
+        let conversation = ConversationHistory::from_events(vec![
             conversation_event(
                 conversation_id,
                 0,
@@ -1907,7 +1907,7 @@ mod tests {
             None,
         )
         .expect("the tool request should be valid");
-        let conversation = Conversation::from_events(vec![
+        let conversation = ConversationHistory::from_events(vec![
             conversation_event(
                 conversation_id,
                 0,
@@ -1978,7 +1978,7 @@ mod tests {
                 .expect("the timeout problem should be valid"),
             },
         );
-        let conversation = Conversation::from_events(vec![
+        let conversation = ConversationHistory::from_events(vec![
             conversation_event(
                 conversation_id,
                 0,
@@ -2073,9 +2073,9 @@ mod tests {
         expect_event(outputs.remove(0))
     }
 
-    fn test_conversation() -> Conversation {
+    fn test_conversation() -> ConversationHistory {
         let conversation_id = ConversationId::new();
-        Conversation::from_events(vec![conversation_event(
+        ConversationHistory::from_events(vec![conversation_event(
             conversation_id,
             0,
             ConversationEventKind::Fact(ConversationFact::Message {
@@ -2096,7 +2096,7 @@ mod tests {
         )
     }
 
-    fn driver_request(conversation: &Conversation) -> TurnInput<'_> {
+    fn driver_request(conversation: &dyn Conversation) -> TurnInput<'_> {
         TurnInput::new(conversation, ConversationTurnId::new())
     }
 

@@ -7,7 +7,7 @@ use serde_json::{Map, Value, json};
 use super::{
     ConversationEventStore, ConversationStoreError, ConversationStoreLoadError, FileEventStore, log,
 };
-use crate::conversation::{Conversation, ConversationId};
+use crate::conversation::{Conversation, ConversationHistory, ConversationId};
 use crate::conversation_event::{
     AssistantResponse, ConversationCommandId, ConversationEvent, ConversationEventKind,
     ConversationEventRecord, ConversationFact, ConversationMessage, ConversationTurnId, ModelData,
@@ -329,7 +329,7 @@ fn event_store_round_trips_tool_definitions_requests_and_responses() {
         .load(conversation_id)
         .expect("the conversation should load");
     let conversation =
-        Conversation::from_events(events).expect("the stored events should reconstruct");
+        ConversationHistory::from_events(events).expect("the stored events should reconstruct");
 
     assert_eq!(conversation.available_tools(), [tool_definition]);
     assert!(matches!(
