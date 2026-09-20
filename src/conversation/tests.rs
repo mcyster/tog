@@ -3,7 +3,7 @@ use serde_json::json;
 use time::OffsetDateTime;
 
 use super::history::InvalidConversation;
-use super::{Conversation, ConversationHistory, ConversationId};
+use super::{Conversation, ConversationHistory, ConversationId, ConversationView};
 use crate::conversation_event::{
     ConversationCommandId, ConversationEventId, ConversationEventKind, ConversationEventRecord,
     ConversationFact, ConversationMessage, ConversationTurnId, ModelInvocationId,
@@ -141,7 +141,8 @@ fn available_tools_uses_the_latest_declaration() {
     ])
     .expect("the conversation should be valid");
 
-    let available_tools = conversation.available_tools();
+    let view = ConversationView::new(&conversation);
+    let available_tools = view.available_tools();
     assert_eq!(available_tools.len(), 1);
     assert_eq!(available_tools[0].name().as_str(), "second");
 }
@@ -156,7 +157,11 @@ fn an_empty_tools_available_declaration_removes_all_tools() {
     ])
     .expect("the conversation should be valid");
 
-    assert!(conversation.available_tools().is_empty());
+    assert!(
+        ConversationView::new(&conversation)
+            .available_tools()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -166,7 +171,11 @@ fn a_conversation_without_a_tools_available_declaration_has_no_tools() {
     let conversation = ConversationHistory::from_events(vec![user_event(conversation_id, 0)])
         .expect("the conversation should be valid");
 
-    assert!(conversation.available_tools().is_empty());
+    assert!(
+        ConversationView::new(&conversation)
+            .available_tools()
+            .is_empty()
+    );
 }
 
 #[test]

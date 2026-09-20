@@ -12,12 +12,11 @@ use schemars::Schema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
-use crate::conversation::Conversation;
 use crate::conversation_event::{
     AssistantResponse, ConversationEventClass, ConversationEventEnvelope, ConversationEventError,
     ConversationEventExtension, ConversationEventKind, ConversationEventReadError,
-    ConversationEventReader, ConversationFact, ConversationMessage, ConversationProblem,
-    ConversationTurnId, InvalidAssistantResponse, InvalidConversationProblem,
+    ConversationEventReader, ConversationEventRecord, ConversationFact, ConversationMessage,
+    ConversationProblem, ConversationTurnId, InvalidAssistantResponse, InvalidConversationProblem,
     InvalidModelCommunication, InvocationError, ModelCommunication, ModelData, ModelEvent,
     ModelEventImportance, ModelId, ModelInvocationId, ModelIssue, ModelSource, ProviderId,
     StoredConversationEventKind, ToolCallId, ToolDefinition, ToolName, ToolRequest, ToolResponse,
@@ -171,7 +170,7 @@ impl ModelDriver for OpenAiModelDriver {
         );
         request_body.insert(
             "input".to_owned(),
-            semantic_input(conversation, &pending_user_requests),
+            semantic_input(conversation.events(), &pending_user_requests),
         );
         let available_tools = conversation.available_tools();
         if !available_tools.is_empty() {
@@ -287,13 +286,12 @@ impl ConversationEventReader for OpenAiModelDriver {
 }
 
 fn semantic_input(
-    conversation: &dyn Conversation,
+    events: &[ConversationEventRecord],
     pending_user_requests: &[UserMessageRequest],
 ) -> Value {
-    let provider_call_ids = provider_tool_call_ids(conversation);
+    let provider_call_ids = provider_tool_call_ids(events);
     let mut input =
-        conversation
-            .events()
+        events
             .iter()
             .filter_map(|conversation_event| match &conversation_event.kind {
                 StoredConversationEventKind::Shared(ConversationEventKind::Fact(
@@ -372,9 +370,8 @@ fn provider_schema(schema: &Schema) -> Value {
     schema
 }
 
-fn provider_tool_call_ids(conversation: &dyn Conversation) -> HashMap<ToolCallId, String> {
-    conversation
-        .events()
+fn provider_tool_call_ids(events: &[ConversationEventRecord]) -> HashMap<ToolCallId, String> {
+    events
         .iter()
         .filter_map(|conversation_event| match &conversation_event.kind {
             StoredConversationEventKind::Shared(ConversationEventKind::Fact(
@@ -1777,7 +1774,7 @@ mod tests {
         .expect("the conversation should be valid");
 
         assert_eq!(
-            semantic_input(&conversation, &[]),
+            semantic_input(conversation.events(), &[]),
             json!([
                 { "role": "user", "content": "Hello" },
                 { "role": "assistant", "content": "Hello." }
@@ -1877,7 +1874,7 @@ mod tests {
         .expect("the conversation should be valid");
 
         assert_eq!(
-            semantic_input(&conversation, &[]),
+            semantic_input(conversation.events(), &[]),
             json!([
                 { "role": "user", "content": "Run pwd" },
                 {
@@ -1935,7 +1932,7 @@ mod tests {
         ])
         .expect("the conversation should be valid");
 
-        let input = semantic_input(&conversation, &[]);
+        let input = semantic_input(conversation.events(), &[]);
         assert_eq!(input[0]["call_id"], call_id.to_string());
         assert_eq!(input[1]["call_id"], call_id.to_string());
         let output: Value = serde_json::from_str(
@@ -1998,7 +1995,7 @@ mod tests {
         ])
         .expect("the conversation should be valid");
 
-        let input = semantic_input(&conversation, &[]);
+        let input = semantic_input(conversation.events(), &[]);
         let output: Value = serde_json::from_str(
             input[1]["output"]
                 .as_str()

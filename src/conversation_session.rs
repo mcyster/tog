@@ -4,7 +4,7 @@ use std::fmt::{Display, Formatter};
 
 use futures_util::StreamExt;
 
-use crate::conversation::{Conversation, ConversationHistory, ConversationId, UserPrompt};
+use crate::conversation::{ConversationHistory, ConversationId, UserPrompt};
 use crate::conversation_event::{
     ConversationCommand, ConversationCommandId, ConversationEvent, ConversationFact,
     ConversationLifecycle, ConversationMessage, ConversationProblem, ConversationTurnId,
@@ -106,19 +106,17 @@ impl<Store: ConversationEventStore> ConversationSession<Store> {
             })?;
             let conversation =
                 ConversationHistory::from_events(self.event_store.load(self.conversation_id)?)?;
-            let pending_request_ids = conversation
+            let turn_input = TurnInput::new(&conversation, turn_id);
+            let pending_request_ids = turn_input
                 .pending_user_requests()
-                .into_iter()
+                .iter()
                 .map(|request| request.command_id)
                 .collect::<HashSet<_>>();
             report_progress(ConversationSessionProgress::InvocationStarted {
                 model: source.model().as_str().to_owned(),
             })?;
 
-            let mut output_stream = self
-                .model_driver
-                .invoke(TurnInput::new(&conversation, turn_id))
-                .await?;
+            let mut output_stream = self.model_driver.invoke(turn_input).await?;
             let mut accepted_request_ids = HashSet::new();
             let mut tool_requests = Vec::new();
 
