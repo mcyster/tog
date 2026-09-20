@@ -6,7 +6,7 @@ use futures_util::FutureExt;
 use futures_util::future::BoxFuture;
 use serde_json::Value;
 
-use crate::conversation::{ToolDefinition, ToolExecutionProblem, ToolOutcome, ToolRequest};
+use crate::conversation_event::{ToolDefinition, ToolExecutionProblem, ToolOutcome, ToolRequest};
 
 pub(crate) trait ExecutableTool: Send + Sync {
     fn definition(&self) -> &ToolDefinition;
@@ -65,7 +65,7 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::{ExecutableTool, ToolRegistry};
-    use crate::conversation::{
+    use crate::conversation_event::{
         ModelInvocationId, ToolCallId, ToolDefinition, ToolExecutionProblem,
         ToolExecutionProblemKind, ToolName, ToolOutcome, ToolRequest,
     };

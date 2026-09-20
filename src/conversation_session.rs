@@ -4,13 +4,14 @@ use std::fmt::{Display, Formatter};
 
 use futures_util::StreamExt;
 
-use crate::conversation::{
-    Conversation, ConversationCommand, ConversationCommandId, ConversationEvent, ConversationFact,
-    ConversationId, ConversationLifecycle, ConversationMessage, ConversationProblem,
-    ConversationTurnId, ToolResponse, TurnOutcome, UserContent, UserMessageRequest, UserPrompt,
+use crate::conversation::{Conversation, ConversationId, UserPrompt};
+use crate::conversation_event::{
+    ConversationCommand, ConversationCommandId, ConversationEvent, ConversationFact,
+    ConversationLifecycle, ConversationMessage, ConversationProblem, ConversationTurnId,
+    ToolResponse, TurnOutcome, UserContent, UserMessageRequest,
 };
+use crate::conversation_event_store::ConversationEventStore;
 use crate::model_driver::{ModelDriver, ModelDriverError, ModelDriverOutput, TurnInput};
-use crate::persistence::ConversationEventStore;
 use crate::tools::ToolRegistry;
 
 pub(crate) type ConversationSessionResult<T> = Result<T, Box<dyn Error>>;
@@ -303,19 +304,20 @@ mod tests {
     use super::{
         ConversationSession, ConversationSessionProgress, MAXIMUM_TOOL_CONTINUATION_ROUNDS,
     };
-    use crate::conversation::{
+    use crate::conversation::{ConversationId, UserPrompt};
+    use crate::conversation_event::{
         AssistantResponse, ConversationEventEnvelope, ConversationEventExtension,
         ConversationEventKind, ConversationEventReadError, ConversationEventReader,
-        ConversationFact, ConversationId, ConversationLifecycle, ConversationMessage,
-        ConversationProblem, InvocationError, ModelId, ModelInvocationId, ModelSource, ProviderId,
+        ConversationFact, ConversationLifecycle, ConversationMessage, ConversationProblem,
+        InvocationError, ModelId, ModelInvocationId, ModelSource, ProviderId,
         StoredConversationEventKind, ToolCallId, ToolDefinition, ToolExecutionProblem,
-        ToolExecutionProblemKind, ToolName, ToolOutcome, ToolRequest, TurnOutcome, UserPrompt,
+        ToolExecutionProblemKind, ToolName, ToolOutcome, ToolRequest, TurnOutcome,
     };
+    use crate::conversation_event_store::{ConversationEventStore, FileEventStore};
     use crate::model_driver::{
         ModelDriver, ModelDriverError, ModelDriverOutput, ModelDriverOutputBatch,
         ModelOutputStream, TurnInput,
     };
-    use crate::persistence::{ConversationEventStore, FileEventStore};
     use crate::tools::{ExecutableTool, ShellTool, ToolRegistry};
 
     enum RecordingResponse {

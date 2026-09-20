@@ -7,11 +7,12 @@ use serde_json::{Map, Value, json};
 use super::{
     ConversationEventStore, ConversationStoreError, ConversationStoreLoadError, FileEventStore, log,
 };
-use crate::conversation::{
-    AssistantResponse, Conversation, ConversationCommandId, ConversationEvent,
-    ConversationEventKind, ConversationEventRecord, ConversationFact, ConversationId,
-    ConversationMessage, ConversationTurnId, ModelData, ModelInvocationId, ToolCallId,
-    ToolDefinition, ToolName, ToolOutcome, ToolRequest, ToolResponse, UserContent,
+use crate::conversation::{Conversation, ConversationId};
+use crate::conversation_event::{
+    AssistantResponse, ConversationCommandId, ConversationEvent, ConversationEventKind,
+    ConversationEventRecord, ConversationFact, ConversationMessage, ConversationTurnId, ModelData,
+    ModelInvocationId, ToolCallId, ToolDefinition, ToolName, ToolOutcome, ToolRequest,
+    ToolResponse, UserContent,
 };
 
 fn temporary_store() -> FileEventStore {
@@ -333,16 +334,16 @@ fn event_store_round_trips_tool_definitions_requests_and_responses() {
     assert_eq!(conversation.available_tools(), [tool_definition]);
     assert!(matches!(
         &conversation.events()[1].kind,
-        crate::conversation::StoredConversationEventKind::Shared(
-            crate::conversation::ConversationEventKind::Fact(
+        crate::conversation_event::StoredConversationEventKind::Shared(
+            crate::conversation_event::ConversationEventKind::Fact(
                 ConversationFact::ToolRequest { request: restored, turn_id: Some(restored_turn) }
             )
         ) if restored == &request && restored_turn == &turn_id
     ));
     assert!(matches!(
         &conversation.events()[2].kind,
-        crate::conversation::StoredConversationEventKind::Shared(
-            crate::conversation::ConversationEventKind::Fact(
+        crate::conversation_event::StoredConversationEventKind::Shared(
+            crate::conversation_event::ConversationEventKind::Fact(
                 ConversationFact::ToolResponse { response: restored, .. }
             )
         ) if restored == &response

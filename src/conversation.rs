@@ -1,38 +1,15 @@
-mod event;
 mod id;
-mod model;
-mod model_data;
-mod problem;
-mod tool;
 
 use std::collections::HashSet;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::str::FromStr;
 
-#[allow(unused_imports)]
-pub(crate) use event::{
-    AssistantResponse, ConversationCommand, ConversationEvent, ConversationEventClass,
-    ConversationEventEnvelope, ConversationEventError, ConversationEventExtension,
-    ConversationEventKind, ConversationEventReadError, ConversationEventReader,
-    ConversationEventRecord, ConversationFact, ConversationLifecycle, ConversationMessage,
-    InvalidAssistantResponse, InvalidConversationEventEnvelope, InvalidModelCommunication,
-    ModelCommunication, ModelEvent, ModelEventImportance, StoredConversationEventKind, TurnOutcome,
-    UserContent, UserMessageRequest,
-};
-pub(crate) use id::{
-    ConversationCommandId, ConversationEventId, ConversationId, ConversationTurnId,
-    ModelInvocationId, ToolCallId,
-};
-pub(crate) use model::{ModelId, ModelSource, ProviderId};
-pub(crate) use model_data::{InvalidModelData, ModelData};
-pub(crate) use problem::{
-    ConversationProblem, InvalidConversationProblem, InvocationError, ModelIssue,
-};
-#[allow(unused_imports)]
-pub(crate) use tool::{
-    InvalidToolData, ToolDefinition, ToolExecutionProblem, ToolExecutionProblemKind, ToolName,
-    ToolOutcome, ToolRequest, ToolResponse,
+pub(crate) use id::ConversationId;
+
+use crate::conversation_event::{
+    ConversationCommand, ConversationEventKind, ConversationEventRecord, ConversationFact,
+    ConversationMessage, StoredConversationEventKind, ToolDefinition, UserMessageRequest,
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -225,11 +202,11 @@ mod tests {
     use serde_json::json;
     use time::OffsetDateTime;
 
-    use super::{
-        Conversation, ConversationCommandId, ConversationEventId, ConversationEventKind,
-        ConversationEventRecord, ConversationFact, ConversationId, ConversationMessage,
-        ConversationTurnId, InvalidConversation, InvalidUserPrompt, StoredConversationEventKind,
-        ToolDefinition, ToolName, UserContent, UserPrompt,
+    use super::{Conversation, ConversationId, InvalidConversation, InvalidUserPrompt, UserPrompt};
+    use crate::conversation_event::{
+        ConversationCommandId, ConversationEventId, ConversationEventKind, ConversationEventRecord,
+        ConversationFact, ConversationMessage, ConversationTurnId, ModelInvocationId,
+        StoredConversationEventKind, ToolDefinition, ToolName, UserContent,
     };
 
     fn tool_definition(name: &str) -> ToolDefinition {
@@ -436,7 +413,7 @@ mod tests {
             "event": {
                 "type": "assistant",
                 "turn_id": ConversationTurnId::new(),
-                "invocation_id": crate::conversation::ModelInvocationId::new(),
+                "invocation_id": ModelInvocationId::new(),
                 "response": { "message": "   " }
             }
         }))
@@ -465,7 +442,7 @@ mod tests {
             "event": {
                 "type": "communication",
                 "turn_id": ConversationTurnId::new(),
-                "invocation_id": crate::conversation::ModelInvocationId::new(),
+                "invocation_id": ModelInvocationId::new(),
                 "communication": {
                     "message": "reasoning",
                     "importance": "detailed",
@@ -533,7 +510,7 @@ mod tests {
             "event": {
                 "type": "assistant",
                 "turn_id": ConversationTurnId::new(),
-                "invocation_id": crate::conversation::ModelInvocationId::new(),
+                "invocation_id": ModelInvocationId::new(),
                 "data": {},
                 "response": { "message": "The answer is 42." }
             }

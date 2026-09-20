@@ -1,4 +1,4 @@
-use crate::conversation::{ConversationEventExtension, ConversationMessage, ToolRequest};
+use crate::conversation_event::{ConversationEventExtension, ConversationMessage, ToolRequest};
 
 use super::EmptyModelDriverOutputBatch;
 

@@ -3,15 +3,16 @@ use std::io::{self, Write};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
-use crate::conversation::{
-    ConversationEventRecord, ConversationFact, ConversationId, ConversationMessage,
-    ConversationProblem, ModelEventImportance, ModelId, TurnOutcome,
+use crate::conversation::ConversationId;
+use crate::conversation_event::{
+    ConversationEventRecord, ConversationFact, ConversationMessage, ConversationProblem,
+    ModelEventImportance, ModelId, TurnOutcome,
 };
+use crate::conversation_event_store::{ConversationEventStore, FileEventStore};
 use crate::conversation_session::{
     ConversationSession, ConversationSessionProgress, ConversationSessionResult,
 };
 use crate::openai::OpenAiModelDriver;
-use crate::persistence::{ConversationEventStore, FileEventStore};
 use crate::tools::{ShellTool, ToolRegistry};
 
 #[derive(Debug, Parser)]

@@ -12,11 +12,12 @@ use schemars::Schema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
-use crate::conversation::{
-    AssistantResponse, Conversation, ConversationEventClass, ConversationEventEnvelope,
-    ConversationEventError, ConversationEventExtension, ConversationEventKind,
-    ConversationEventReadError, ConversationEventReader, ConversationFact, ConversationMessage,
-    ConversationProblem, ConversationTurnId, InvalidAssistantResponse, InvalidConversationProblem,
+use crate::conversation::Conversation;
+use crate::conversation_event::{
+    AssistantResponse, ConversationEventClass, ConversationEventEnvelope, ConversationEventError,
+    ConversationEventExtension, ConversationEventKind, ConversationEventReadError,
+    ConversationEventReader, ConversationFact, ConversationMessage, ConversationProblem,
+    ConversationTurnId, InvalidAssistantResponse, InvalidConversationProblem,
     InvalidModelCommunication, InvocationError, ModelCommunication, ModelData, ModelEvent,
     ModelEventImportance, ModelId, ModelInvocationId, ModelIssue, ModelSource, ProviderId,
     StoredConversationEventKind, ToolCallId, ToolDefinition, ToolName, ToolRequest, ToolResponse,
@@ -1688,13 +1689,14 @@ mod tests {
     use serde_json::{Map, Value, json};
     use time::OffsetDateTime;
 
-    use crate::conversation::{
-        AssistantResponse, Conversation, ConversationEventId, ConversationEventKind,
-        ConversationEventRecord, ConversationFact, ConversationId, ConversationMessage,
-        ConversationProblem, ConversationTurnId, ModelCommunication, ModelData, ModelEvent,
-        ModelEventImportance, ModelId, ModelInvocationId, ModelIssue, ModelSource, ProviderId,
-        StoredConversationEventKind, ToolCallId, ToolDefinition, ToolExecutionProblem, ToolName,
-        ToolOutcome, ToolRequest, ToolResponse, UserContent,
+    use crate::conversation::{Conversation, ConversationId};
+    use crate::conversation_event::{
+        AssistantResponse, ConversationEventId, ConversationEventKind, ConversationEventRecord,
+        ConversationFact, ConversationMessage, ConversationProblem, ConversationTurnId,
+        ModelCommunication, ModelData, ModelEvent, ModelEventImportance, ModelId,
+        ModelInvocationId, ModelIssue, ModelSource, ProviderId, StoredConversationEventKind,
+        ToolCallId, ToolDefinition, ToolExecutionProblem, ToolName, ToolOutcome, ToolRequest,
+        ToolResponse, UserContent,
     };
     use crate::model_driver::{ModelDriver, ModelDriverOutput, ModelDriverOutputBatch, TurnInput};
 

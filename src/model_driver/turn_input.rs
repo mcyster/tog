@@ -1,4 +1,5 @@
-use crate::conversation::{Conversation, ConversationTurnId, UserMessageRequest};
+use crate::conversation::Conversation;
+use crate::conversation_event::{ConversationTurnId, UserMessageRequest};
 
 pub(crate) struct TurnInput<'conversation> {
     conversation: &'conversation Conversation,

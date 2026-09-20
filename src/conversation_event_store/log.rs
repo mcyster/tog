@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::conversation::ConversationEventRecord;
+use crate::conversation_event::ConversationEventRecord;
 
 const EVENT_LOG_FILE_NAME: &str = "events.log";
 const CRC32_IEEE_POLYNOMIAL: u32 = 0xedb8_8320;

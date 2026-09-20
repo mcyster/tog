@@ -8,9 +8,9 @@ use super::{
     ConversationEventStore, ConversationStoreAppendError, ConversationStoreError,
     ConversationStoreLoadError,
 };
-use crate::conversation::{
-    ConversationEvent, ConversationEventKind, ConversationEventRecord, ConversationId,
-    StoredConversationEventKind,
+use crate::conversation::ConversationId;
+use crate::conversation_event::{
+    ConversationEvent, ConversationEventKind, ConversationEventRecord, StoredConversationEventKind,
 };
 
 const CONVERSATIONS_DIRECTORY_NAME: &str = "conversations";

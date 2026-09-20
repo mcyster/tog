@@ -312,7 +312,7 @@ mod tests {
         InvalidToolData, ToolDefinition, ToolExecutionProblem, ToolExecutionProblemKind, ToolName,
         ToolOutcome, ToolRequest, ToolResponse,
     };
-    use crate::conversation::{ModelData, ModelInvocationId, ToolCallId};
+    use crate::conversation_event::{ModelData, ModelInvocationId, ToolCallId};
 
     fn parameters_schema() -> schemars::Schema {
         json_schema!({ "type": "object", "properties": { "command": { "type": "string" } } })

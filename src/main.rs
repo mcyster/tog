@@ -1,15 +1,16 @@
 mod command_line;
 mod conversation;
+mod conversation_event;
+mod conversation_event_store;
 mod conversation_session;
 mod model_driver;
 mod openai;
-mod persistence;
 mod tools;
 
 use std::process::ExitCode;
 
 use command_line::{CommandLine, CommandOutcome};
-use conversation::TurnOutcome;
+use conversation_event::TurnOutcome;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {

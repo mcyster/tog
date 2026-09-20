@@ -13,7 +13,7 @@ use tokio::process::{Child, Command};
 use tokio::task::JoinHandle;
 
 use super::ExecutableTool;
-use crate::conversation::{ToolDefinition, ToolExecutionProblem, ToolName};
+use crate::conversation_event::{ToolDefinition, ToolExecutionProblem, ToolName};
 
 pub(crate) const DEFAULT_TIMEOUT_SECONDS: u64 = 30;
 pub(crate) const MAXIMUM_RETAINED_OUTPUT_BYTES: usize = 64 * 1024;
@@ -279,7 +279,7 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::{ExecutableTool, MAXIMUM_RETAINED_OUTPUT_BYTES, ShellTool};
-    use crate::conversation::{ToolExecutionProblem, ToolExecutionProblemKind};
+    use crate::conversation_event::{ToolExecutionProblem, ToolExecutionProblemKind};
 
     async fn execute(arguments: Value) -> Result<Value, ToolExecutionProblem> {
         ShellTool::new().execute(arguments).await

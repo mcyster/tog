@@ -1,25 +1,12 @@
-use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
 use super::{
-    ConversationEventClass, ConversationEventEnvelope, ConversationEventKind,
-    InvalidConversationEventKind,
+    ConversationEventClass, ConversationEventEnvelope, ConversationEventId, ConversationEventKind,
+    ConversationEventRecord, InvalidConversationEventKind, StoredConversationEventKind,
 };
-use crate::conversation::{ConversationEventId, ConversationId};
+use crate::conversation::ConversationId;
 
-pub(crate) const SCHEMA_VERSION: u32 = 13;
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub(crate) struct ConversationEventRecord {
-    pub(crate) conversation_id: ConversationId,
-    pub(crate) position: u64,
-    pub(crate) id: ConversationEventId,
-    #[serde(with = "time::serde::rfc3339")]
-    pub(crate) timestamp: OffsetDateTime,
-    pub(crate) schema_version: u32,
-    #[serde(flatten)]
-    pub(crate) kind: StoredConversationEventKind,
-}
+const SCHEMA_VERSION: u32 = 13;
 
 impl ConversationEventRecord {
     #[allow(dead_code)]
@@ -60,13 +47,6 @@ impl ConversationEventRecord {
     pub(crate) fn ensure_valid(&self) -> Result<(), InvalidConversationEventKind> {
         self.kind.ensure_valid()
     }
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(untagged)]
-pub(crate) enum StoredConversationEventKind {
-    Shared(ConversationEventKind),
-    Extension(ConversationEventEnvelope),
 }
 
 impl StoredConversationEventKind {
