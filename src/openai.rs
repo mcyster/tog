@@ -12,10 +12,10 @@ use schemars::Schema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
-use crate::conversation::{
-    AssistantResponse, Conversation, ConversationEventClass, ConversationEventEnvelope,
-    ConversationEventError, ConversationEventExtension, ConversationEventKind,
-    ConversationEventReadError, ConversationEventReader, ConversationFact, ConversationMessage,
+use crate::conversation_event::{
+    AssistantResponse, ConversationEventClass, ConversationEventEnvelope, ConversationEventError,
+    ConversationEventExtension, ConversationEventKind, ConversationEventReadError,
+    ConversationEventReader, ConversationEventRecord, ConversationFact, ConversationMessage,
     ConversationProblem, ConversationTurnId, InvalidAssistantResponse, InvalidConversationProblem,
     InvalidModelCommunication, InvocationError, ModelCommunication, ModelData, ModelEvent,
     ModelEventImportance, ModelId, ModelInvocationId, ModelIssue, ModelSource, ProviderId,
@@ -170,7 +170,7 @@ impl ModelDriver for OpenAiModelDriver {
         );
         request_body.insert(
             "input".to_owned(),
-            semantic_input(conversation, &pending_user_requests),
+            semantic_input(conversation.events(), &pending_user_requests),
         );
         let available_tools = conversation.available_tools();
         if !available_tools.is_empty() {
@@ -286,13 +286,12 @@ impl ConversationEventReader for OpenAiModelDriver {
 }
 
 fn semantic_input(
-    conversation: &Conversation,
+    events: &[ConversationEventRecord],
     pending_user_requests: &[UserMessageRequest],
 ) -> Value {
-    let provider_call_ids = provider_tool_call_ids(conversation);
+    let provider_call_ids = provider_tool_call_ids(events);
     let mut input =
-        conversation
-            .events()
+        events
             .iter()
             .filter_map(|conversation_event| match &conversation_event.kind {
                 StoredConversationEventKind::Shared(ConversationEventKind::Fact(
@@ -371,9 +370,8 @@ fn provider_schema(schema: &Schema) -> Value {
     schema
 }
 
-fn provider_tool_call_ids(conversation: &Conversation) -> HashMap<ToolCallId, String> {
-    conversation
-        .events()
+fn provider_tool_call_ids(events: &[ConversationEventRecord]) -> HashMap<ToolCallId, String> {
+    events
         .iter()
         .filter_map(|conversation_event| match &conversation_event.kind {
             StoredConversationEventKind::Shared(ConversationEventKind::Fact(
@@ -1688,13 +1686,14 @@ mod tests {
     use serde_json::{Map, Value, json};
     use time::OffsetDateTime;
 
-    use crate::conversation::{
-        AssistantResponse, Conversation, ConversationEventId, ConversationEventKind,
-        ConversationEventRecord, ConversationFact, ConversationId, ConversationMessage,
-        ConversationProblem, ConversationTurnId, ModelCommunication, ModelData, ModelEvent,
-        ModelEventImportance, ModelId, ModelInvocationId, ModelIssue, ModelSource, ProviderId,
-        StoredConversationEventKind, ToolCallId, ToolDefinition, ToolExecutionProblem, ToolName,
-        ToolOutcome, ToolRequest, ToolResponse, UserContent,
+    use crate::conversation::{Conversation, ConversationHistory, ConversationId};
+    use crate::conversation_event::{
+        AssistantResponse, ConversationEventId, ConversationEventKind, ConversationEventRecord,
+        ConversationFact, ConversationMessage, ConversationProblem, ConversationTurnId,
+        ModelCommunication, ModelData, ModelEvent, ModelEventImportance, ModelId,
+        ModelInvocationId, ModelIssue, ModelSource, ProviderId, StoredConversationEventKind,
+        ToolCallId, ToolDefinition, ToolExecutionProblem, ToolName, ToolOutcome, ToolRequest,
+        ToolResponse, UserContent,
     };
     use crate::model_driver::{ModelDriver, ModelDriverOutput, ModelDriverOutputBatch, TurnInput};
 
@@ -1729,7 +1728,7 @@ mod tests {
         .expect("the model data should be valid");
         let turn_id = ConversationTurnId::new();
         let invocation_id = ModelInvocationId::new();
-        let conversation = Conversation::from_events(vec![
+        let conversation = ConversationHistory::from_events(vec![
             conversation_event(
                 conversation_id,
                 0,
@@ -1775,7 +1774,7 @@ mod tests {
         .expect("the conversation should be valid");
 
         assert_eq!(
-            semantic_input(&conversation, &[]),
+            semantic_input(conversation.events(), &[]),
             json!([
                 { "role": "user", "content": "Hello" },
                 { "role": "assistant", "content": "Hello." }
@@ -1843,7 +1842,7 @@ mod tests {
                 value: json!({ "stdout": "/tmp\n" }),
             },
         );
-        let conversation = Conversation::from_events(vec![
+        let conversation = ConversationHistory::from_events(vec![
             conversation_event(
                 conversation_id,
                 0,
@@ -1875,7 +1874,7 @@ mod tests {
         .expect("the conversation should be valid");
 
         assert_eq!(
-            semantic_input(&conversation, &[]),
+            semantic_input(conversation.events(), &[]),
             json!([
                 { "role": "user", "content": "Run pwd" },
                 {
@@ -1905,7 +1904,7 @@ mod tests {
             None,
         )
         .expect("the tool request should be valid");
-        let conversation = Conversation::from_events(vec![
+        let conversation = ConversationHistory::from_events(vec![
             conversation_event(
                 conversation_id,
                 0,
@@ -1933,7 +1932,7 @@ mod tests {
         ])
         .expect("the conversation should be valid");
 
-        let input = semantic_input(&conversation, &[]);
+        let input = semantic_input(conversation.events(), &[]);
         assert_eq!(input[0]["call_id"], call_id.to_string());
         assert_eq!(input[1]["call_id"], call_id.to_string());
         let output: Value = serde_json::from_str(
@@ -1976,7 +1975,7 @@ mod tests {
                 .expect("the timeout problem should be valid"),
             },
         );
-        let conversation = Conversation::from_events(vec![
+        let conversation = ConversationHistory::from_events(vec![
             conversation_event(
                 conversation_id,
                 0,
@@ -1996,7 +1995,7 @@ mod tests {
         ])
         .expect("the conversation should be valid");
 
-        let input = semantic_input(&conversation, &[]);
+        let input = semantic_input(conversation.events(), &[]);
         let output: Value = serde_json::from_str(
             input[1]["output"]
                 .as_str()
@@ -2071,9 +2070,9 @@ mod tests {
         expect_event(outputs.remove(0))
     }
 
-    fn test_conversation() -> Conversation {
+    fn test_conversation() -> ConversationHistory {
         let conversation_id = ConversationId::new();
-        Conversation::from_events(vec![conversation_event(
+        ConversationHistory::from_events(vec![conversation_event(
             conversation_id,
             0,
             ConversationEventKind::Fact(ConversationFact::Message {
@@ -2094,7 +2093,7 @@ mod tests {
         )
     }
 
-    fn driver_request(conversation: &Conversation) -> TurnInput<'_> {
+    fn driver_request(conversation: &dyn Conversation) -> TurnInput<'_> {
         TurnInput::new(conversation, ConversationTurnId::new())
     }
 

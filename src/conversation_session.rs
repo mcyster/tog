@@ -4,13 +4,14 @@ use std::fmt::{Display, Formatter};
 
 use futures_util::StreamExt;
 
-use crate::conversation::{
-    Conversation, ConversationCommand, ConversationCommandId, ConversationEvent, ConversationFact,
-    ConversationId, ConversationLifecycle, ConversationMessage, ConversationProblem,
-    ConversationTurnId, ToolResponse, TurnOutcome, UserContent, UserMessageRequest, UserPrompt,
+use crate::conversation::{ConversationHistory, ConversationId};
+use crate::conversation_event::{
+    ConversationCommand, ConversationCommandId, ConversationEvent, ConversationFact,
+    ConversationLifecycle, ConversationMessage, ConversationProblem, ConversationTurnId,
+    ToolResponse, TurnOutcome, UserContent, UserMessageRequest,
 };
+use crate::conversation_event_store::ConversationEventStore;
 use crate::model_driver::{ModelDriver, ModelDriverError, ModelDriverOutput, TurnInput};
-use crate::persistence::ConversationEventStore;
 use crate::tools::ToolRegistry;
 
 pub(crate) type ConversationSessionResult<T> = Result<T, Box<dyn Error>>;
@@ -50,7 +51,7 @@ impl<Store: ConversationEventStore> ConversationSession<Store> {
         model_driver: Box<dyn ModelDriver>,
         tool_registry: ToolRegistry,
     ) -> ConversationSessionResult<Self> {
-        Conversation::from_events(event_store.load(conversation_id)?)?;
+        ConversationHistory::from_events(event_store.load(conversation_id)?)?;
         Ok(Self {
             conversation_id,
             event_store,
@@ -65,14 +66,14 @@ impl<Store: ConversationEventStore> ConversationSession<Store> {
 
     pub(crate) fn add_user_request(
         &self,
-        user_prompt: UserPrompt,
+        content: Vec<UserContent>,
     ) -> ConversationSessionResult<ConversationCommandId> {
         let command_id = ConversationCommandId::new();
         self.event_store.append(
             self.conversation_id,
             vec![ConversationEvent::Command(
                 ConversationCommand::UserMessageRequested(UserMessageRequest {
-                    content: vec![UserContent::Text(user_prompt.text().to_owned())],
+                    content,
                     command_id,
                 }),
             )],
@@ -104,20 +105,18 @@ impl<Store: ConversationEventStore> ConversationSession<Store> {
                 tools: self.tool_registry.definitions(),
             })?;
             let conversation =
-                Conversation::from_events(self.event_store.load(self.conversation_id)?)?;
-            let pending_request_ids = conversation
+                ConversationHistory::from_events(self.event_store.load(self.conversation_id)?)?;
+            let turn_input = TurnInput::new(&conversation, turn_id);
+            let pending_request_ids = turn_input
                 .pending_user_requests()
-                .into_iter()
+                .iter()
                 .map(|request| request.command_id)
                 .collect::<HashSet<_>>();
             report_progress(ConversationSessionProgress::InvocationStarted {
                 model: source.model().as_str().to_owned(),
             })?;
 
-            let mut output_stream = self
-                .model_driver
-                .invoke(TurnInput::new(&conversation, turn_id))
-                .await?;
+            let mut output_stream = self.model_driver.invoke(turn_input).await?;
             let mut accepted_request_ids = HashSet::new();
             let mut tool_requests = Vec::new();
 
@@ -303,19 +302,20 @@ mod tests {
     use super::{
         ConversationSession, ConversationSessionProgress, MAXIMUM_TOOL_CONTINUATION_ROUNDS,
     };
-    use crate::conversation::{
+    use crate::conversation::ConversationId;
+    use crate::conversation_event::{
         AssistantResponse, ConversationEventEnvelope, ConversationEventExtension,
         ConversationEventKind, ConversationEventReadError, ConversationEventReader,
-        ConversationFact, ConversationId, ConversationLifecycle, ConversationMessage,
-        ConversationProblem, InvocationError, ModelId, ModelInvocationId, ModelSource, ProviderId,
+        ConversationFact, ConversationLifecycle, ConversationMessage, ConversationProblem,
+        InvocationError, ModelId, ModelInvocationId, ModelSource, ProviderId,
         StoredConversationEventKind, ToolCallId, ToolDefinition, ToolExecutionProblem,
-        ToolExecutionProblemKind, ToolName, ToolOutcome, ToolRequest, TurnOutcome, UserPrompt,
+        ToolExecutionProblemKind, ToolName, ToolOutcome, ToolRequest, TurnOutcome, UserContent,
     };
+    use crate::conversation_event_store::{ConversationEventStore, FileEventStore};
     use crate::model_driver::{
         ModelDriver, ModelDriverError, ModelDriverOutput, ModelDriverOutputBatch,
         ModelOutputStream, TurnInput,
     };
-    use crate::persistence::{ConversationEventStore, FileEventStore};
     use crate::tools::{ExecutableTool, ShellTool, ToolRegistry};
 
     enum RecordingResponse {
@@ -416,6 +416,10 @@ mod tests {
 
     fn temporary_directory() -> std::path::PathBuf {
         std::env::temp_dir().join(format!("tog-session-test-{}", uuid::Uuid::now_v7()))
+    }
+
+    fn user_content(text: &str) -> Vec<UserContent> {
+        vec![UserContent::Text(text.to_owned())]
     }
 
     struct ScriptedInvocation {
@@ -635,7 +639,7 @@ mod tests {
         );
         let conversation_id = session.id();
         session
-            .add_user_request(UserPrompt::from_str("hello").expect("the prompt should be valid"))
+            .add_user_request(user_content("hello"))
             .expect("the request should be recorded");
         assert_eq!(
             session
@@ -690,7 +694,7 @@ mod tests {
             ToolRegistry::default(),
         );
         session
-            .add_user_request(UserPrompt::from_str("hello").expect("the prompt should be valid"))
+            .add_user_request(user_content("hello"))
             .expect("the request should be recorded");
 
         assert_eq!(
@@ -716,7 +720,7 @@ mod tests {
         );
         let conversation_id = session.id();
         session
-            .add_user_request(UserPrompt::from_str("hello").expect("the prompt should be valid"))
+            .add_user_request(user_content("hello"))
             .expect("the request should be recorded");
 
         assert_eq!(
@@ -778,7 +782,7 @@ mod tests {
             ToolRegistry::default(),
         );
         session
-            .add_user_request(UserPrompt::from_str("hello").expect("the prompt should be valid"))
+            .add_user_request(user_content("hello"))
             .expect("the request should be recorded");
 
         let error = session
@@ -804,7 +808,7 @@ mod tests {
         );
         let conversation_id = session.id();
         session
-            .add_user_request(UserPrompt::from_str("hello").expect("the prompt should be valid"))
+            .add_user_request(user_content("hello"))
             .expect("the request should be recorded");
 
         assert_eq!(
@@ -856,7 +860,7 @@ mod tests {
         );
         let conversation_id = session.id();
         session
-            .add_user_request(UserPrompt::from_str("run it").expect("the prompt should be valid"))
+            .add_user_request(user_content("run it"))
             .expect("the request should be recorded");
 
         assert_eq!(
@@ -911,7 +915,7 @@ mod tests {
             registry,
         );
         session
-            .add_user_request(UserPrompt::from_str("run both").expect("the prompt should be valid"))
+            .add_user_request(user_content("run both"))
             .expect("the request should be recorded");
 
         assert_eq!(
@@ -958,9 +962,7 @@ mod tests {
         );
         let conversation_id = session.id();
         session
-            .add_user_request(
-                UserPrompt::from_str("keep going").expect("the prompt should be valid"),
-            )
+            .add_user_request(user_content("keep going"))
             .expect("the request should be recorded");
 
         assert_eq!(
@@ -1026,9 +1028,7 @@ mod tests {
             registry,
         );
         session
-            .add_user_request(
-                UserPrompt::from_str("keep going").expect("the prompt should be valid"),
-            )
+            .add_user_request(user_content("keep going"))
             .expect("the request should be recorded");
 
         let error = session
@@ -1055,7 +1055,7 @@ mod tests {
         );
         let conversation_id = session.id();
         session
-            .add_user_request(UserPrompt::from_str("try it").expect("the prompt should be valid"))
+            .add_user_request(user_content("try it"))
             .expect("the request should be recorded");
 
         assert_eq!(
@@ -1114,7 +1114,7 @@ mod tests {
         );
         let conversation_id = session.id();
         session
-            .add_user_request(UserPrompt::from_str("loop").expect("the prompt should be valid"))
+            .add_user_request(user_content("loop"))
             .expect("the request should be recorded");
 
         let error = session

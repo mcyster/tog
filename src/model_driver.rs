@@ -10,7 +10,7 @@ pub(crate) use turn_input::TurnInput;
 use futures_util::future::BoxFuture;
 use futures_util::stream::BoxStream;
 
-use crate::conversation::{ConversationCommandId, ConversationEventReader, ModelSource};
+use crate::conversation_event::{ConversationCommandId, ConversationEventReader, ModelSource};
 
 pub(crate) type ModelOutputStream =
     BoxStream<'static, Result<ModelDriverOutputBatch, ModelDriverError>>;

@@ -8,7 +8,8 @@ pub(crate) use file_event_store::FileEventStore;
 
 use std::io;
 
-use crate::conversation::{ConversationEvent, ConversationEventRecord, ConversationId};
+use crate::conversation::ConversationId;
+use crate::conversation_event::{ConversationEvent, ConversationEventRecord};
 
 pub(crate) trait ConversationEventStore {
     fn load(
