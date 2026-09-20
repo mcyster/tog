@@ -134,6 +134,19 @@ Evaluate each module by whether it helps a reader find and understand a
 concept. Split cohesive responsibilities rather than grouping unrelated items
 by technical form.
 
+## Foundational concepts are entry points
+
+A foundational concept should be discoverable at the module root. A reader
+looking for the event vocabulary should find it without first reading the
+concept that interprets it.
+
+Present the important struct and enum declarations at the entry point. Move
+validation, conversions, formatting, and other implementation bodies into
+cohesive child modules. Do not replace one long file with a maze of tiny ones.
+
+Prefer clarity over indirection. Evaluate every abstraction and module boundary
+by whether it makes the code easier to understand and use.
+
 ## Domain abstractions and integrations
 
 Keep model independent domain concepts separate from provider specific integrations.
