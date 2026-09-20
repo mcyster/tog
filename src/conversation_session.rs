@@ -4,7 +4,7 @@ use std::fmt::{Display, Formatter};
 
 use futures_util::StreamExt;
 
-use crate::conversation::{ConversationHistory, ConversationId, UserPrompt};
+use crate::conversation::{ConversationHistory, ConversationId};
 use crate::conversation_event::{
     ConversationCommand, ConversationCommandId, ConversationEvent, ConversationFact,
     ConversationLifecycle, ConversationMessage, ConversationProblem, ConversationTurnId,
@@ -66,14 +66,14 @@ impl<Store: ConversationEventStore> ConversationSession<Store> {
 
     pub(crate) fn add_user_request(
         &self,
-        user_prompt: UserPrompt,
+        content: Vec<UserContent>,
     ) -> ConversationSessionResult<ConversationCommandId> {
         let command_id = ConversationCommandId::new();
         self.event_store.append(
             self.conversation_id,
             vec![ConversationEvent::Command(
                 ConversationCommand::UserMessageRequested(UserMessageRequest {
-                    content: vec![UserContent::Text(user_prompt.text().to_owned())],
+                    content,
                     command_id,
                 }),
             )],
@@ -302,14 +302,14 @@ mod tests {
     use super::{
         ConversationSession, ConversationSessionProgress, MAXIMUM_TOOL_CONTINUATION_ROUNDS,
     };
-    use crate::conversation::{ConversationId, UserPrompt};
+    use crate::conversation::ConversationId;
     use crate::conversation_event::{
         AssistantResponse, ConversationEventEnvelope, ConversationEventExtension,
         ConversationEventKind, ConversationEventReadError, ConversationEventReader,
         ConversationFact, ConversationLifecycle, ConversationMessage, ConversationProblem,
         InvocationError, ModelId, ModelInvocationId, ModelSource, ProviderId,
         StoredConversationEventKind, ToolCallId, ToolDefinition, ToolExecutionProblem,
-        ToolExecutionProblemKind, ToolName, ToolOutcome, ToolRequest, TurnOutcome,
+        ToolExecutionProblemKind, ToolName, ToolOutcome, ToolRequest, TurnOutcome, UserContent,
     };
     use crate::conversation_event_store::{ConversationEventStore, FileEventStore};
     use crate::model_driver::{
@@ -416,6 +416,10 @@ mod tests {
 
     fn temporary_directory() -> std::path::PathBuf {
         std::env::temp_dir().join(format!("tog-session-test-{}", uuid::Uuid::now_v7()))
+    }
+
+    fn user_content(text: &str) -> Vec<UserContent> {
+        vec![UserContent::Text(text.to_owned())]
     }
 
     struct ScriptedInvocation {
@@ -635,7 +639,7 @@ mod tests {
         );
         let conversation_id = session.id();
         session
-            .add_user_request(UserPrompt::from_str("hello").expect("the prompt should be valid"))
+            .add_user_request(user_content("hello"))
             .expect("the request should be recorded");
         assert_eq!(
             session
@@ -690,7 +694,7 @@ mod tests {
             ToolRegistry::default(),
         );
         session
-            .add_user_request(UserPrompt::from_str("hello").expect("the prompt should be valid"))
+            .add_user_request(user_content("hello"))
             .expect("the request should be recorded");
 
         assert_eq!(
@@ -716,7 +720,7 @@ mod tests {
         );
         let conversation_id = session.id();
         session
-            .add_user_request(UserPrompt::from_str("hello").expect("the prompt should be valid"))
+            .add_user_request(user_content("hello"))
             .expect("the request should be recorded");
 
         assert_eq!(
@@ -778,7 +782,7 @@ mod tests {
             ToolRegistry::default(),
         );
         session
-            .add_user_request(UserPrompt::from_str("hello").expect("the prompt should be valid"))
+            .add_user_request(user_content("hello"))
             .expect("the request should be recorded");
 
         let error = session
@@ -804,7 +808,7 @@ mod tests {
         );
         let conversation_id = session.id();
         session
-            .add_user_request(UserPrompt::from_str("hello").expect("the prompt should be valid"))
+            .add_user_request(user_content("hello"))
             .expect("the request should be recorded");
 
         assert_eq!(
@@ -856,7 +860,7 @@ mod tests {
         );
         let conversation_id = session.id();
         session
-            .add_user_request(UserPrompt::from_str("run it").expect("the prompt should be valid"))
+            .add_user_request(user_content("run it"))
             .expect("the request should be recorded");
 
         assert_eq!(
@@ -911,7 +915,7 @@ mod tests {
             registry,
         );
         session
-            .add_user_request(UserPrompt::from_str("run both").expect("the prompt should be valid"))
+            .add_user_request(user_content("run both"))
             .expect("the request should be recorded");
 
         assert_eq!(
@@ -958,9 +962,7 @@ mod tests {
         );
         let conversation_id = session.id();
         session
-            .add_user_request(
-                UserPrompt::from_str("keep going").expect("the prompt should be valid"),
-            )
+            .add_user_request(user_content("keep going"))
             .expect("the request should be recorded");
 
         assert_eq!(
@@ -1026,9 +1028,7 @@ mod tests {
             registry,
         );
         session
-            .add_user_request(
-                UserPrompt::from_str("keep going").expect("the prompt should be valid"),
-            )
+            .add_user_request(user_content("keep going"))
             .expect("the request should be recorded");
 
         let error = session
@@ -1055,7 +1055,7 @@ mod tests {
         );
         let conversation_id = session.id();
         session
-            .add_user_request(UserPrompt::from_str("try it").expect("the prompt should be valid"))
+            .add_user_request(user_content("try it"))
             .expect("the request should be recorded");
 
         assert_eq!(
@@ -1114,7 +1114,7 @@ mod tests {
         );
         let conversation_id = session.id();
         session
-            .add_user_request(UserPrompt::from_str("loop").expect("the prompt should be valid"))
+            .add_user_request(user_content("loop"))
             .expect("the request should be recorded");
 
         let error = session

@@ -3,10 +3,10 @@ use std::fmt::{Display, Formatter};
 use std::str::FromStr;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct UserPrompt(String);
+pub(super) struct UserPrompt(String);
 
 impl UserPrompt {
-    pub(crate) fn text(&self) -> &str {
+    pub(super) fn text(&self) -> &str {
         &self.0
     }
 }
@@ -26,7 +26,7 @@ impl FromStr for UserPrompt {
 }
 
 #[derive(Debug, Eq, PartialEq)]
-pub(crate) struct InvalidUserPrompt;
+pub(super) struct InvalidUserPrompt;
 
 impl Display for InvalidUserPrompt {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {

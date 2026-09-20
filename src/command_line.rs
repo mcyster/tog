@@ -1,3 +1,5 @@
+mod prompt;
+
 use std::ffi::OsString;
 use std::io::{self, Write};
 
@@ -6,7 +8,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use crate::conversation::ConversationId;
 use crate::conversation_event::{
     ConversationEventRecord, ConversationFact, ConversationMessage, ConversationProblem,
-    ModelEventImportance, ModelId, TurnOutcome,
+    ModelEventImportance, ModelId, TurnOutcome, UserContent,
 };
 use crate::conversation_event_store::{ConversationEventStore, FileEventStore};
 use crate::conversation_session::{
@@ -14,6 +16,7 @@ use crate::conversation_session::{
 };
 use crate::openai::OpenAiModelDriver;
 use crate::tools::{ShellTool, ToolRegistry};
+use prompt::UserPrompt;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -45,7 +48,7 @@ impl CommandLine {
     pub(crate) async fn execute(self) -> ConversationSessionResult<CommandOutcome> {
         match self.command {
             Command::Turn(arguments) => {
-                let user_prompt = arguments.user_prompt_words.join(" ").parse()?;
+                let user_prompt: UserPrompt = arguments.user_prompt_words.join(" ").parse()?;
                 let verbosity = arguments.verbosity;
                 let event_store = FileEventStore::from_environment()?;
                 let model_driver = Box::new(OpenAiModelDriver::from_environment(arguments.model)?);
@@ -60,7 +63,8 @@ impl CommandLine {
                     )?,
                     None => ConversationSession::create(event_store, model_driver, tool_registry),
                 };
-                conversation_session.add_user_request(user_prompt)?;
+                conversation_session
+                    .add_user_request(vec![UserContent::Text(user_prompt.text().to_owned())])?;
                 eprintln!("#> conversation {}", conversation_session.id());
                 let outcome = conversation_session
                     .invoke(|progress| {
