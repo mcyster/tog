@@ -1,128 +1,120 @@
 # Environment, session, workspace, and conversation
 
-A conversation is the durable sequence of events. A session is an initialized,
-evolving runtime built from an environment. Within that session, a workspace
-identifies where work applies and resolves the relevant resources. Changing a
-directory, repository, or git worktree updates the workspace without rebuilding
-the session. The same conversation can continue across workspace changes and
-across multiple sessions.
+A conversation records actual events and selects the session and working location
+used for its work. A session is loaded configuration and capabilities. A workspace
+is a view resolved from that session configuration and working location.
 
-This note captures the mental model discussed on 2026-09-26. It does not prescribe
-new Rust types or claim these boundaries are already implemented.
+This note captures the mental model discussed on 2026-09-26. It describes intended
+boundaries, not implemented Rust types or a complete persistence schema.
 
 ## Concepts
 
 | Concept | Responsibility |
 | --- | --- |
-| Environment | Available resources and configuration: filesystem, project, configuration files, credentials, and external services. |
-| Session | Loaded configuration, effective access policy, selected model, tool implementations and connections, and ongoing work. Owns the working lifetime. |
-| Workspace | Current working references: repository, git worktree, directory, and applicable local and shared instruction, skill, and tool sources. Lives within the session. |
-| Conversation | Actual events: user input, model requests and responses, tool requests and results, and other recorded activity. |
-| Model context | Input assembled for one model invocation from conversation events, session configuration, workspace-applicable instructions and tool definitions, and retrieved information. |
+| Environment | Available resources and configuration sources: filesystem, repositories, credentials, tools, and external services. These can change independently of tog. |
+| Session | An identified loading of configuration and capabilities, including effective policy, model configuration, and available tools. Runtime implementations and connections support its execution. |
+| Workspace | A derived view of the resources, instructions, skills, and tool definitions applicable to a working location under the selected session configuration. |
+| Conversation | Durable events recording user input, model and tool activity, session selection, and working-location changes. |
+| Model context | Input assembled for one invocation using conversation events, selected session configuration, and the resolved workspace. |
 | Memory | Knowledge deliberately retained for reuse beyond its original conversation. |
-| History | Previous conversations and recorded session information available to browse, resume, or retrieve. |
+| History | Previous conversations and recorded activity available to browse, resume, or retrieve. |
 
-History is access to what happened; memory is retained knowledge selected for
-future use. Neither automatically becomes model context.
+History provides access to what happened; memory retains knowledge for future
+use. Neither automatically becomes model context. Context selection and compaction
+change what the model sees without rewriting the conversation's original events.
 
-“Model context” is useful here because the input contains more than conversation
-content. The conversation remains intact when context selection or compaction
-changes what a model sees.
+## Session selection and workspace resolution
 
-## Where things belong
+The conversation records its selected `session_id` and working location.
+Execution combines that session configuration with the workspace view.
+This does not require the session to own the conversation or to contain one
+permanent workspace.
 
-The environment defines what is available. The session loads and maintains
-working resources; the workspace determines which sources and definitions apply
-to the current work. Their use is recorded in the conversation.
+Reloading configuration into changed session state produces a new session ID,
+recorded in the same conversation's history. Earlier session references retain
+their meaning. Changing directory, repository, or git worktree changes the working
+location and resolves a new workspace view without requiring a session reload.
 
-| Item | Environment | Session | Conversation record when relevant |
-| --- | --- | --- | --- |
-| Access control | Policy definitions | Effective policy and enforcement | Approval requests, decisions, denied actions, and relevant policy identity/version |
-| Working directory | Available directories and worktrees | Current workspace points to the working location | Explicit changes and the directory used for an action |
-| Agent instructions | Local and centrally shared instruction sources | Workspace resolves applicability; session loads instructions | Contents actually used, or an immutable reference to them |
-| Model selection | Provider configuration and credentials | Selected model and effective options | Model and relevant options used for an invocation |
-| Tools and MCP | Implementations and server configuration | Session owns loaded tools and connections; workspace resolves the applicable toolset | Definitions exposed to the model, calls, and results |
-| Files | Live filesystem | Access to the working files | Observed reads, writes, and results |
-| Memory | Retained knowledge and retrieval facilities | Access to relevant memory | Retrieved material introduced into model context |
+Workspace needs no ID for now. Its inputs are the selected session configuration
+and working location, with resources read from the environment as needed. The
+same inputs may resolve differently after the environment changes; workspace is
+not a snapshot.
 
-Credentials and connection handles remain outside conversation content.
-A recorded approval explains an earlier action; whether it grants permission
-in a later session is a separate policy choice.
+For example, a conversation starts with session A in a UI repository, then changes
+location to a service repository. It continues with session A and the service's
+applicable guidance. Later, configuration is reloaded into session B and the
+conversation records that selection. All of this remains one conversation.
 
-For `AGENTS.md`, distinguish the file on disk, the loaded instructions, and the
-instructions actually supplied to a model. Editing the file later must not silently
-change the explanation of an earlier invocation. Captured content can be reused
-through immutable references rather than copied into every request.
+For operations spanning repositories, applicability follows the target of the
+work. Instructions retain their scope, so service guidance does not silently
+govern UI edits merely because both have appeared in the conversation.
 
-The recording question is: if this value changes tomorrow, do we need its previous
-value to understand today's action? Capture the relevant observation or version
-at use time, without attempting a complete snapshot of the machine.
+## Tools, instructions, and skills
 
-## Workspace changes within a session
+The environment supplies implementations and configuration. The session loads
+tools and maintains their runtime connections. Workspace resolution determines
+which local and shared sources apply to the work.
 
-Session initialization loads configuration and establishes baseline resources.
-The workspace holds references to where the session is working and which sources
-apply there. Updating those references can trigger loading or refreshing local
-instructions, skills, and tool definitions. Existing session resources remain
-available subject to the effective policy.
-
-For example, a session starts in a UI repository and then works in a service
-repository. Its workspace changes to the service repository and directory.
-The session loads the service's applicable instructions and skills while retaining
-its conversation and runtime. Instructions retain their scope: service guidance
-must not silently become guidance for subsequent UI work.
-
-Separate repositories can use a central repository for shared instructions and
-skills alongside their local guidance. The workspace resolves those configured
-sources. Version selection, precedence, and automatic refresh rules remain open;
-this note does not require a new package manager or repository layout.
-
-A session can use a default workspace, with an explicit target workspace for work
-that spans repositories. Whether that requires multiple workspace objects is an
-implementation choice. Applicability follows the target of the work, not merely
-the shell's current directory.
-
-## Tools and skills reaching the conversation
-
-Tools live in the session as executable implementations and connections. The
-workspace resolves which tool sources and definitions apply to the work, and the
-session loads what is needed from those sources.
+| Resource | Resolved working state | Conversation record |
+| --- | --- | --- |
+| Access control | Effective session policy applied to the target operation | Relevant approvals, decisions, and denied actions |
+| Working location | Directory, repository, or worktree used to resolve workspace | Location selection and relevant changes |
+| Agent instructions | Applicable local and centrally shared guidance | Instructions introduced into model context, directly or by immutable reference |
+| Tools and MCP | Session-owned implementations and connections; workspace-applicable toolset | Definitions exposed to an invocation, requests, and results |
+| Model configuration | Selected model and effective invocation options | Relevant selection, options, and outcome |
+| Memory and skills | Material selected for the current task and scope | Content introduced into model context |
 
 For a model invocation:
 
-1. Resolve the applicable toolset through the workspace and session policy.
-2. Select the definitions to expose: names, descriptions, and argument schemas.
-3. Record those definitions, or immutable references to them, in the conversation
-   before invoking the model.
-4. Assemble model context using that recorded selection.
-5. Execute model-requested tool calls through session-owned implementations,
-   checking current authorization, and record their results.
+1. Resolve the applicable toolset using the selected session and workspace.
+2. Select the exposed names, descriptions, and argument schemas.
+3. Record that selection in the conversation, directly or by immutable reference.
+4. Assemble model context and invoke the model.
+5. Execute requested calls using session tools and record their results.
 
-The exposed toolset may be a subset of the tools loaded in the session.
-Implementations, live connections, and credentials are not passed to the model.
-Exposure does not itself authorize execution; a request may still require approval.
-A workspace change must not silently reinterpret a pending call against a different
-tool implementation. The exact binding mechanism remains to be designed.
+The exposed toolset may be a subset of loaded tools. Implementations, credentials,
+and connection handles stay outside model context. Exposing a tool does not itself
+authorize execution; current policy can still require approval.
 
-Skills are reusable instruction packages and can be loaded through tools.
-A skill-loading tool returns instructions for the model to follow; it need not
-execute the procedure described by those instructions. Loading through a tool
-does not require treating skills and executable operations as the same concept.
+Skills are instruction packages that can be loaded through tools. The loading
+tool supplies instructions for subsequent model work. A possible `skill_search`
+uses the task and resolved workspace to discover skills from local and central
+repositories. Loading applicable baseline `AGENTS.md` instructions does not
+depend on an optional skill search.
 
-A possible `skill_search` tool can search local and central sources using the task
-and workspace. The session resolves the scope; search uses it. Applicable baseline
-`AGENTS.md` instructions must not depend on an optional skill search. Record
-selected skill content or immutable references when it enters model context.
+Separate repositories can share central instructions and skills alongside their
+local guidance. Source selection, precedence, and refresh behavior remain choices
+to settle when implementing that resolution.
 
-## Continuation across sessions
+## Storage direction
 
-Tomorrow's session can reopen today's conversation using a changed `AGENTS.md`
-and current access policy. Earlier events still describe the earlier work; the
-next invocation uses the newly resolved workspace and context. Resuming the
-conversation does not itself restore files, connections, or background processes.
+Use separate storage for identified sessions and conversations:
 
-This model leaves reload triggers, session persistence, and the number of
-conversations attached to a session open. Those choices need concrete use cases.
+| Default path | Purpose |
+| --- | --- |
+| `~/.local/share/tog/sessions/$ID/` | Persisted session configuration and relevant state |
+| `~/.local/share/tog/conversations/$ID/` | Events, including session references and working-location changes |
+
+Workspace is derived and requires neither a `workspaces/$ID/` directory nor
+a `WorkspaceId` at this stage. Independent workspace identity can be introduced
+if a concrete need to save, name, reopen, or share one emerges. Persisting a session
+does not persist live processes, connections, or the entire environment.
+
+## What the history promises
+
+Record what happens at tog's boundaries and the inputs, outputs, and configuration
+changes useful for understanding the work. Capturing model-visible instructions
+and tool definitions explains what was supplied to the model.
+
+This is not complete reproducibility. Files, services, tool internals, and the wider
+environment can change without a corresponding tog event. Session identity and
+workspace resolution do not freeze those conditions. Unrecorded influences limit
+what the history explains; they do not invalidate the model.
+
+Record observed values when useful rather than introducing snapshots or identities
+solely because something might change. Resuming a conversation continues its
+history using available resources; it does not restore the old environment or
+promise identical results.
 
 ## Comparison with other tools
 
@@ -149,12 +141,11 @@ initialized session” in this vocabulary.
 
 The existing [ConversationSession](../../src/conversation_session.rs) binds a
 conversation ID, event store, model driver, and tool registry and orchestrates
-execution. It is a starting point for this discussion, not evidence that
-environment initialization, workspace resolution, and context assembly already
-have separate contracts.
+execution. That existing implementation does not establish the ownership model
+described here.
 
 The [conversation event plan](../plans/conversation-design.md) remains responsible
-for event vocabulary and the driver boundary. This note does not change that
-interface or decide whether instruction snapshots and tool definitions use its
-proposed `Context` event. The existing requirement to record model-visible
-material or reference it immutably still applies.
+for event vocabulary and the driver boundary. Concrete event names for session
+and location selection, and the representation of loaded context, remain to be
+designed. Recording model-visible material does not imply capturing every
+environmental dependency.
