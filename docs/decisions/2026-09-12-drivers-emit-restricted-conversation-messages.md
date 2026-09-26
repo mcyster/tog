@@ -2,7 +2,17 @@
 
 ## Status
 
-Accepted
+Superseded
+
+## Superseded by
+
+[Conversation Events And ModelDriver Boundary](../notes/2026-09-26-conversation-events-and-model-driver.md):
+the message vocabulary no longer exists as a separate layer. The driver output
+boundary is now a restricted enum over concrete conversation payloads
+(`AssistantResponse`, `ToolRequest`, `ModelResponse`, `ModelSpecificEvent`), and
+the session attaches terminal-response completion. The principle this decision
+established — the type system expresses what a driver may and may not produce —
+still applies.
 
 ## Context
 

@@ -9,18 +9,13 @@ use futures_util::{FutureExt, StreamExt};
 use reqwest::Client;
 use reqwest::StatusCode;
 use schemars::Schema;
-use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
-use crate::conversation_event::{
-    AssistantResponse, ConversationEventClass, ConversationEventEnvelope, ConversationEventError,
-    ConversationEventExtension, ConversationEventKind, ConversationEventReadError,
-    ConversationEventReader, ConversationEventRecord, ConversationFact, ConversationMessage,
-    ConversationProblem, ConversationTurnId, InvalidAssistantResponse, InvalidConversationProblem,
-    InvalidModelCommunication, InvocationError, ModelCommunication, ModelData, ModelEvent,
-    ModelEventImportance, ModelId, ModelInvocationId, ModelIssue, ModelSource, ProviderId,
-    StoredConversationEventKind, ToolCallId, ToolDefinition, ToolName, ToolRequest, ToolResponse,
-    UserContent, UserMessageRequest,
+use crate::conversation::{
+    AssistantResponse, ConversationEvent, ConversationEventId, ConversationEventRecord,
+    FailureCategory, InvalidAssistantResponse, InvalidModelResponse, InvalidModelSpecificEvent,
+    InvalidToolRequest, ModelData, ModelId, ModelOutcome, ModelResponse, ModelSource,
+    ModelSpecificEvent, OperationFailure, ProviderId, ToolName, ToolRequest, Usage, UserContent,
 };
 use crate::model_driver::{
     ModelDriver, ModelDriverError, ModelDriverOutput, ModelDriverOutputBatch, ModelOutputStream,
@@ -30,7 +25,7 @@ use crate::model_driver::{
 type ResponseByteStream = BoxStream<'static, Result<Vec<u8>, OpenAiError>>;
 type ProviderOutputStream = BoxStream<'static, Result<ModelDriverEvent, OpenAiError>>;
 
-const OPEN_AI_NAMESPACE_VERSION: &str = "1";
+const PROVIDER_PAYLOAD_VERSION: u32 = 1;
 
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum OpenAiError {
@@ -64,19 +59,32 @@ impl Display for OpenAiError {
 
 impl std::error::Error for OpenAiError {}
 
+#[derive(Clone)]
 enum ModelDriverEvent {
-    Model {
-        event: ModelEvent,
-        data: Option<ModelData>,
+    AssistantResponse {
+        content: String,
     },
-    Problem {
-        problem: ModelIssue,
-        data: Option<ModelData>,
+    ModelSpecificEvent {
+        event_type: String,
+        message: Option<String>,
     },
     ToolRequest {
         tool_name: ToolName,
         arguments: Value,
         provider_call_id: Option<String>,
+    },
+    Terminal {
+        outcome: TerminalModelOutcome,
+        usage: Option<Usage>,
+    },
+}
+
+#[derive(Clone)]
+enum TerminalModelOutcome {
+    Succeeded,
+    Failed {
+        category: FailureCategory,
+        message: String,
     },
 }
 
@@ -85,44 +93,6 @@ pub(crate) struct OpenAiModelDriver {
     api_key: String,
     responses_url: String,
     source: ModelSource,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-struct OpenAiInvocationRequested {
-    invocation_id: ModelInvocationId,
-    turn_id: ConversationTurnId,
-    model: ModelSource,
-}
-
-impl ConversationEventExtension for OpenAiInvocationRequested {
-    fn class(&self) -> ConversationEventClass {
-        ConversationEventClass::Command
-    }
-
-    fn namespace(&self) -> &str {
-        "openai"
-    }
-
-    fn namespace_version(&self) -> &str {
-        OPEN_AI_NAMESPACE_VERSION
-    }
-
-    fn event_type(&self) -> &str {
-        "model_invocation_requested"
-    }
-
-    fn event_schema_version(&self) -> u32 {
-        1
-    }
-
-    fn description(&self) -> &str {
-        "OpenAI model invocation was requested."
-    }
-
-    fn serialize_payload(&self) -> Result<Value, ConversationEventError> {
-        serde_json::to_value(self)
-            .map_err(|error| ConversationEventError::Serialization(error.to_string()))
-    }
 }
 
 impl OpenAiModelDriver {
@@ -153,26 +123,15 @@ impl ModelDriver for OpenAiModelDriver {
         &'invoke self,
         input: TurnInput<'invoke>,
     ) -> BoxFuture<'invoke, Result<ModelOutputStream, ModelDriverError>> {
-        let conversation = input.conversation();
-        let turn_id = input.turn_id();
-        let pending_user_requests = input.pending_user_requests().to_vec();
-        let pending_user_events = accepted_user_events(&pending_user_requests);
-        let invocation_id = ModelInvocationId::new();
-        let invocation_event = OpenAiInvocationRequested {
-            invocation_id,
-            turn_id,
-            model: self.source.clone(),
-        };
+        let model_request_id = input.model_request_id();
+        let events = input.events();
         let mut request_body = Map::new();
         request_body.insert(
             "model".to_owned(),
             Value::String(self.source.model().as_str().to_owned()),
         );
-        request_body.insert(
-            "input".to_owned(),
-            semantic_input(conversation.events(), &pending_user_requests),
-        );
-        let available_tools = conversation.available_tools();
+        request_body.insert("input".to_owned(), semantic_input(events));
+        let available_tools = input.available_tools();
         if !available_tools.is_empty() {
             request_body.insert(
                 "tools".to_owned(),
@@ -195,24 +154,20 @@ impl ModelDriver for OpenAiModelDriver {
                 Ok(request) => request,
                 Err(error) => {
                     let error = OpenAiError::InvalidRequest(error.to_string());
-                    return Ok(invocation_error_stream(
-                        pending_user_events,
-                        invocation_event,
-                        invocation_id,
-                        error,
+                    return Ok(failed_terminal_stream(
+                        model_request_id,
                         FailureStage::BeforeStream,
+                        error,
                     ));
                 }
             };
             let response = match http_client.execute(request).await {
                 Ok(response) => response,
                 Err(error) => {
-                    return Ok(invocation_error_stream(
-                        pending_user_events,
-                        invocation_event,
-                        invocation_id,
-                        OpenAiError::Transport(error.to_string()),
+                    return Ok(failed_terminal_stream(
+                        model_request_id,
                         FailureStage::BeforeStream,
+                        OpenAiError::Transport(error.to_string()),
                     ));
                 }
             };
@@ -221,28 +176,19 @@ impl ModelDriver for OpenAiModelDriver {
                 let response_body = match response.text().await {
                     Ok(response_body) => response_body,
                     Err(error) => {
-                        return Ok(invocation_error_stream(
-                            pending_user_events,
-                            invocation_event,
-                            invocation_id,
-                            OpenAiError::Transport(error.to_string()),
+                        return Ok(failed_terminal_stream(
+                            model_request_id,
                             FailureStage::BeforeStream,
+                            OpenAiError::Transport(error.to_string()),
                         ));
                     }
                 };
                 return match classify_response_failure(response_status, response_body) {
-                    Ok(issue) => Ok(conversation_event_stream(
-                        model_issue_stream(issue),
-                        pending_user_events,
-                        invocation_id,
-                        Box::new(invocation_event),
-                    )),
-                    Err(error) => Ok(invocation_error_stream(
-                        pending_user_events,
-                        invocation_event,
-                        invocation_id,
-                        error,
+                    Ok(()) => Ok(context_limit_stream(model_request_id)),
+                    Err(error) => Ok(failed_terminal_stream(
+                        model_request_id,
                         FailureStage::BeforeStream,
+                        error,
                     )),
                 };
             }
@@ -257,103 +203,54 @@ impl ModelDriver for OpenAiModelDriver {
                 .boxed();
             Ok(conversation_event_stream(
                 model_output_stream(response_bytes),
-                pending_user_events,
-                invocation_id,
-                Box::new(invocation_event),
+                model_request_id,
             ))
         }
         .boxed()
     }
 }
 
-impl ConversationEventReader for OpenAiModelDriver {
-    fn read_event(
-        &self,
-        envelope: &ConversationEventEnvelope,
-    ) -> Result<Box<dyn ConversationEventExtension>, ConversationEventReadError> {
-        if envelope.namespace() != "openai" {
-            return Err(ConversationEventReadError::UnsupportedNamespace);
-        }
-        if envelope.event_type() != "model_invocation_requested"
-            || envelope.event_schema_version() != 1
-        {
-            return Err(ConversationEventReadError::UnsupportedEvent);
-        }
-        serde_json::from_value::<OpenAiInvocationRequested>(envelope.payload().clone())
-            .map(|event| Box::new(event) as Box<dyn ConversationEventExtension>)
-            .map_err(|error| ConversationEventReadError::InvalidPayload(error.to_string()))
-    }
-}
-
-fn semantic_input(
-    events: &[ConversationEventRecord],
-    pending_user_requests: &[UserMessageRequest],
-) -> Value {
+fn semantic_input(events: &[ConversationEventRecord]) -> Value {
     let provider_call_ids = provider_tool_call_ids(events);
-    let mut input =
-        events
-            .iter()
-            .filter_map(|conversation_event| match &conversation_event.kind {
-                StoredConversationEventKind::Shared(ConversationEventKind::Fact(
-                    ConversationFact::Message {
-                        message: ConversationMessage::User { content, .. },
-                        ..
-                    },
-                )) => {
-                    let text = content
-                        .iter()
-                        .map(|content| match content {
-                            UserContent::Text(text) => text.as_str(),
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    Some(json!({ "role": "user", "content": text }))
-                }
-                StoredConversationEventKind::Shared(ConversationEventKind::Fact(
-                    ConversationFact::Message {
-                        message: ConversationMessage::AssistantResponse { response, .. },
-                        ..
-                    },
-                )) => Some(json!({ "role": "assistant", "content": response.message() })),
-                StoredConversationEventKind::Shared(ConversationEventKind::Fact(
-                    ConversationFact::ToolRequest { request, .. },
-                )) => Some(provider_tool_request_input(request, &provider_call_ids)),
-                StoredConversationEventKind::Shared(ConversationEventKind::Fact(
-                    ConversationFact::ToolResponse { response, .. },
-                )) => Some(provider_tool_response_input(response, &provider_call_ids)),
-                StoredConversationEventKind::Shared(ConversationEventKind::Fact(
-                    ConversationFact::Message {
-                        message:
-                            ConversationMessage::Communication { .. }
-                            | ConversationMessage::Problem { .. },
-                        ..
-                    },
-                ))
-                | StoredConversationEventKind::Shared(ConversationEventKind::Fact(
-                    ConversationFact::Lifecycle(_),
-                ))
-                | StoredConversationEventKind::Shared(ConversationEventKind::Fact(
-                    ConversationFact::ToolsAvailable { .. },
-                ))
-                | StoredConversationEventKind::Shared(ConversationEventKind::Command(_))
-                | StoredConversationEventKind::Extension(_) => None,
-            })
-            .collect::<Vec<_>>();
-    input.extend(pending_user_requests.iter().map(|request| {
-        let text = request
-            .content
-            .iter()
-            .map(|content| match content {
-                UserContent::Text(text) => text.as_str(),
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        json!({ "role": "user", "content": text })
-    }));
+    let input = events
+        .iter()
+        .filter_map(|conversation_event| match &conversation_event.event {
+            ConversationEvent::User(user) => {
+                let text = user
+                    .content()
+                    .iter()
+                    .map(|content| match content {
+                        UserContent::Text(text) => text.as_str(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                Some(json!({ "role": "user", "content": text }))
+            }
+            ConversationEvent::AssistantResponse(response) => {
+                Some(json!({ "role": "assistant", "content": response.content() }))
+            }
+            ConversationEvent::ToolRequest(request) => Some(provider_tool_request_input(
+                conversation_event,
+                request,
+                &provider_call_ids,
+            )),
+            ConversationEvent::ToolResponse(response) => {
+                Some(provider_tool_response_input(response, &provider_call_ids))
+            }
+            ConversationEvent::TurnStart(_)
+            | ConversationEvent::TurnEnd(_)
+            | ConversationEvent::ModelRequest(_)
+            | ConversationEvent::ModelResponse(_)
+            | ConversationEvent::ModelSpecificEvent(_)
+            | ConversationEvent::Automation(_)
+            | ConversationEvent::Context(_)
+            | ConversationEvent::Data(_) => None,
+        })
+        .collect::<Vec<_>>();
     Value::Array(input)
 }
 
-fn provider_tool(definition: &ToolDefinition) -> Value {
+fn provider_tool(definition: &crate::conversation::ToolDefinition) -> Value {
     json!({
         "type": "function",
         "name": definition.name().as_str(),
@@ -370,13 +267,15 @@ fn provider_schema(schema: &Schema) -> Value {
     schema
 }
 
-fn provider_tool_call_ids(events: &[ConversationEventRecord]) -> HashMap<ToolCallId, String> {
+fn provider_tool_call_ids(
+    events: &[ConversationEventRecord],
+) -> HashMap<ConversationEventId, String> {
     events
         .iter()
-        .filter_map(|conversation_event| match &conversation_event.kind {
-            StoredConversationEventKind::Shared(ConversationEventKind::Fact(
-                ConversationFact::ToolRequest { request, .. },
-            )) => Some((request.call_id(), provider_tool_call_id(request))),
+        .filter_map(|conversation_event| match &conversation_event.event {
+            ConversationEvent::ToolRequest(request) => {
+                Some((conversation_event.id, provider_tool_call_id(request)))
+            }
             _ => None,
         })
         .collect()
@@ -388,17 +287,18 @@ fn provider_tool_call_id(request: &ToolRequest) -> String {
         .and_then(|data| data.content().get("call_id"))
         .and_then(Value::as_str)
         .map(str::to_owned)
-        .unwrap_or_else(|| request.call_id().to_string())
+        .unwrap_or_default()
 }
 
 fn provider_tool_request_input(
+    conversation_event: &ConversationEventRecord,
     request: &ToolRequest,
-    provider_call_ids: &HashMap<ToolCallId, String>,
+    provider_call_ids: &HashMap<ConversationEventId, String>,
 ) -> Value {
     let call_id = provider_call_ids
-        .get(&request.call_id())
+        .get(&conversation_event.id)
         .cloned()
-        .unwrap_or_else(|| request.call_id().to_string());
+        .unwrap_or_else(|| conversation_event.id.to_string());
     json!({
         "type": "function_call",
         "call_id": call_id,
@@ -409,13 +309,13 @@ fn provider_tool_request_input(
 }
 
 fn provider_tool_response_input(
-    response: &ToolResponse,
-    provider_call_ids: &HashMap<ToolCallId, String>,
+    response: &crate::conversation::ToolResponse,
+    provider_call_ids: &HashMap<ConversationEventId, String>,
 ) -> Value {
     let call_id = provider_call_ids
-        .get(&response.call_id())
+        .get(&response.tool_request_id())
         .cloned()
-        .unwrap_or_else(|| response.call_id().to_string());
+        .unwrap_or_else(|| response.tool_request_id().to_string());
     json!({
         "type": "function_call_output",
         "call_id": call_id,
@@ -424,24 +324,9 @@ fn provider_tool_response_input(
     })
 }
 
-fn accepted_user_events(pending_user_requests: &[UserMessageRequest]) -> Vec<ModelDriverOutput> {
-    pending_user_requests
-        .iter()
-        .map(|request| {
-            ModelDriverOutput::Message(ConversationMessage::User {
-                caused_by: Some(request.command_id),
-                content: request.content.clone(),
-            })
-        })
-        .collect()
-}
-
-fn classify_response_failure(status: StatusCode, body: String) -> Result<ModelIssue, OpenAiError> {
+fn classify_response_failure(status: StatusCode, body: String) -> Result<(), OpenAiError> {
     if status == StatusCode::BAD_REQUEST && is_context_limit_error(&body) {
-        return ModelIssue::try_context_limit_exceeded(
-            "The model context limit was exceeded.".to_owned(),
-        )
-        .map_err(invalid_conversation_problem);
+        return Ok(());
     }
 
     Err(match status {
@@ -467,56 +352,99 @@ fn is_context_limit_payload(payload: &Value) -> bool {
         .any(|code| matches!(code, "context_length_exceeded" | "context_window_exceeded"))
 }
 
-fn model_issue_stream(issue: ModelIssue) -> ProviderOutputStream {
-    stream::once(async move {
-        Ok(ModelDriverEvent::Problem {
-            problem: issue,
-            data: None,
+fn context_limit_stream(model_request_id: ConversationEventId) -> ModelOutputStream {
+    terminal_model_output(
+        stream::once(async move {
+            Ok(ModelDriverEvent::Terminal {
+                outcome: TerminalModelOutcome::Failed {
+                    category: FailureCategory::ContextLimitExceeded,
+                    message: "The model context limit was exceeded.".to_owned(),
+                },
+                usage: None,
+            })
         })
-    })
-    .boxed()
+        .boxed(),
+        model_request_id,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum FailureStage {
+    BeforeStream,
+    DuringStream,
+}
+
+fn failed_terminal_stream(
+    model_request_id: ConversationEventId,
+    failure_stage: FailureStage,
+    error: OpenAiError,
+) -> ModelOutputStream {
+    let (category, message) = provider_failure(&error, failure_stage);
+    terminal_model_output(
+        stream::once(async move {
+            Ok(ModelDriverEvent::Terminal {
+                outcome: TerminalModelOutcome::Failed { category, message },
+                usage: None,
+            })
+        })
+        .boxed(),
+        model_request_id,
+    )
+}
+
+fn provider_failure(error: &OpenAiError, failure_stage: FailureStage) -> (FailureCategory, String) {
+    match error {
+        OpenAiError::Authentication(_) => (
+            FailureCategory::Authentication,
+            "The model provider could not authenticate the invocation.".to_owned(),
+        ),
+        OpenAiError::RateLimited(_) => (
+            FailureCategory::RateLimited,
+            "The model provider rate-limited the invocation.".to_owned(),
+        ),
+        OpenAiError::Transport(_) if matches!(failure_stage, FailureStage::DuringStream) => (
+            FailureCategory::StreamInterrupted,
+            "The model response stream was interrupted.".to_owned(),
+        ),
+        OpenAiError::Transport(_) => (
+            FailureCategory::Transport,
+            "The model provider could not be reached.".to_owned(),
+        ),
+        OpenAiError::InvalidRequest(_) => (
+            FailureCategory::InvalidRequest,
+            "The model invocation request was invalid.".to_owned(),
+        ),
+        OpenAiError::InvalidResponse(_) => (
+            FailureCategory::InvalidProviderResponse,
+            "The model provider returned an invalid response.".to_owned(),
+        ),
+        OpenAiError::StreamInterrupted(_) => (
+            FailureCategory::StreamInterrupted,
+            "The model response stream was interrupted.".to_owned(),
+        ),
+        OpenAiError::Provider(_) => (
+            FailureCategory::ProviderFailure,
+            "The model provider failed the invocation.".to_owned(),
+        ),
+    }
 }
 
 struct ConversationEventStreamState {
     provider_events: ProviderOutputStream,
-    invocation_id: ModelInvocationId,
+    model_request_id: ConversationEventId,
     pending_batches: VecDeque<ModelDriverOutputBatch>,
     terminated: bool,
 }
 
-fn invocation_error_stream(
-    mut pending_user_events: Vec<ModelDriverOutput>,
-    invocation_event: OpenAiInvocationRequested,
-    invocation_id: ModelInvocationId,
-    error: OpenAiError,
-    failure_stage: FailureStage,
-) -> ModelOutputStream {
-    pending_user_events.push(ModelDriverOutput::Command(Box::new(invocation_event)));
-    pending_user_events.push(ModelDriverOutput::Message(ConversationMessage::Problem {
-        invocation_id: Some(invocation_id),
-        data: None,
-        problem: provider_problem(&error, failure_stage),
-    }));
-    let batch = ModelDriverOutputBatch::try_new(pending_user_events)
-        .expect("an invocation failure batch contains an invocation event and a problem");
-    stream::once(async move { Ok(batch) }).boxed()
-}
-
 fn conversation_event_stream(
     provider_events: ProviderOutputStream,
-    initial_events: Vec<ModelDriverOutput>,
-    invocation_id: ModelInvocationId,
-    invocation_event: Box<dyn ConversationEventExtension>,
+    model_request_id: ConversationEventId,
 ) -> ModelOutputStream {
-    let mut initial_batch = initial_events;
-    initial_batch.push(ModelDriverOutput::Command(invocation_event));
-    let initial_batch = ModelDriverOutputBatch::try_new(initial_batch)
-        .expect("a model driver batch includes its invocation event");
     stream::unfold(
         ConversationEventStreamState {
             provider_events,
-            invocation_id,
-            pending_batches: VecDeque::from([initial_batch]),
+            model_request_id,
+            pending_batches: VecDeque::new(),
             terminated: false,
         },
         |mut state| async move {
@@ -528,31 +456,20 @@ fn conversation_event_stream(
             }
             match state.provider_events.next().await {
                 Some(Ok(driver_event)) => {
-                    let output =
-                        match translate_model_driver_event(driver_event, state.invocation_id) {
-                            Ok(driver_output) => driver_output,
-                            Err(error) => {
-                                state.pending_batches = VecDeque::from([failure_batch(
-                                    state.invocation_id,
-                                    error,
-                                    FailureStage::DuringStream,
-                                )]);
-                                state.terminated = true;
-                                return state
-                                    .pending_batches
-                                    .pop_front()
-                                    .map(|batch| (Ok(batch), state));
-                            }
-                        };
-                    Some((Ok(ModelDriverOutputBatch::from(output)), state))
+                    if let Err(error) = translate_model_driver_event(
+                        driver_event,
+                        state.model_request_id,
+                        &mut state,
+                    ) {
+                        fail_stream(&mut state, error);
+                    }
+                    state
+                        .pending_batches
+                        .pop_front()
+                        .map(|batch| (Ok(batch), state))
                 }
                 Some(Err(error)) => {
-                    state.pending_batches = VecDeque::from([failure_batch(
-                        state.invocation_id,
-                        error,
-                        FailureStage::DuringStream,
-                    )]);
-                    state.terminated = true;
+                    fail_stream(&mut state, error);
                     state
                         .pending_batches
                         .pop_front()
@@ -565,86 +482,62 @@ fn conversation_event_stream(
     .boxed()
 }
 
-#[derive(Clone, Copy)]
-enum FailureStage {
-    BeforeStream,
-    DuringStream,
+fn terminal_model_output(
+    provider_events: ProviderOutputStream,
+    model_request_id: ConversationEventId,
+) -> ModelOutputStream {
+    conversation_event_stream(provider_events, model_request_id)
 }
 
-fn failure_batch(
-    invocation_id: ModelInvocationId,
-    error: OpenAiError,
-    failure_stage: FailureStage,
-) -> ModelDriverOutputBatch {
-    ModelDriverOutputBatch::from(ModelDriverOutput::Message(ConversationMessage::Problem {
-        invocation_id: Some(invocation_id),
-        data: None,
-        problem: provider_problem(&error, failure_stage),
-    }))
-}
-
-fn provider_problem(error: &OpenAiError, failure_stage: FailureStage) -> ConversationProblem {
-    let invocation_error = match error {
-        OpenAiError::Authentication(_) => InvocationError::try_authentication(
-            "The model provider could not authenticate the invocation.".to_owned(),
-        ),
-        OpenAiError::RateLimited(_) => InvocationError::try_rate_limited(
-            "The model provider rate-limited the invocation.".to_owned(),
-        ),
-        OpenAiError::Transport(_) if matches!(failure_stage, FailureStage::DuringStream) => {
-            InvocationError::try_stream_interrupted(
-                "The model response stream was interrupted.".to_owned(),
-            )
-        }
-        OpenAiError::Transport(_) => {
-            InvocationError::try_transport("The model provider could not be reached.".to_owned())
-        }
-        OpenAiError::InvalidRequest(_) => InvocationError::try_invalid_request(
-            "The model invocation request was invalid.".to_owned(),
-        ),
-        OpenAiError::InvalidResponse(_) => InvocationError::try_invalid_provider_response(
-            "The model provider returned an invalid response.".to_owned(),
-        ),
-        OpenAiError::StreamInterrupted(_) => InvocationError::try_stream_interrupted(
-            "The model response stream was interrupted.".to_owned(),
-        ),
-        OpenAiError::Provider(_) => InvocationError::try_provider_failure(
-            "The model provider failed the invocation.".to_owned(),
-        ),
-    };
-    ConversationProblem::Invocation(
-        invocation_error.expect("the sanitized provider problem should be valid"),
+fn fail_stream(state: &mut ConversationEventStreamState, error: OpenAiError) {
+    let (category, message) = provider_failure(&error, FailureStage::DuringStream);
+    let outcome = TerminalModelOutcome::Failed { category, message };
+    let response = ModelResponse::new(
+        state.model_request_id,
+        Vec::new(),
+        terminal_model_outcome(outcome),
+        None,
     )
+    .expect("the failed terminal model response should be valid");
+    state.pending_batches = VecDeque::from([ModelDriverOutputBatch::from(
+        ModelDriverOutput::ModelResponse(response),
+    )]);
+    state.terminated = true;
+}
+
+fn terminal_model_outcome(outcome: TerminalModelOutcome) -> ModelOutcome {
+    match outcome {
+        TerminalModelOutcome::Succeeded => ModelOutcome::Succeeded,
+        TerminalModelOutcome::Failed { category, message } => ModelOutcome::Failed {
+            failure: OperationFailure::try_new(category, message, None)
+                .expect("the terminal failure should be valid"),
+        },
+    }
 }
 
 fn translate_model_driver_event(
     driver_event: ModelDriverEvent,
-    invocation_id: ModelInvocationId,
-) -> Result<ModelDriverOutput, OpenAiError> {
+    model_request_id: ConversationEventId,
+    state: &mut ConversationEventStreamState,
+) -> Result<(), OpenAiError> {
     let output = match driver_event {
-        ModelDriverEvent::Model { event, data } => match event {
-            ModelEvent::Assistant(response) => {
-                ModelDriverOutput::Message(ConversationMessage::AssistantResponse {
-                    invocation_id,
-                    data,
-                    response,
-                })
-            }
-            ModelEvent::Communication(communication) => {
-                ModelDriverOutput::Message(ConversationMessage::Communication {
-                    invocation_id,
-                    data,
-                    communication,
-                })
-            }
-        },
-        ModelDriverEvent::Problem { problem, data } => {
-            ModelDriverOutput::Message(ConversationMessage::Problem {
-                invocation_id: Some(invocation_id),
-                data,
-                problem: ConversationProblem::Issue(problem),
-            })
-        }
+        ModelDriverEvent::AssistantResponse { content } => ModelDriverOutput::AssistantResponse(
+            AssistantResponse::new(model_request_id, content)
+                .map_err(invalid_assistant_response)?,
+        ),
+        ModelDriverEvent::ModelSpecificEvent {
+            event_type,
+            message,
+        } => ModelDriverOutput::ModelSpecificEvent(
+            ModelSpecificEvent::new(
+                model_request_id,
+                event_type,
+                PROVIDER_PAYLOAD_VERSION,
+                json!({}),
+                message,
+            )
+            .map_err(invalid_model_specific_event)?,
+        ),
         ModelDriverEvent::ToolRequest {
             tool_name,
             arguments,
@@ -659,13 +552,46 @@ fn translate_model_driver_event(
                 })
                 .transpose()
                 .map_err(|error| OpenAiError::InvalidResponse(error.to_string()))?;
-            let request =
-                ToolRequest::try_new(ToolCallId::new(), tool_name, arguments, invocation_id, data)
-                    .map_err(|error| OpenAiError::InvalidResponse(error.to_string()))?;
-            ModelDriverOutput::ToolRequest(request)
+            ModelDriverOutput::ToolRequest(
+                ToolRequest::try_new(model_request_id, tool_name, arguments, data)
+                    .map_err(invalid_tool_request)?,
+            )
+        }
+        ModelDriverEvent::Terminal { outcome, usage } => {
+            let response = ModelResponse::new(
+                model_request_id,
+                Vec::new(),
+                terminal_model_outcome(outcome),
+                usage,
+            )
+            .map_err(invalid_model_response)?;
+            state.pending_batches = VecDeque::from([ModelDriverOutputBatch::from(
+                ModelDriverOutput::ModelResponse(response),
+            )]);
+            state.terminated = true;
+            return Ok(());
         }
     };
-    Ok(output)
+    state
+        .pending_batches
+        .push_back(ModelDriverOutputBatch::from(output));
+    Ok(())
+}
+
+fn invalid_assistant_response(error: InvalidAssistantResponse) -> OpenAiError {
+    OpenAiError::InvalidResponse(error.to_string())
+}
+
+fn invalid_model_specific_event(error: InvalidModelSpecificEvent) -> OpenAiError {
+    OpenAiError::InvalidResponse(error.to_string())
+}
+
+fn invalid_tool_request(error: InvalidToolRequest) -> OpenAiError {
+    OpenAiError::InvalidResponse(error.to_string())
+}
+
+fn invalid_model_response(error: InvalidModelResponse) -> OpenAiError {
+    OpenAiError::InvalidResponse(error.to_string())
 }
 
 #[derive(Default)]
@@ -805,6 +731,9 @@ fn model_output_stream(response_bytes: ResponseByteStream) -> ProviderOutputStre
             if let Some(server_sent_event) = state.decoder.events.pop_front() {
                 match process_event(server_sent_event, &mut state.response) {
                     Ok(ProcessEventResult::Outputs(model_outputs)) => {
+                        if state.response.completed {
+                            state.terminated = true;
+                        }
                         state.model_outputs.extend(model_outputs);
                     }
                     Ok(ProcessEventResult::Done) => {
@@ -940,9 +869,11 @@ fn process_event(
                 "refusal",
                 accumulated_text(&mut response_state.refusal_outputs, key.clone())?,
             )?;
-            emit_refusal(&mut response_state.refusal_outputs, &key)?
-                .into_iter()
-                .collect()
+            let emitted = emit_refusal(&mut response_state.refusal_outputs, &key)?;
+            if emitted.is_some() {
+                response_state.completed = true;
+            }
+            emitted.into_iter().collect()
         }
         "response.reasoning_text.delta" => {
             let key = semantic_output_key(&payload, &["output_index", "content_index"])?;
@@ -1031,11 +962,25 @@ fn complete_response(
     model_events.extend(emit_remaining_reasoning_summaries(
         &mut response_state.reasoning_summaries,
     )?);
-    model_events.extend(emit_remaining_assistant_responses(
-        &mut response_state.assistant_outputs,
-    )?);
     model_events.extend(emit_remaining_refusals(
         &mut response_state.refusal_outputs,
+    )?);
+    if let Some(refusal) = model_events.iter().find(|event| {
+        matches!(
+            event,
+            ModelDriverEvent::Terminal {
+                outcome: TerminalModelOutcome::Failed {
+                    category: FailureCategory::Refusal,
+                    ..
+                },
+                ..
+            }
+        )
+    }) {
+        return Ok(vec![refusal.clone()]);
+    }
+    model_events.extend(emit_remaining_assistant_responses(
+        &mut response_state.assistant_outputs,
     )?);
     let completed_content = completed_response_content(payload)?;
     for completed_output in completed_content.assistant_outputs {
@@ -1044,14 +989,6 @@ fn complete_response(
             &completed_output.key,
         ) {
             model_events.push(assistant_response(completed_output.text)?);
-        }
-    }
-    for completed_refusal in completed_content.refusals {
-        if !completed_output_already_emitted(
-            &response_state.refusal_outputs,
-            &completed_refusal.key,
-        ) {
-            model_events.push(model_refusal(completed_refusal.text)?);
         }
     }
     for completed_function_call in completed_content.function_calls {
@@ -1081,7 +1018,6 @@ fn complete_response(
     let has_completed_model_output = response_state
         .assistant_outputs
         .iter()
-        .chain(&response_state.refusal_outputs)
         .any(|output| output.emitted)
         || response_state
             .function_calls
@@ -1090,11 +1026,7 @@ fn complete_response(
         || model_events.iter().any(|event| {
             matches!(
                 event,
-                ModelDriverEvent::Model {
-                    event: ModelEvent::Assistant(_),
-                    ..
-                } | ModelDriverEvent::Problem { .. }
-                    | ModelDriverEvent::ToolRequest { .. }
+                ModelDriverEvent::AssistantResponse { .. } | ModelDriverEvent::ToolRequest { .. }
             )
         });
     if !has_completed_model_output {
@@ -1102,8 +1034,20 @@ fn complete_response(
             "the completed response contained no model message".to_owned(),
         ));
     }
+    let usage = completed_usage(payload);
+    model_events.push(ModelDriverEvent::Terminal {
+        outcome: TerminalModelOutcome::Succeeded,
+        usage,
+    });
     response_state.completed = true;
     Ok(model_events)
+}
+
+fn completed_usage(payload: &Value) -> Option<Usage> {
+    let usage = payload.get("response")?.get("usage")?;
+    let input_tokens = usage.get("input_tokens")?.as_u64()?;
+    let output_tokens = usage.get("output_tokens")?.as_u64()?;
+    Some(Usage::new(input_tokens, output_tokens))
 }
 
 fn emit_reasoning(
@@ -1114,8 +1058,10 @@ fn emit_reasoning(
     let Some(reasoning_text) = preferred_text(&output.streamed_text, &output.completed_text) else {
         return Ok(None);
     };
-    let model_event =
-        model_communication(reasoning_text, "reasoning", ModelEventImportance::Detailed)?;
+    let model_event = ModelDriverEvent::ModelSpecificEvent {
+        event_type: "reasoning".to_owned(),
+        message: Some(reasoning_text),
+    };
     output.emitted = true;
     Ok(Some(model_event))
 }
@@ -1129,11 +1075,10 @@ fn emit_reasoning_summary(
     else {
         return Ok(None);
     };
-    let model_event = model_communication(
-        reasoning_summary,
-        "reasoning_summary",
-        ModelEventImportance::Interesting,
-    )?;
+    let model_event = ModelDriverEvent::ModelSpecificEvent {
+        event_type: "reasoning_summary".to_owned(),
+        message: Some(reasoning_summary),
+    };
     output.emitted = true;
     Ok(Some(model_event))
 }
@@ -1147,7 +1092,9 @@ fn emit_assistant_response(
     let Some(assistant_text) = assistant_text else {
         return Ok(None);
     };
-    let model_event = assistant_response(assistant_text)?;
+    let model_event = ModelDriverEvent::AssistantResponse {
+        content: assistant_text,
+    };
     output.emitted = true;
     Ok(Some(model_event))
 }
@@ -1161,7 +1108,13 @@ fn emit_refusal(
     let Some(refusal) = refusal else {
         return Ok(None);
     };
-    let model_event = model_refusal(refusal)?;
+    let model_event = ModelDriverEvent::Terminal {
+        outcome: TerminalModelOutcome::Failed {
+            category: FailureCategory::Refusal,
+            message: refusal,
+        },
+        usage: None,
+    };
     output.emitted = true;
     Ok(Some(model_event))
 }
@@ -1378,29 +1331,18 @@ fn parse_function_call_arguments(arguments: &str) -> Result<Value, OpenAiError> 
     })
 }
 
-fn assistant_response(message: String) -> Result<ModelDriverEvent, OpenAiError> {
-    AssistantResponse::new(message)
-        .map(ModelEvent::Assistant)
-        .map(|event| ModelDriverEvent::Model { event, data: None })
-        .map_err(invalid_assistant_response)
-}
-
-fn model_refusal(message: String) -> Result<ModelDriverEvent, OpenAiError> {
-    ModelIssue::try_refusal(message)
-        .map(|problem| ModelDriverEvent::Problem {
-            problem,
-            data: None,
-        })
-        .map_err(invalid_conversation_problem)
+fn assistant_response(content: String) -> Result<ModelDriverEvent, OpenAiError> {
+    Ok(ModelDriverEvent::AssistantResponse { content })
 }
 
 fn model_context_limit_exceeded() -> Result<ModelDriverEvent, OpenAiError> {
-    ModelIssue::try_context_limit_exceeded("The model context limit was exceeded.".to_owned())
-        .map(|problem| ModelDriverEvent::Problem {
-            problem,
-            data: None,
-        })
-        .map_err(invalid_conversation_problem)
+    Ok(ModelDriverEvent::Terminal {
+        outcome: TerminalModelOutcome::Failed {
+            category: FailureCategory::ContextLimitExceeded,
+            message: "The model context limit was exceeded.".to_owned(),
+        },
+        usage: None,
+    })
 }
 
 fn semantic_output_key(payload: &Value, indexes: &[&str]) -> Result<String, OpenAiError> {
@@ -1497,29 +1439,6 @@ fn complete_text(
     Ok(())
 }
 
-fn model_communication(
-    message: String,
-    subtype: &str,
-    importance: ModelEventImportance,
-) -> Result<ModelDriverEvent, OpenAiError> {
-    ModelCommunication::new(message, importance, subtype.to_owned())
-        .map(ModelEvent::Communication)
-        .map(|event| ModelDriverEvent::Model { event, data: None })
-        .map_err(invalid_model_communication)
-}
-
-fn invalid_assistant_response(error: InvalidAssistantResponse) -> OpenAiError {
-    OpenAiError::InvalidResponse(error.to_string())
-}
-
-fn invalid_model_communication(error: InvalidModelCommunication) -> OpenAiError {
-    OpenAiError::InvalidResponse(error.to_string())
-}
-
-fn invalid_conversation_problem(error: InvalidConversationProblem) -> OpenAiError {
-    OpenAiError::InvalidResponse(error.to_string())
-}
-
 fn append_delta(payload: &Value, output: &mut AccumulatedText) -> Result<(), OpenAiError> {
     if output.emitted {
         return Err(OpenAiError::InvalidResponse(format!(
@@ -1562,7 +1481,6 @@ fn preferred_text(streamed_text: &str, completed_text: &Option<String>) -> Optio
 #[derive(Default)]
 struct CompletedResponseContent {
     assistant_outputs: Vec<CompletedText>,
-    refusals: Vec<CompletedText>,
     function_calls: Vec<CompletedFunctionCall>,
 }
 
@@ -1591,7 +1509,6 @@ fn completed_response_content(payload: &Value) -> Result<CompletedResponseConten
         )
     })?;
     let mut assistant_outputs = Vec::new();
-    let mut refusals = Vec::new();
     let mut function_calls = Vec::new();
     for (output_index, output_item) in output.iter().enumerate() {
         if output_item.get("type").and_then(Value::as_str) == Some("function_call") {
@@ -1627,42 +1544,24 @@ fn completed_response_content(payload: &Value) -> Result<CompletedResponseConten
         })?;
         for (content_index, content_item) in content.iter().enumerate() {
             let key = format!("output_index={output_index};content_index={content_index}");
-            match content_item.get("type").and_then(Value::as_str) {
-                Some("output_text") => {
-                    let content_text = content_item
-                        .get("text")
-                        .and_then(Value::as_str)
-                        .ok_or_else(|| {
-                            OpenAiError::InvalidResponse(
-                                "completed OpenAI output text was not a string".to_owned(),
-                            )
-                        })?;
-                    assistant_outputs.push(CompletedText {
-                        key,
-                        text: content_text.to_owned(),
-                    });
-                }
-                Some("refusal") => {
-                    let refusal = content_item
-                        .get("refusal")
-                        .and_then(Value::as_str)
-                        .ok_or_else(|| {
-                            OpenAiError::InvalidResponse(
-                                "completed OpenAI refusal was not a string".to_owned(),
-                            )
-                        })?;
-                    refusals.push(CompletedText {
-                        key,
-                        text: refusal.to_owned(),
-                    });
-                }
-                _ => {}
+            if content_item.get("type").and_then(Value::as_str) == Some("output_text") {
+                let content_text = content_item
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        OpenAiError::InvalidResponse(
+                            "completed OpenAI output text was not a string".to_owned(),
+                        )
+                    })?;
+                assistant_outputs.push(CompletedText {
+                    key,
+                    text: content_text.to_owned(),
+                });
             }
         }
     }
     Ok(CompletedResponseContent {
         assistant_outputs,
-        refusals,
         function_calls,
     })
 }
@@ -1672,7 +1571,6 @@ fn completed_output_already_emitted(outputs: &[AccumulatedText], key: &str) -> b
         .iter()
         .any(|output| output.emitted && (output.key == "default" || output.key == key))
 }
-
 #[cfg(test)]
 mod tests {
     use std::io::{BufRead, BufReader, Read, Write};
@@ -1680,101 +1578,108 @@ mod tests {
     use std::str::FromStr;
     use std::thread;
 
-    use futures_util::StreamExt;
-    use futures_util::stream;
+    use futures_util::{StreamExt, stream};
     use reqwest::StatusCode;
     use serde_json::{Map, Value, json};
     use time::OffsetDateTime;
 
-    use crate::conversation::{Conversation, ConversationHistory, ConversationId};
-    use crate::conversation_event::{
-        AssistantResponse, ConversationEventId, ConversationEventKind, ConversationEventRecord,
-        ConversationFact, ConversationMessage, ConversationProblem, ConversationTurnId,
-        ModelCommunication, ModelData, ModelEvent, ModelEventImportance, ModelId,
-        ModelInvocationId, ModelIssue, ModelSource, ProviderId, StoredConversationEventKind,
-        ToolCallId, ToolDefinition, ToolExecutionProblem, ToolName, ToolOutcome, ToolRequest,
-        ToolResponse, UserContent,
+    use crate::conversation::{
+        AssistantResponse, Conversation, ConversationEvent, ConversationEventId,
+        ConversationEventRecord, ConversationHistory, ConversationId, FailureCategory, ModelData,
+        ModelId, ModelOutcome, ModelRequest, ModelSource, ModelSpecificEvent, ProviderId,
+        ToolDefinition, ToolName, ToolOutcome, ToolRequest, ToolResponse, TurnStart, User,
+        UserContent,
     };
-    use crate::model_driver::{ModelDriver, ModelDriverOutput, ModelDriverOutputBatch, TurnInput};
+    use crate::model_driver::{ModelDriver, ModelDriverOutput, ModelOutputStream, TurnInput};
 
     use super::{
-        ModelDriverEvent, OpenAiError, OpenAiModelDriver, ResponseByteStream,
-        classify_response_failure, model_communication, model_output_stream, provider_tool,
-        semantic_input,
+        ModelDriverEvent, OpenAiError, OpenAiModelDriver, ResponseByteStream, TerminalModelOutcome,
+        classify_response_failure, model_output_stream, provider_tool, semantic_input,
     };
 
     fn conversation_event(
         conversation_id: ConversationId,
         position: u64,
-        kind: ConversationEventKind,
+        event: ConversationEvent,
     ) -> ConversationEventRecord {
         ConversationEventRecord {
             conversation_id,
             position,
             id: ConversationEventId::new(),
             timestamp: OffsetDateTime::UNIX_EPOCH,
-            schema_version: 7,
-            kind: StoredConversationEventKind::Shared(kind),
+            schema_version: 13,
+            event,
         }
     }
 
+    fn user_event(
+        conversation_id: ConversationId,
+        position: u64,
+        text: &str,
+    ) -> ConversationEventRecord {
+        conversation_event(
+            conversation_id,
+            position,
+            ConversationEvent::User(
+                User::new(vec![UserContent::Text(text.to_owned())])
+                    .expect("the user event should be valid"),
+            ),
+        )
+    }
+
+    fn turn_and_request(
+        conversation_id: ConversationId,
+    ) -> (ConversationEventRecord, ConversationEventRecord) {
+        let turn_start = conversation_event(
+            conversation_id,
+            1,
+            ConversationEvent::TurnStart(TurnStart::new(None, 0)),
+        );
+        let model_request = conversation_event(
+            conversation_id,
+            2,
+            ConversationEvent::ModelRequest(
+                ModelRequest::new(turn_start.id, source(), 1, Vec::new(), None, None)
+                    .expect("the model request should be valid"),
+            ),
+        );
+        (turn_start, model_request)
+    }
+
     #[test]
-    fn semantic_input_projects_canonical_events_and_ignores_model_data() {
+    fn semantic_input_projects_canonical_events_and_ignores_auxiliary_records() {
         let conversation_id = ConversationId::new();
-        let model_data = ModelData::new(Map::from_iter([(
-            "native".to_owned(),
-            Value::String("ignored".to_owned()),
-        )]))
-        .expect("the model data should be valid");
-        let turn_id = ConversationTurnId::new();
-        let invocation_id = ModelInvocationId::new();
+        let (turn_start, model_request) = turn_and_request(conversation_id);
+        let request_id = model_request.id;
+        let reasoning = ModelSpecificEvent::new(
+            request_id,
+            "reasoning".to_owned(),
+            1,
+            json!({}),
+            Some("Thinking.".to_owned()),
+        )
+        .expect("the reasoning event should be valid");
+        let assistant = AssistantResponse::new(request_id, "Hello.".to_owned())
+            .expect("the assistant response should be valid");
         let conversation = ConversationHistory::from_events(vec![
+            user_event(conversation_id, 0, "Hello"),
+            turn_start,
+            model_request,
             conversation_event(
                 conversation_id,
-                0,
-                ConversationEventKind::Fact(ConversationFact::Message {
-                    message: ConversationMessage::User {
-                        caused_by: None,
-                        content: vec![UserContent::Text("Hello".to_owned())],
-                    },
-                    turn_id: None,
-                }),
+                3,
+                ConversationEvent::ModelSpecificEvent(reasoning),
             ),
             conversation_event(
                 conversation_id,
-                1,
-                ConversationEventKind::Fact(ConversationFact::Message {
-                    message: ConversationMessage::Communication {
-                        invocation_id,
-                        data: Some(model_data.clone()),
-                        communication: ModelCommunication::new(
-                            "Reasoning".to_owned(),
-                            ModelEventImportance::Detailed,
-                            "reasoning".to_owned(),
-                        )
-                        .expect("the model communication should be valid"),
-                    },
-                    turn_id: Some(turn_id),
-                }),
-            ),
-            conversation_event(
-                conversation_id,
-                2,
-                ConversationEventKind::Fact(ConversationFact::Message {
-                    message: ConversationMessage::AssistantResponse {
-                        invocation_id,
-                        data: Some(model_data),
-                        response: AssistantResponse::new("Hello.".to_owned())
-                            .expect("the assistant response should be valid"),
-                    },
-                    turn_id: Some(turn_id),
-                }),
+                4,
+                ConversationEvent::AssistantResponse(assistant),
             ),
         ])
         .expect("the conversation should be valid");
 
         assert_eq!(
-            semantic_input(conversation.events(), &[]),
+            semantic_input(conversation.events()),
             json!([
                 { "role": "user", "content": "Hello" },
                 { "role": "assistant", "content": "Hello." }
@@ -1821,60 +1726,42 @@ mod tests {
     #[test]
     fn semantic_input_reconstructs_tool_requests_and_responses() {
         let conversation_id = ConversationId::new();
-        let invocation_id = ModelInvocationId::new();
-        let call_id = ToolCallId::new();
+        let (turn_start, model_request) = turn_and_request(conversation_id);
+        let request_id = model_request.id;
         let model_data = ModelData::new(Map::from_iter([(
             "call_id".to_owned(),
             Value::String("call_native".to_owned()),
         )]))
         .expect("the model data should be valid");
         let request = ToolRequest::try_new(
-            call_id,
+            request_id,
             ToolName::try_new("shell".to_owned()).expect("the tool name should be valid"),
             json!({ "command": "pwd" }),
-            invocation_id,
             Some(model_data),
         )
         .expect("the tool request should be valid");
-        let response = ToolResponse::new(
-            call_id,
-            ToolOutcome::Result {
-                value: json!({ "stdout": "/tmp\n" }),
-            },
+        let tool_request_record =
+            conversation_event(conversation_id, 3, ConversationEvent::ToolRequest(request));
+        let tool_request_id = tool_request_record.id;
+        let response_record = conversation_event(
+            conversation_id,
+            4,
+            ConversationEvent::ToolResponse(ToolResponse::new(
+                tool_request_id,
+                ToolOutcome::succeeded(json!({ "stdout": "/tmp\n" })),
+            )),
         );
         let conversation = ConversationHistory::from_events(vec![
-            conversation_event(
-                conversation_id,
-                0,
-                ConversationEventKind::Fact(ConversationFact::Message {
-                    message: ConversationMessage::User {
-                        caused_by: None,
-                        content: vec![UserContent::Text("Run pwd".to_owned())],
-                    },
-                    turn_id: None,
-                }),
-            ),
-            conversation_event(
-                conversation_id,
-                1,
-                ConversationEventKind::Fact(ConversationFact::ToolRequest {
-                    request,
-                    turn_id: Some(ConversationTurnId::new()),
-                }),
-            ),
-            conversation_event(
-                conversation_id,
-                2,
-                ConversationEventKind::Fact(ConversationFact::ToolResponse {
-                    response,
-                    turn_id: Some(ConversationTurnId::new()),
-                }),
-            ),
+            user_event(conversation_id, 0, "Run pwd"),
+            turn_start,
+            model_request,
+            tool_request_record,
+            response_record,
         ])
         .expect("the conversation should be valid");
 
         assert_eq!(
-            semantic_input(conversation.events(), &[]),
+            semantic_input(conversation.events()),
             json!([
                 { "role": "user", "content": "Run pwd" },
                 {
@@ -1886,131 +1773,10 @@ mod tests {
                 {
                     "type": "function_call_output",
                     "call_id": "call_native",
-                    "output": "{\"type\":\"result\",\"value\":{\"stdout\":\"/tmp\\n\"}}"
+                    "output": "{\"type\":\"succeeded\",\"value\":{\"stdout\":\"/tmp\\n\"}}"
                 }
             ])
         );
-    }
-
-    #[test]
-    fn semantic_input_falls_back_to_the_portable_tool_call_id() {
-        let conversation_id = ConversationId::new();
-        let call_id = ToolCallId::new();
-        let request = ToolRequest::try_new(
-            call_id,
-            ToolName::try_new("shell".to_owned()).expect("the tool name should be valid"),
-            json!({ "command": "pwd" }),
-            ModelInvocationId::new(),
-            None,
-        )
-        .expect("the tool request should be valid");
-        let conversation = ConversationHistory::from_events(vec![
-            conversation_event(
-                conversation_id,
-                0,
-                ConversationEventKind::Fact(ConversationFact::ToolRequest {
-                    request,
-                    turn_id: None,
-                }),
-            ),
-            conversation_event(
-                conversation_id,
-                1,
-                ConversationEventKind::Fact(ConversationFact::ToolResponse {
-                    response: ToolResponse::new(
-                        call_id,
-                        ToolOutcome::Problem {
-                            problem: ToolExecutionProblem::unknown_tool(
-                                ToolName::try_new("shell".to_owned())
-                                    .expect("the tool name should be valid"),
-                            ),
-                        },
-                    ),
-                    turn_id: None,
-                }),
-            ),
-        ])
-        .expect("the conversation should be valid");
-
-        let input = semantic_input(conversation.events(), &[]);
-        assert_eq!(input[0]["call_id"], call_id.to_string());
-        assert_eq!(input[1]["call_id"], call_id.to_string());
-        let output: Value = serde_json::from_str(
-            input[1]["output"]
-                .as_str()
-                .expect("the tool output should be a string"),
-        )
-        .expect("the tool output should be JSON");
-        assert_eq!(output["type"], "problem");
-        assert_eq!(output["problem"]["kind"], "unknown_tool");
-        assert_eq!(output["problem"]["message"], "unknown tool: shell");
-        assert!(output["problem"].get("details").is_none());
-    }
-
-    #[test]
-    fn semantic_input_projects_tool_problem_details() {
-        let conversation_id = ConversationId::new();
-        let call_id = ToolCallId::new();
-        let request = ToolRequest::try_new(
-            call_id,
-            ToolName::try_new("shell".to_owned()).expect("the tool name should be valid"),
-            json!({ "command": "sleep 5" }),
-            ModelInvocationId::new(),
-            None,
-        )
-        .expect("the tool request should be valid");
-        let response = ToolResponse::new(
-            call_id,
-            ToolOutcome::Problem {
-                problem: ToolExecutionProblem::try_timed_out(
-                    "the shell command timed out after 1 seconds".to_owned(),
-                    Some(json!({
-                        "timeout_seconds": 1,
-                        "stdout": "partial",
-                        "stderr": "",
-                        "stdout_truncated": false,
-                        "stderr_truncated": false
-                    })),
-                )
-                .expect("the timeout problem should be valid"),
-            },
-        );
-        let conversation = ConversationHistory::from_events(vec![
-            conversation_event(
-                conversation_id,
-                0,
-                ConversationEventKind::Fact(ConversationFact::ToolRequest {
-                    request,
-                    turn_id: None,
-                }),
-            ),
-            conversation_event(
-                conversation_id,
-                1,
-                ConversationEventKind::Fact(ConversationFact::ToolResponse {
-                    response,
-                    turn_id: None,
-                }),
-            ),
-        ])
-        .expect("the conversation should be valid");
-
-        let input = semantic_input(conversation.events(), &[]);
-        let output: Value = serde_json::from_str(
-            input[1]["output"]
-                .as_str()
-                .expect("the tool output should be a string"),
-        )
-        .expect("the tool output should be JSON");
-        assert_eq!(output["type"], "problem");
-        assert_eq!(output["problem"]["kind"], "timed_out");
-        assert_eq!(
-            output["problem"]["message"],
-            "the shell command timed out after 1 seconds"
-        );
-        assert_eq!(output["problem"]["details"]["timeout_seconds"], 1);
-        assert_eq!(output["problem"]["details"]["stdout"], "partial");
-        assert_eq!(output["problem"]["details"]["stdout_truncated"], false);
     }
 
     fn response_byte_stream(chunks: Vec<Vec<u8>>) -> ResponseByteStream {
@@ -2021,272 +1787,112 @@ mod tests {
         input.as_bytes().iter().map(|byte| vec![*byte]).collect()
     }
 
-    async fn collect_events(input: &str) -> Vec<Result<ModelEvent, OpenAiError>> {
-        model_output_stream(response_byte_stream(vec![input.as_bytes().to_vec()]))
-            .map(|result| {
-                result.and_then(|driver_event| match driver_event {
-                    ModelDriverEvent::Model { event, .. } => Ok(event),
-                    ModelDriverEvent::Problem { .. } => Err(OpenAiError::InvalidResponse(
-                        "the test expected a model event, not a model problem".to_owned(),
-                    )),
-                    ModelDriverEvent::ToolRequest { .. } => Err(OpenAiError::InvalidResponse(
-                        "the test expected a model event, not a tool request".to_owned(),
-                    )),
-                })
-            })
-            .collect()
-            .await
-    }
-
-    async fn collect_outputs(input: &str) -> Vec<Result<ModelDriverEvent, OpenAiError>> {
+    async fn collect_driver_events(input: &str) -> Vec<Result<ModelDriverEvent, OpenAiError>> {
         model_output_stream(response_byte_stream(vec![input.as_bytes().to_vec()]))
             .collect()
             .await
     }
 
-    fn expect_model_event(driver_event: ModelDriverEvent) -> ModelEvent {
-        match driver_event {
-            ModelDriverEvent::Model { event, .. } => event,
-            ModelDriverEvent::Problem { .. } | ModelDriverEvent::ToolRequest { .. } => {
-                panic!("the output should be a model event")
-            }
-        }
-    }
-
-    fn expect_event(output: ModelDriverOutput) -> ConversationMessage {
-        match output {
-            ModelDriverOutput::Message(message) => message,
-            ModelDriverOutput::ToolRequest(_)
-            | ModelDriverOutput::Command(_)
-            | ModelDriverOutput::Extension(_) => {
-                panic!("the output should be a conversation message")
-            }
-        }
-    }
-
-    fn expect_single_event(batch: ModelDriverOutputBatch) -> ConversationMessage {
-        let mut outputs = batch.into_outputs();
-        assert_eq!(outputs.len(), 1, "the batch should hold one output");
-        expect_event(outputs.remove(0))
-    }
-
-    fn test_conversation() -> ConversationHistory {
-        let conversation_id = ConversationId::new();
-        ConversationHistory::from_events(vec![conversation_event(
-            conversation_id,
-            0,
-            ConversationEventKind::Fact(ConversationFact::Message {
-                message: ConversationMessage::User {
-                    caused_by: None,
-                    content: vec![UserContent::Text("Hello".to_owned())],
-                },
-                turn_id: None,
-            }),
-        )])
-        .expect("the conversation should be valid")
-    }
-
-    fn source() -> ModelSource {
-        ModelSource::new(
-            ProviderId::from_str("openai").expect("the provider identifier should be valid"),
-            ModelId::from_str("gpt-5.6").expect("the model identifier should be valid"),
-        )
-    }
-
-    fn driver_request(conversation: &dyn Conversation) -> TurnInput<'_> {
-        TurnInput::new(conversation, ConversationTurnId::new())
+    async fn collect_events(input: &str) -> Vec<Result<ModelDriverEvent, OpenAiError>> {
+        collect_driver_events(input).await
     }
 
     #[tokio::test]
-    async fn invoke_returns_a_future_that_establishes_one_conversation_event_stream() {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("the mock server should bind");
-        let address = listener
-            .local_addr()
-            .expect("the mock server address should be available");
-        let server = thread::spawn(move || {
-            let (mut connection, _) = listener.accept().expect("the mock server should accept");
-            read_request(&connection);
-            let response_body = concat!(
-                "data: {\"type\":\"response.reasoning_text.done\",\"text\":\"Reasoning\"}\n\n",
-                "data: {\"type\":\"response.output_text.done\",\"text\":\"Answer\"}\n\n",
-                "data: {\"type\":\"response.completed\",\"response\":{}}\n\n",
-                "data: [DONE]\n\n"
-            );
-            write!(
-                connection,
-                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
-                response_body.len()
-            )
-            .expect("the mock response should write");
-        });
-        let driver = OpenAiModelDriver {
-            http_client: reqwest::Client::new(),
-            api_key: "test-key".to_owned(),
-            responses_url: format!("http://{address}/responses"),
-            source: source(),
-        };
-
-        let conversation = test_conversation();
-        let mut model_events = driver
-            .invoke(driver_request(&conversation))
-            .await
-            .expect("the invocation should establish its stream");
-        let invocation = model_events
-            .next()
-            .await
-            .expect("the stream should yield an invocation batch")
-            .expect("the invocation batch should be valid")
-            .into_outputs();
-        assert!(matches!(
-            invocation.as_slice(),
-            [ModelDriverOutput::Command(_)]
-        ));
-        let first_event = expect_single_event(
-            model_events
-                .next()
-                .await
-                .expect("the stream should yield reasoning")
-                .expect("the reasoning should be valid"),
-        );
-        let second_event = expect_single_event(
-            model_events
-                .next()
-                .await
-                .expect("the stream should yield an answer")
-                .expect("the answer should be valid"),
+    async fn several_sse_events_yield_reasoning_before_the_answer_and_a_terminal() {
+        let input = concat!(
+            "data: {\"type\":\"response.reasoning_text.delta\",\"delta\":\"Detailed \"}\n\n",
+            "data: {\"type\":\"response.reasoning_text.done\",\"text\":\"Detailed thought\"}\n\n",
+            "data: {\"type\":\"response.reasoning_summary_text.done\",\"text\":\"Summary\"}\n\n",
+            "data: {\"type\":\"response.output_text.done\",\"text\":\"Answer\"}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{}}\n\n"
         );
 
-        assert!(matches!(
-            &first_event,
-            ConversationMessage::Communication { .. }
-        ));
-        assert!(matches!(
-            &second_event,
-            ConversationMessage::AssistantResponse { .. }
-        ));
-        assert!(matches!(
-            &first_event,
-            ConversationMessage::Communication { data, .. } if data.is_none()
-        ));
-        assert!(matches!(
-            &second_event,
-            ConversationMessage::AssistantResponse { data, .. } if data.is_none()
-        ));
-        assert!(model_events.next().await.is_none());
-        server.join().expect("the mock server should stop");
-    }
+        let events = collect_events(input)
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .expect("the response stream should parse");
 
-    #[tokio::test]
-    async fn an_early_http_failure_produces_a_problem() {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("the mock server should bind");
-        let address = listener
-            .local_addr()
-            .expect("the mock server address should be available");
-        let server = thread::spawn(move || {
-            let (mut connection, _) = listener.accept().expect("the mock server should accept");
-            read_request(&connection);
-            let body = "unauthorized";
-            write!(
-                connection,
-                "HTTP/1.1 401 Unauthorized\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            )
-            .expect("the mock response should write");
-        });
-        let driver = OpenAiModelDriver {
-            http_client: reqwest::Client::new(),
-            api_key: "test-key".to_owned(),
-            responses_url: format!("http://{address}/responses"),
-            source: source(),
+        assert_eq!(events.len(), 4);
+        let ModelDriverEvent::ModelSpecificEvent {
+            event_type,
+            message,
+        } = &events[0]
+        else {
+            panic!("the first event should be reasoning");
         };
-
-        let conversation = test_conversation();
-        let result = driver.invoke(driver_request(&conversation)).await;
-
-        let mut model_events = result.expect("the invocation should establish a stream");
-        let outputs = model_events
-            .next()
-            .await
-            .expect("the stream should yield a failure batch")
-            .expect("the failure batch should be valid")
-            .into_outputs();
-        assert!(matches!(
-            outputs.as_slice(),
-            [
-                ModelDriverOutput::Command(_),
-                ModelDriverOutput::Message(ConversationMessage::Problem { .. })
-            ]
-        ));
-        assert!(model_events.next().await.is_none());
-        server.join().expect("the mock server should stop");
-    }
-
-    #[tokio::test]
-    async fn a_context_limit_http_response_becomes_a_model_issue_stream() {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("the mock server should bind");
-        let address = listener
-            .local_addr()
-            .expect("the mock server address should be available");
-        let server = thread::spawn(move || {
-            let (mut connection, _) = listener.accept().expect("the mock server should accept");
-            read_request(&connection);
-            let body = json!({
-                "error": {
-                    "code": "context_length_exceeded",
-                    "message": "raw provider details"
-                }
-            })
-            .to_string();
-            write!(
-                connection,
-                "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            )
-            .expect("the mock response should write");
-        });
-        let driver = OpenAiModelDriver {
-            http_client: reqwest::Client::new(),
-            api_key: "test-key".to_owned(),
-            responses_url: format!("http://{address}/responses"),
-            source: source(),
+        assert_eq!(event_type, "reasoning");
+        assert_eq!(message.as_deref(), Some("Detailed thought"));
+        let ModelDriverEvent::ModelSpecificEvent {
+            event_type,
+            message,
+        } = &events[1]
+        else {
+            panic!("the second event should be a reasoning summary");
         };
-
-        let conversation = test_conversation();
-        let mut model_events = driver
-            .invoke(driver_request(&conversation))
-            .await
-            .expect("the context-limit outcome should establish a semantic stream");
-        let invocation = model_events
-            .next()
-            .await
-            .expect("the stream should yield an invocation batch")
-            .expect("the invocation batch should be valid")
-            .into_outputs();
+        assert_eq!(event_type, "reasoning_summary");
+        assert_eq!(message.as_deref(), Some("Summary"));
         assert!(matches!(
-            invocation.as_slice(),
-            [ModelDriverOutput::Command(_)]
+            &events[2],
+            ModelDriverEvent::AssistantResponse { content } if content == "Answer"
         ));
-        let model_event = expect_single_event(
-            model_events
-                .next()
-                .await
-                .expect("the stream should yield a context-limit issue")
-                .expect("the context-limit issue should be valid"),
-        );
-
         assert!(matches!(
-            &model_event,
-            ConversationMessage::Problem {
-                problem: ConversationProblem::Issue(ModelIssue::ContextLimitExceeded { .. }),
+            &events[3],
+            ModelDriverEvent::Terminal {
+                outcome: TerminalModelOutcome::Succeeded,
                 ..
             }
         ));
-        let ConversationMessage::Problem { problem, .. } = &model_event else {
-            panic!("the output should be a model issue");
-        };
-        assert_eq!(problem.message(), "The model context limit was exceeded.");
-        assert!(model_events.next().await.is_none());
-        server.join().expect("the mock server should stop");
+    }
+
+    #[tokio::test]
+    async fn a_completed_refusal_is_a_failed_terminal() {
+        let input = concat!(
+            "data: {\"type\":\"response.refusal.delta\",\"delta\":\"I cannot \"}\n\n",
+            "data: {\"type\":\"response.refusal.done\",\"refusal\":\"I cannot comply.\"}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{}}\n\n"
+        );
+
+        let events = collect_events(input)
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .expect("the refusal stream should parse");
+
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            &events[0],
+            ModelDriverEvent::Terminal {
+                outcome: TerminalModelOutcome::Failed {
+                    category: FailureCategory::Refusal,
+                    message,
+                },
+                ..
+            } if message == "I cannot comply."
+        ));
+    }
+
+    #[tokio::test]
+    async fn several_sse_events_in_one_chunk_yield_reasoning_before_the_answer() {
+        let input = concat!(
+            "data: {\"type\":\"response.reasoning_text.delta\",\"delta\":\"Detailed \"}\n\n",
+            "data: {\"type\":\"response.reasoning_text.done\",\"text\":\"Detailed thought\"}\n\n",
+            "data: {\"type\":\"response.reasoning_summary_text.done\",\"text\":\"Summary\"}\n\n",
+            "data: {\"type\":\"response.output_text.done\",\"text\":\"Answer\"}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{}}\n\n"
+        );
+
+        let events = collect_events(input)
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .expect("the response stream should parse");
+
+        assert_eq!(events.len(), 4);
+        assert!(matches!(
+            &events[2],
+            ModelDriverEvent::AssistantResponse { content } if content == "Answer"
+        ));
     }
 
     #[tokio::test]
@@ -2309,164 +1915,15 @@ mod tests {
             .expect("the stream should yield an event")
             .expect("the event should be valid");
 
-        assert_eq!(expect_model_event(model_event).message(), "Hello");
-        assert!(model_events.next().await.is_none());
-    }
-
-    #[tokio::test]
-    async fn a_completed_refusal_is_a_model_issue_not_an_assistant_response() {
-        let input = concat!(
-            "data: {\"type\":\"response.refusal.delta\",\"delta\":\"I cannot \"}\n\n",
-            "data: {\"type\":\"response.refusal.done\",\"refusal\":\"I cannot comply.\"}\n\n",
-            "data: {\"type\":\"response.completed\",\"response\":{}}\n\n"
-        );
-
-        let events = collect_outputs(input)
-            .await
-            .into_iter()
-            .collect::<Result<Vec<_>, _>>()
-            .expect("the refusal stream should parse");
-
-        assert_eq!(events.len(), 1);
         assert!(matches!(
-            &events[0],
-            ModelDriverEvent::Problem {
-                problem: ModelIssue::Refusal { .. },
-                ..
-            }
+            model_event,
+            ModelDriverEvent::AssistantResponse { ref content } if content == "Hello"
         ));
-        let ModelDriverEvent::Problem { problem: issue, .. } = &events[0] else {
-            panic!("the output should be a refusal issue");
-        };
-        assert_eq!(issue.message(), "I cannot comply.");
-    }
-
-    #[tokio::test]
-    async fn several_sse_events_in_one_chunk_yield_reasoning_before_the_answer() {
-        let input = concat!(
-            "data: {\"type\":\"response.reasoning_text.delta\",\"delta\":\"Detailed \"}\n\n",
-            "data: {\"type\":\"response.reasoning_text.done\",\"text\":\"Detailed thought\"}\n\n",
-            "data: {\"type\":\"response.reasoning_summary_text.done\",\"text\":\"Summary\"}\n\n",
-            "data: {\"type\":\"response.output_text.done\",\"text\":\"Answer\"}\n\n",
-            "data: {\"type\":\"response.completed\",\"response\":{}}\n\n"
-        );
-
-        let events = collect_events(input)
-            .await
-            .into_iter()
-            .collect::<Result<Vec<_>, _>>()
-            .expect("the response stream should parse");
-
-        assert_eq!(events.len(), 3);
-        assert_eq!(events[0].message(), "Detailed thought");
-        assert_eq!(events[0].importance(), ModelEventImportance::Detailed);
-        assert_eq!(events[1].message(), "Summary");
-        assert_eq!(events[1].importance(), ModelEventImportance::Interesting);
-        assert_eq!(events[2].message(), "Answer");
-        assert_eq!(events[2].importance(), ModelEventImportance::Important);
-    }
-
-    #[tokio::test]
-    async fn a_late_stream_failure_follows_the_completed_model_event() {
-        let input = concat!(
-            "data: {\"type\":\"response.output_text.done\",\"text\":\"Hello\"}\n\n",
-            "data: {\"type\":\"error\",\"message\":\"late failure\"}\n\n"
-        );
-        let mut model_events =
-            model_output_stream(response_byte_stream(vec![input.as_bytes().to_vec()]));
-
-        let completed_event = model_events
-            .next()
-            .await
-            .expect("the stream should yield an event")
-            .expect("the completed event should be valid");
-        assert_eq!(expect_model_event(completed_event).message(), "Hello");
         assert!(matches!(
             model_events.next().await,
-            Some(Err(OpenAiError::Provider(_)))
+            Some(Ok(ModelDriverEvent::Terminal { .. }))
         ));
         assert!(model_events.next().await.is_none());
-    }
-
-    #[tokio::test]
-    async fn context_limit_stream_failure_is_a_model_issue() {
-        let input = concat!(
-            "data: {\"type\":\"error\",\"code\":\"context_length_exceeded\",\"message\":\"raw details\"}\n\n",
-            "data: [DONE]\n\n"
-        );
-        let events = collect_outputs(input)
-            .await
-            .into_iter()
-            .collect::<Result<Vec<_>, _>>()
-            .expect("the context-limit failure should be semantic");
-
-        assert_eq!(events.len(), 1);
-        assert!(matches!(
-            &events[0],
-            ModelDriverEvent::Problem {
-                problem: ModelIssue::ContextLimitExceeded { .. },
-                ..
-            }
-        ));
-    }
-
-    #[tokio::test]
-    async fn premature_body_end_is_a_stream_interruption() {
-        let input = "data: {\"type\":\"response.output_text.done\",\"text\":\"Hello\"}\n\n";
-        let mut model_events =
-            model_output_stream(response_byte_stream(vec![input.as_bytes().to_vec()]));
-
-        assert!(matches!(
-            model_events.next().await,
-            Some(Ok(ModelDriverEvent::Model {
-                event: ModelEvent::Assistant(_),
-                ..
-            }))
-        ));
-        assert!(matches!(
-            model_events.next().await,
-            Some(Err(OpenAiError::StreamInterrupted(_)))
-        ));
-    }
-
-    #[tokio::test]
-    async fn missing_response_completed_is_a_stream_error_even_after_done() {
-        let input = concat!(
-            "data: {\"type\":\"response.output_text.done\",\"text\":\"Hello\"}\n\n",
-            "data: [DONE]\n\n"
-        );
-        let mut model_events =
-            model_output_stream(response_byte_stream(vec![input.as_bytes().to_vec()]));
-
-        assert!(matches!(
-            model_events.next().await,
-            Some(Ok(ModelDriverEvent::Model {
-                event: ModelEvent::Assistant(_),
-                ..
-            }))
-        ));
-        assert!(matches!(
-            model_events.next().await,
-            Some(Err(OpenAiError::InvalidResponse(_)))
-        ));
-    }
-
-    #[tokio::test]
-    async fn response_completed_fallback_does_not_duplicate_a_done_event() {
-        let input = concat!(
-            "data: {\"type\":\"response.output_text.done\",\"text\":\"Answer\"}\n\n",
-            "data: {\"type\":\"response.completed\",\"response\":{\"output\":[{\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}]}]}}\n\n",
-            "data: [DONE]\n\n"
-        );
-
-        let events = collect_events(input)
-            .await
-            .into_iter()
-            .collect::<Result<Vec<_>, _>>()
-            .expect("the response stream should parse");
-
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].message(), "Answer");
     }
 
     #[tokio::test]
@@ -2480,13 +1937,13 @@ mod tests {
             "data: [DONE]\n\n"
         );
 
-        let events = collect_outputs(input)
+        let events = collect_events(input)
             .await
             .into_iter()
             .collect::<Result<Vec<_>, _>>()
             .expect("the function call stream should parse");
 
-        assert_eq!(events.len(), 1);
+        assert_eq!(events.len(), 2);
         let ModelDriverEvent::ToolRequest {
             tool_name,
             arguments,
@@ -2508,10 +1965,91 @@ mod tests {
             "data: {\"type\":\"response.completed\",\"response\":{}}\n\n"
         );
 
-        let results = collect_outputs(input).await;
+        let results = collect_events(input).await;
 
         assert_eq!(results.len(), 1);
         assert!(matches!(results[0], Err(OpenAiError::InvalidResponse(_))));
+    }
+
+    #[tokio::test]
+    async fn a_late_stream_failure_follows_the_completed_model_event() {
+        let input = concat!(
+            "data: {\"type\":\"response.output_text.done\",\"text\":\"Hello\"}\n\n",
+            "data: {\"type\":\"error\",\"message\":\"late failure\"}\n\n"
+        );
+        let mut model_events =
+            model_output_stream(response_byte_stream(vec![input.as_bytes().to_vec()]));
+
+        let completed_event = model_events
+            .next()
+            .await
+            .expect("the stream should yield an event")
+            .expect("the completed event should be valid");
+        assert!(matches!(
+            completed_event,
+            ModelDriverEvent::AssistantResponse { content } if content == "Hello"
+        ));
+        assert!(matches!(
+            model_events.next().await,
+            Some(Err(OpenAiError::Provider(_)))
+        ));
+        assert!(model_events.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn premature_body_end_is_a_stream_interruption() {
+        let input = "data: {\"type\":\"response.output_text.done\",\"text\":\"Hello\"}\n\n";
+        let mut model_events =
+            model_output_stream(response_byte_stream(vec![input.as_bytes().to_vec()]));
+
+        assert!(matches!(
+            model_events.next().await,
+            Some(Ok(ModelDriverEvent::AssistantResponse { .. }))
+        ));
+        assert!(matches!(
+            model_events.next().await,
+            Some(Err(OpenAiError::StreamInterrupted(_)))
+        ));
+    }
+
+    #[tokio::test]
+    async fn missing_response_completed_is_a_stream_error_even_after_done() {
+        let input = concat!(
+            "data: {\"type\":\"response.output_text.done\",\"text\":\"Hello\"}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let mut model_events =
+            model_output_stream(response_byte_stream(vec![input.as_bytes().to_vec()]));
+
+        assert!(matches!(
+            model_events.next().await,
+            Some(Ok(ModelDriverEvent::AssistantResponse { .. }))
+        ));
+        assert!(matches!(
+            model_events.next().await,
+            Some(Err(OpenAiError::InvalidResponse(_)))
+        ));
+    }
+
+    #[tokio::test]
+    async fn response_completed_fallback_does_not_duplicate_a_done_event() {
+        let input = concat!(
+            "data: {\"type\":\"response.output_text.done\",\"text\":\"Answer\"}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"output\":[{\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}]}]}}\n\n",
+            "data: [DONE]\n\n"
+        );
+
+        let events = collect_events(input)
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .expect("the response stream should parse");
+
+        let assistant_count = events
+            .iter()
+            .filter(|event| matches!(event, ModelDriverEvent::AssistantResponse { .. }))
+            .count();
+        assert_eq!(assistant_count, 1);
     }
 
     #[tokio::test]
@@ -2522,90 +2060,18 @@ mod tests {
             "data: [DONE]\n\n"
         );
 
-        let events = collect_outputs(input)
+        let events = collect_events(input)
             .await
             .into_iter()
             .collect::<Result<Vec<_>, _>>()
             .expect("the fallback function call should parse");
 
-        assert_eq!(events.len(), 1);
+        assert_eq!(events.len(), 2);
         assert!(matches!(
             &events[0],
             ModelDriverEvent::ToolRequest { arguments, .. }
                 if arguments == &json!({ "command": "pwd" })
         ));
-    }
-
-    #[tokio::test]
-    async fn response_completed_adds_unstreamed_indexed_output_without_duplicates() {
-        let input = concat!(
-            "data: {\"type\":\"response.output_text.done\",\"output_index\":0,\"content_index\":0,\"text\":\"First\"}\n\n",
-            "data: {\"type\":\"response.completed\",\"response\":{\"output\":[{\"content\":[{\"type\":\"output_text\",\"text\":\"First\"},{\"type\":\"output_text\",\"text\":\"Second\"}]}]}}\n\n"
-        );
-
-        let events = collect_events(input)
-            .await
-            .into_iter()
-            .collect::<Result<Vec<_>, _>>()
-            .expect("the completed response fallback should parse");
-
-        assert_eq!(events.len(), 2);
-        assert_eq!(events[0].message(), "First");
-        assert_eq!(events[1].message(), "Second");
-    }
-
-    #[tokio::test]
-    async fn distinct_indexed_output_completions_yield_distinct_semantic_events() {
-        let input = concat!(
-            "data: {\"type\":\"response.output_text.done\",\"output_index\":0,\"content_index\":0,\"text\":\"First\"}\n\n",
-            "data: {\"type\":\"response.output_text.done\",\"output_index\":1,\"content_index\":0,\"text\":\"Second\"}\n\n",
-            "data: {\"type\":\"response.completed\",\"response\":{}}\n\n"
-        );
-
-        let events = collect_events(input)
-            .await
-            .into_iter()
-            .collect::<Result<Vec<_>, _>>()
-            .expect("the indexed output should parse");
-
-        assert_eq!(events.len(), 2);
-        assert_eq!(events[0].message(), "First");
-        assert_eq!(events[1].message(), "Second");
-    }
-
-    #[tokio::test]
-    async fn duplicate_indexed_completion_is_a_stream_error_after_the_completed_event() {
-        let input = concat!(
-            "data: {\"type\":\"response.output_text.done\",\"output_index\":0,\"content_index\":0,\"text\":\"Answer\"}\n\n",
-            "data: {\"type\":\"response.output_text.done\",\"output_index\":0,\"content_index\":0,\"text\":\"Answer\"}\n\n"
-        );
-        let mut events = model_output_stream(response_byte_stream(vec![input.as_bytes().to_vec()]));
-
-        assert!(matches!(
-            events.next().await,
-            Some(Ok(ModelDriverEvent::Model {
-                event: ModelEvent::Assistant(_),
-                ..
-            }))
-        ));
-        assert!(matches!(
-            events.next().await,
-            Some(Err(OpenAiError::InvalidResponse(_)))
-        ));
-    }
-
-    #[tokio::test]
-    async fn response_completed_supplies_final_object_fallback_at_end_of_stream() {
-        let input = "data: {\"type\":\"response.completed\",\"response\":{\"output\":[{\"content\":[{\"type\":\"output_text\",\"text\":\"Fallback\"}]}]}}";
-
-        let events = collect_events(input)
-            .await
-            .into_iter()
-            .collect::<Result<Vec<_>, _>>()
-            .expect("the buffered final event should parse");
-
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].message(), "Fallback");
     }
 
     #[tokio::test]
@@ -2616,29 +2082,6 @@ mod tests {
         assert!(matches!(
             events.next().await,
             Some(Err(OpenAiError::InvalidResponse(_)))
-        ));
-    }
-
-    #[test]
-    fn invalid_model_communication_maps_to_invalid_response() {
-        let empty_message = model_communication(
-            "   ".to_owned(),
-            "reasoning",
-            ModelEventImportance::Detailed,
-        );
-        let empty_subtype = model_communication(
-            "reasoning".to_owned(),
-            "   ",
-            ModelEventImportance::Detailed,
-        );
-
-        assert!(matches!(
-            empty_message,
-            Err(OpenAiError::InvalidResponse(_))
-        ));
-        assert!(matches!(
-            empty_subtype,
-            Err(OpenAiError::InvalidResponse(_))
         ));
     }
 
@@ -2660,6 +2103,33 @@ mod tests {
             classify_response_failure(StatusCode::INTERNAL_SERVER_ERROR, "failed".to_owned()),
             Err(OpenAiError::Provider(_))
         ));
+    }
+
+    #[test]
+    fn a_context_limit_http_response_is_a_semantic_context_limit() {
+        let result = classify_response_failure(
+            StatusCode::BAD_REQUEST,
+            json!({ "error": { "code": "context_length_exceeded" } }).to_string(),
+        );
+        assert!(result.is_ok());
+    }
+
+    fn source() -> ModelSource {
+        ModelSource::new(
+            ProviderId::from_str("openai").expect("the provider identifier should be valid"),
+            ModelId::from_str("gpt-5.6").expect("the model identifier should be valid"),
+        )
+    }
+
+    fn test_conversation(text: &str) -> ConversationHistory {
+        let conversation_id = ConversationId::new();
+        ConversationHistory::from_events(vec![user_event(conversation_id, 0, text)])
+            .expect("the conversation should be valid")
+    }
+
+    fn driver_request(conversation: &dyn Conversation) -> TurnInput<'_> {
+        let model_request_id = ConversationEventId::new();
+        TurnInput::new(conversation, model_request_id, 0)
     }
 
     fn read_request(connection: &TcpStream) {
@@ -2690,5 +2160,169 @@ mod tests {
         reader
             .read_exact(&mut body)
             .expect("the request body should read");
+    }
+
+    #[tokio::test]
+    async fn invoke_emits_outputs_and_a_terminal_model_response() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("the mock server should bind");
+        let address = listener
+            .local_addr()
+            .expect("the mock server address should be available");
+        let server = thread::spawn(move || {
+            let (mut connection, _) = listener.accept().expect("the mock server should accept");
+            read_request(&connection);
+            let response_body = concat!(
+                "data: {\"type\":\"response.reasoning_text.done\",\"text\":\"Reasoning\"}\n\n",
+                "data: {\"type\":\"response.output_text.done\",\"text\":\"Answer\"}\n\n",
+                "data: {\"type\":\"response.completed\",\"response\":{}}\n\n",
+                "data: [DONE]\n\n"
+            );
+            write!(
+                connection,
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+                response_body.len()
+            )
+            .expect("the mock response should write");
+        });
+        let driver = OpenAiModelDriver {
+            http_client: reqwest::Client::new(),
+            api_key: "test-key".to_owned(),
+            responses_url: format!("http://{address}/responses"),
+            source: source(),
+        };
+
+        let conversation = test_conversation("Hello");
+        let mut model_events = driver
+            .invoke(driver_request(&conversation))
+            .await
+            .expect("the invocation should establish its stream");
+        let first = expect_single(&mut model_events).await;
+        assert!(matches!(first, ModelDriverOutput::ModelSpecificEvent(_)));
+        let second = expect_single(&mut model_events).await;
+        assert!(matches!(second, ModelDriverOutput::AssistantResponse(_)));
+        let terminal = expect_single(&mut model_events).await;
+        assert!(matches!(
+            terminal,
+            ModelDriverOutput::ModelResponse(response)
+                if matches!(response.outcome(), ModelOutcome::Succeeded)
+        ));
+        assert!(model_events.next().await.is_none());
+        server.join().expect("the mock server should stop");
+    }
+
+    async fn expect_single(stream: &mut ModelOutputStream) -> ModelDriverOutput {
+        let batch = stream
+            .next()
+            .await
+            .expect("the stream should yield a batch")
+            .expect("the batch should be valid");
+        let mut outputs = batch.into_outputs();
+        assert_eq!(outputs.len(), 1, "the batch should hold one output");
+        outputs.remove(0)
+    }
+
+    #[tokio::test]
+    async fn an_early_http_failure_produces_a_failed_terminal() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("the mock server should bind");
+        let address = listener
+            .local_addr()
+            .expect("the mock server address should be available");
+        let server = thread::spawn(move || {
+            let (mut connection, _) = listener.accept().expect("the mock server should accept");
+            read_request(&connection);
+            let body = "unauthorized";
+            write!(
+                connection,
+                "HTTP/1.1 401 Unauthorized\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .expect("the mock response should write");
+        });
+        let driver = OpenAiModelDriver {
+            http_client: reqwest::Client::new(),
+            api_key: "test-key".to_owned(),
+            responses_url: format!("http://{address}/responses"),
+            source: source(),
+        };
+
+        let conversation = test_conversation("Hello");
+        let mut model_events = driver
+            .invoke(driver_request(&conversation))
+            .await
+            .expect("the invocation should establish a stream");
+        let batch = model_events
+            .next()
+            .await
+            .expect("the stream should yield a failure batch")
+            .expect("the failure batch should be valid")
+            .into_outputs();
+        assert_eq!(batch.len(), 1);
+        assert!(matches!(
+            &batch[0],
+            ModelDriverOutput::ModelResponse(response)
+                if matches!(
+                    response.outcome(),
+                    ModelOutcome::Failed { failure }
+                        if failure.category() == FailureCategory::Authentication
+                )
+        ));
+        assert!(model_events.next().await.is_none());
+        server.join().expect("the mock server should stop");
+    }
+
+    #[tokio::test]
+    async fn a_context_limit_http_response_becomes_a_failed_terminal() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("the mock server should bind");
+        let address = listener
+            .local_addr()
+            .expect("the mock server address should be available");
+        let server = thread::spawn(move || {
+            let (mut connection, _) = listener.accept().expect("the mock server should accept");
+            read_request(&connection);
+            let body = json!({
+                "error": {
+                    "code": "context_length_exceeded",
+                    "message": "raw provider details"
+                }
+            })
+            .to_string();
+            write!(
+                connection,
+                "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .expect("the mock response should write");
+        });
+        let driver = OpenAiModelDriver {
+            http_client: reqwest::Client::new(),
+            api_key: "test-key".to_owned(),
+            responses_url: format!("http://{address}/responses"),
+            source: source(),
+        };
+
+        let conversation = test_conversation("Hello");
+        let mut model_events = driver
+            .invoke(driver_request(&conversation))
+            .await
+            .expect("the context-limit outcome should establish a semantic stream");
+        let batch = model_events
+            .next()
+            .await
+            .expect("the stream should yield a terminal batch")
+            .expect("the terminal batch should be valid")
+            .into_outputs();
+        assert_eq!(batch.len(), 1);
+        assert!(matches!(
+            &batch[0],
+            ModelDriverOutput::ModelResponse(response)
+                if matches!(
+                    response.outcome(),
+                    ModelOutcome::Failed { failure }
+                        if failure.category() == FailureCategory::ContextLimitExceeded
+                            && failure.message() == "The model context limit was exceeded."
+                )
+        ));
+        assert!(model_events.next().await.is_none());
+        server.join().expect("the mock server should stop");
     }
 }

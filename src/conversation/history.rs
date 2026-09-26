@@ -1,8 +1,11 @@
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
 use super::{Conversation, ConversationId};
-use crate::conversation_event::ConversationEventRecord;
+use crate::conversation::events::{
+    ConversationEvent, ConversationEventId, ConversationEventRecord, ModelEvent, TurnEnd,
+};
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ConversationHistory {
@@ -48,6 +51,9 @@ impl ConversationHistory {
                 })?;
         }
 
+        let final_position = previous_position.ok_or(InvalidConversation::Empty)?;
+        validate_references(&events, final_position)?;
+
         Ok(Self {
             id: conversation_id,
             events,
@@ -65,6 +71,247 @@ impl Conversation for ConversationHistory {
     }
 }
 
+fn validate_references(
+    events: &[ConversationEventRecord],
+    final_position: u64,
+) -> Result<(), InvalidConversation> {
+    let by_id = events
+        .iter()
+        .map(|event| (event.id, event))
+        .collect::<HashMap<_, _>>();
+
+    let mut closed_turns = HashSet::new();
+    let mut resolved_model_responses = HashSet::new();
+    let mut claimed_outputs = HashSet::new();
+
+    for event in events {
+        match &event.event {
+            ConversationEvent::TurnStart(turn_start) => {
+                validate_input_through(event, turn_start.input_through(), final_position)?;
+                if let Some(user_id) = turn_start.user_id() {
+                    require_kind(&by_id, event, "turn start", user_id, |candidate| {
+                        matches!(candidate, ConversationEvent::User(_))
+                    })?;
+                }
+            }
+            ConversationEvent::TurnEnd(turn_end) => {
+                validate_turn_end(event, turn_end, &by_id, &mut closed_turns)?;
+            }
+            ConversationEvent::ModelRequest(request) => {
+                validate_input_through(event, request.input_through(), final_position)?;
+                require_kind(
+                    &by_id,
+                    event,
+                    "model request",
+                    request.turn_id(),
+                    |candidate| matches!(candidate, ConversationEvent::TurnStart(_)),
+                )?;
+                for dependency in request.depends_on() {
+                    require_kind(
+                        &by_id,
+                        event,
+                        "model request dependency",
+                        *dependency,
+                        |candidate| matches!(candidate, ConversationEvent::ToolRequest(_)),
+                    )?;
+                }
+                if let Some(retry_of) = request.retry_of() {
+                    let retried = require_kind(
+                        &by_id,
+                        event,
+                        "model request retry",
+                        retry_of,
+                        |candidate| matches!(candidate, ConversationEvent::ModelRequest(_)),
+                    )?;
+                    let ConversationEvent::ModelRequest(retried_request) = &retried.event else {
+                        unreachable!("the referenced event kind was just checked");
+                    };
+                    if retried_request.turn_id() != request.turn_id() {
+                        return Err(InvalidConversation::InvalidReference {
+                            position: event.position,
+                            reason: "model request retries a request from a different turn"
+                                .to_owned(),
+                        });
+                    }
+                }
+            }
+            ConversationEvent::AssistantResponse(response) => {
+                validate_model_request_reference(&by_id, event, response)?;
+            }
+            ConversationEvent::ToolRequest(request) => {
+                validate_model_request_reference(&by_id, event, request)?;
+            }
+            ConversationEvent::ModelSpecificEvent(model_specific_event) => {
+                validate_model_request_reference(&by_id, event, model_specific_event)?;
+            }
+            ConversationEvent::ToolResponse(response) => {
+                require_kind(
+                    &by_id,
+                    event,
+                    "tool response",
+                    response.tool_request_id(),
+                    |candidate| matches!(candidate, ConversationEvent::ToolRequest(_)),
+                )?;
+            }
+            ConversationEvent::ModelResponse(response) => {
+                validate_model_request_reference(&by_id, event, response)?;
+                let response_model_request_id = response.model_request_id();
+                if !resolved_model_responses.insert(response_model_request_id) {
+                    return Err(InvalidConversation::InvalidReference {
+                        position: event.position,
+                        reason: "model request has more than one terminal model response"
+                            .to_owned(),
+                    });
+                }
+                for output_event_id in response.output_event_ids() {
+                    validate_model_response_output(
+                        &by_id,
+                        event,
+                        response_model_request_id,
+                        *output_event_id,
+                        &mut claimed_outputs,
+                    )?;
+                }
+            }
+            ConversationEvent::User(_)
+            | ConversationEvent::Automation(_)
+            | ConversationEvent::Context(_)
+            | ConversationEvent::Data(_) => {}
+        }
+    }
+    Ok(())
+}
+
+type ReferenceTable<'events> = HashMap<ConversationEventId, &'events ConversationEventRecord>;
+
+fn validate_input_through(
+    event: &ConversationEventRecord,
+    input_through: u64,
+    final_position: u64,
+) -> Result<(), InvalidConversation> {
+    if input_through > final_position {
+        return Err(InvalidConversation::InvalidReference {
+            position: event.position,
+            reason: format!(
+                "input position {input_through} is beyond the conversation boundary {final_position}"
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn validate_turn_end(
+    event: &ConversationEventRecord,
+    turn_end: &TurnEnd,
+    by_id: &ReferenceTable<'_>,
+    closed_turns: &mut HashSet<ConversationEventId>,
+) -> Result<(), InvalidConversation> {
+    require_kind(by_id, event, "turn end", turn_end.turn_id(), |candidate| {
+        matches!(candidate, ConversationEvent::TurnStart(_))
+    })?;
+    if !closed_turns.insert(turn_end.turn_id()) {
+        return Err(InvalidConversation::InvalidReference {
+            position: event.position,
+            reason: "turn has more than one terminal turn end event".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_model_request_reference(
+    by_id: &ReferenceTable<'_>,
+    event: &ConversationEventRecord,
+    model_event: &dyn ModelEvent,
+) -> Result<(), InvalidConversation> {
+    require_kind(
+        by_id,
+        event,
+        "model event",
+        model_event.model_request_id(),
+        |candidate| matches!(candidate, ConversationEvent::ModelRequest(_)),
+    )?;
+    Ok(())
+}
+
+fn validate_model_response_output(
+    by_id: &ReferenceTable<'_>,
+    event: &ConversationEventRecord,
+    response_model_request_id: ConversationEventId,
+    output_event_id: ConversationEventId,
+    claimed_outputs: &mut HashSet<ConversationEventId>,
+) -> Result<(), InvalidConversation> {
+    let output =
+        by_id
+            .get(&output_event_id)
+            .ok_or_else(|| InvalidConversation::InvalidReference {
+                position: event.position,
+                reason: format!(
+                    "model response references missing output conversation event {output_event_id}"
+                ),
+            })?;
+    let output_model_request_id = match &output.event {
+        ConversationEvent::AssistantResponse(response) => Some(response.model_request_id()),
+        ConversationEvent::ToolRequest(request) => Some(request.model_request_id()),
+        _ => None,
+    };
+    let Some(output_model_request_id) = output_model_request_id else {
+        return Err(InvalidConversation::InvalidReference {
+            position: event.position,
+            reason: format!("model response output {output_event_id} is not a model output event"),
+        });
+    };
+    if output_model_request_id != response_model_request_id {
+        return Err(InvalidConversation::InvalidReference {
+            position: event.position,
+            reason: format!(
+                "model response output {output_event_id} belongs to another model request"
+            ),
+        });
+    }
+    if output.position >= event.position {
+        return Err(InvalidConversation::InvalidReference {
+            position: event.position,
+            reason: format!(
+                "model response output {output_event_id} was recorded after its terminal response"
+            ),
+        });
+    }
+    if !claimed_outputs.insert(output_event_id) {
+        return Err(InvalidConversation::InvalidReference {
+            position: event.position,
+            reason: format!(
+                "model output {output_event_id} is claimed by more than one model response"
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn require_kind<'events>(
+    by_id: &ReferenceTable<'events>,
+    event: &ConversationEventRecord,
+    description: &str,
+    referenced_id: ConversationEventId,
+    is_expected_kind: impl Fn(&ConversationEvent) -> bool,
+) -> Result<&'events ConversationEventRecord, InvalidConversation> {
+    let candidate =
+        by_id
+            .get(&referenced_id)
+            .ok_or_else(|| InvalidConversation::InvalidReference {
+                position: event.position,
+                reason: format!(
+                    "{description} references missing conversation event {referenced_id}"
+                ),
+            })?;
+    if !is_expected_kind(&candidate.event) {
+        return Err(InvalidConversation::InvalidReference {
+            position: event.position,
+            reason: format!("{description} references unexpected event {referenced_id}"),
+        });
+    }
+    Ok(candidate)
+}
+
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum InvalidConversation {
     Empty,
@@ -77,6 +324,10 @@ pub(crate) enum InvalidConversation {
         found: u64,
     },
     InvalidEvent {
+        position: u64,
+        reason: String,
+    },
+    InvalidReference {
         position: u64,
         reason: String,
     },
@@ -101,6 +352,12 @@ impl Display for InvalidConversation {
                 write!(
                     formatter,
                     "invalid conversation event at position {position}: {reason}"
+                )
+            }
+            Self::InvalidReference { position, reason } => {
+                write!(
+                    formatter,
+                    "invalid conversation reference at position {position}: {reason}"
                 )
             }
             Self::TooManyEvents => write!(formatter, "conversation contains too many events"),

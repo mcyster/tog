@@ -5,10 +5,9 @@ use std::io::{self, Write};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
-use crate::conversation::ConversationId;
-use crate::conversation_event::{
-    ConversationEventRecord, ConversationFact, ConversationMessage, ConversationProblem,
-    ModelEventImportance, ModelId, TurnOutcome, UserContent,
+use crate::conversation::{
+    ConversationEvent, ConversationEventRecord, ConversationId, ModelId, ModelOutcome, TurnOutcome,
+    UserContent,
 };
 use crate::conversation_event_store::{ConversationEventStore, FileEventStore};
 use crate::conversation_session::{
@@ -75,9 +74,6 @@ impl CommandLine {
                             ConversationSessionProgress::EventCompleted { event } => {
                                 render_model_event(&event, verbosity)?;
                             }
-                            ConversationSessionProgress::ProblemCompleted { problem } => {
-                                render_model_problem(&problem)?;
-                            }
                         }
                         Ok(())
                     })
@@ -118,29 +114,23 @@ fn write_conversation_log(
     output.flush()
 }
 
-fn render_model_event(event: &ConversationFact, verbosity: Verbosity) -> io::Result<()> {
-    let (message, importance, prefix) = match event {
-        ConversationFact::Message {
-            message: ConversationMessage::AssistantResponse { response, .. },
-            ..
-        } => (response.message(), ModelEventImportance::Important, ""),
-        ConversationFact::Message {
-            message: ConversationMessage::Communication { communication, .. },
-            ..
-        } => (communication.message(), communication.importance(), "### "),
-        _ => return Ok(()),
+fn render_model_event(event: &ConversationEvent, verbosity: Verbosity) -> io::Result<()> {
+    let message = match event {
+        ConversationEvent::AssistantResponse(response) => Some(response.content().to_owned()),
+        ConversationEvent::ModelSpecificEvent(event) if verbosity.shows_auxiliary_messages() => {
+            event.message().map(|message| format!("### {message}"))
+        }
+        ConversationEvent::ModelResponse(response) => match response.outcome() {
+            ModelOutcome::Failed { failure } => Some(format!("### {}", failure.message())),
+            ModelOutcome::Succeeded => None,
+        },
+        _ => None,
     };
-    if !verbosity.includes(importance) {
+    let Some(message) = message else {
         return Ok(());
     };
     let mut standard_output = io::stdout().lock();
-    writeln!(standard_output, "{prefix}{message}")?;
-    standard_output.flush()
-}
-
-fn render_model_problem(problem: &ConversationProblem) -> io::Result<()> {
-    let mut standard_output = io::stdout().lock();
-    writeln!(standard_output, "### {}", problem.message())?;
+    writeln!(standard_output, "{message}")?;
     standard_output.flush()
 }
 
@@ -190,11 +180,7 @@ enum Verbosity {
 }
 
 impl Verbosity {
-    fn includes(self, importance: ModelEventImportance) -> bool {
-        match self {
-            Self::Low => importance >= ModelEventImportance::Important,
-            Self::Medium => importance >= ModelEventImportance::Interesting,
-            Self::High => true,
-        }
+    fn shows_auxiliary_messages(self) -> bool {
+        !matches!(self, Self::Low)
     }
 }

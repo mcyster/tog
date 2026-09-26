@@ -10,12 +10,12 @@ pub(crate) use turn_input::TurnInput;
 use futures_util::future::BoxFuture;
 use futures_util::stream::BoxStream;
 
-use crate::conversation_event::{ConversationCommandId, ConversationEventReader, ModelSource};
+use crate::conversation::{ConversationEventId, ModelSource};
 
 pub(crate) type ModelOutputStream =
     BoxStream<'static, Result<ModelDriverOutputBatch, ModelDriverError>>;
 
-pub(crate) trait ModelDriver: ConversationEventReader {
+pub(crate) trait ModelDriver {
     fn source(&self) -> &ModelSource;
 
     fn invoke<'invoke>(
@@ -26,10 +26,18 @@ pub(crate) trait ModelDriver: ConversationEventReader {
 
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum ModelDriverError {
-    UnassociatedUserMessage,
-    UnexpectedUserRequest { command_id: ConversationCommandId },
-    IncompleteTurn,
+    UnexpectedModelRequestReference {
+        expected: ConversationEventId,
+        found: ConversationEventId,
+    },
+    TerminalResponseNotAlone {
+        model_request_id: ConversationEventId,
+    },
+    OutputAfterTerminalResponse {
+        model_request_id: ConversationEventId,
+    },
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) struct EmptyModelDriverOutputBatch;

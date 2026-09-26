@@ -3,6 +3,17 @@
 **Status:** Phase 1 asynchronous streaming text and bounded tool-calling slice implemented
 **Purpose:** Define a simple, durable conversation model and a narrow `ModelDriver` boundary that can be implemented against the OpenAI Responses API now and can support switching models/providers within a conversation.
 
+> Vocabulary update: the conversation event vocabulary and driver boundary were
+> refreshed by [Conversation Events And ModelDriver Boundary](notes/2026-09-26-conversation-events-and-model-driver.md).
+> `ConversationEvent` is now a flat vocabulary (`User`, `TurnStart`, `TurnEnd`,
+> `AssistantResponse`, `ToolRequest`, `ToolResponse`, `ModelRequest`,
+> `ModelResponse`, `ModelSpecificEvent`, `Automation`, `Context`, `Data`) with one
+> `ConversationEventId` for identity and references. The sections below that
+> describe the earlier `Kind`/`Message`/`Problem`/`Communication`/
+> `ModelInvocationId` structure are superseded by that note and by
+> [conversation.md](conversation.md); the remaining architecture (immutable logged
+> input, cross-provider replay, small driver contract) still applies.
+
 This design is intentionally incomplete.
 
 Phase 1 is not trying to build a perfect event-sourcing framework, a durable provider-protocol log, a distributed runtime, or a universal multi-provider SDK.

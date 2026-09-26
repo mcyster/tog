@@ -8,10 +8,7 @@ use super::{
     ConversationEventStore, ConversationStoreAppendError, ConversationStoreError,
     ConversationStoreLoadError,
 };
-use crate::conversation::ConversationId;
-use crate::conversation_event::{
-    ConversationEvent, ConversationEventKind, ConversationEventRecord, StoredConversationEventKind,
-};
+use crate::conversation::{ConversationEvent, ConversationEventRecord, ConversationId};
 
 const CONVERSATIONS_DIRECTORY_NAME: &str = "conversations";
 
@@ -89,7 +86,9 @@ impl ConversationEventStore for FileEventStore {
         conversation_id: ConversationId,
         events: Vec<ConversationEvent>,
     ) -> Result<Vec<ConversationEventRecord>, ConversationStoreAppendError> {
-        let kinds = stored_event_kinds(events)?;
+        if events.is_empty() {
+            return Err(ConversationStoreAppendError::EmptyBatch);
+        }
         let conversation_directory = self.conversation_directory(conversation_id);
         create_private_directory(&conversation_directory)?;
         let existing_log = log::read(&conversation_directory)?;
@@ -98,7 +97,7 @@ impl ConversationEventStore for FileEventStore {
             .map(|log| log.events.as_slice())
             .unwrap_or_default();
         let previous_position = validate_existing_events(conversation_id, existing_events)?;
-        let batch = build_event_batch(conversation_id, previous_position, kinds)?;
+        let batch = build_event_batch(conversation_id, previous_position, events)?;
         commit_batch(&conversation_directory, existing_log, &batch)?;
         Ok(batch)
     }
@@ -147,54 +146,23 @@ fn ensure_records_belong_to(
 fn build_event_batch(
     conversation_id: ConversationId,
     previous_position: Option<u64>,
-    kinds: Vec<StoredConversationEventKind>,
+    events: Vec<ConversationEvent>,
 ) -> io::Result<Vec<ConversationEventRecord>> {
     let first_position = next_position(previous_position)?;
-    kinds
+    events
         .into_iter()
         .enumerate()
-        .map(|(offset, kind)| {
+        .map(|(offset, event)| {
             let position = first_position
                 .checked_add(u64::try_from(offset).map_err(io::Error::other)?)
                 .ok_or_else(|| io::Error::other("event position overflow"))?;
-            Ok(match kind {
-                StoredConversationEventKind::Shared(kind) => {
-                    ConversationEventRecord::new(conversation_id, position, kind)
-                }
-                StoredConversationEventKind::Extension(event) => {
-                    ConversationEventRecord::new_extension(conversation_id, position, event)
-                }
-            })
+            Ok(ConversationEventRecord::new(
+                conversation_id,
+                position,
+                event,
+            ))
         })
         .collect()
-}
-
-fn stored_event_kinds(
-    events: Vec<ConversationEvent>,
-) -> Result<Vec<StoredConversationEventKind>, ConversationStoreAppendError> {
-    if events.is_empty() {
-        return Err(ConversationStoreAppendError::EmptyBatch);
-    }
-    events
-        .into_iter()
-        .map(stored_kind)
-        .collect::<io::Result<Vec<_>>>()
-        .map_err(ConversationStoreAppendError::from)
-}
-
-fn stored_kind(event: ConversationEvent) -> io::Result<StoredConversationEventKind> {
-    match event {
-        ConversationEvent::Command(command) => Ok(StoredConversationEventKind::Shared(
-            ConversationEventKind::Command(command),
-        )),
-        ConversationEvent::Fact(fact) => Ok(StoredConversationEventKind::Shared(
-            ConversationEventKind::Fact(fact),
-        )),
-        ConversationEvent::Extension(event) => event
-            .to_envelope()
-            .map(StoredConversationEventKind::Extension)
-            .map_err(io::Error::other),
-    }
 }
 
 fn next_position(previous_position: Option<u64>) -> io::Result<u64> {

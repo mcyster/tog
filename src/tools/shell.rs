@@ -13,7 +13,7 @@ use tokio::process::{Child, Command};
 use tokio::task::JoinHandle;
 
 use super::ExecutableTool;
-use crate::conversation_event::{ToolDefinition, ToolExecutionProblem, ToolName};
+use crate::conversation::{FailureCategory, OperationFailure, ToolDefinition, ToolName};
 
 pub(crate) const DEFAULT_TIMEOUT_SECONDS: u64 = 30;
 pub(crate) const MAXIMUM_RETAINED_OUTPUT_BYTES: usize = 64 * 1024;
@@ -45,7 +45,7 @@ impl ExecutableTool for ShellTool {
     fn execute<'execute>(
         &'execute self,
         arguments: Value,
-    ) -> BoxFuture<'execute, Result<Value, ToolExecutionProblem>> {
+    ) -> BoxFuture<'execute, Result<Value, OperationFailure>> {
         async move {
             let parameters: ShellCommandParameters = serde_json::from_value(arguments)
                 .map_err(|error| invalid_arguments(format!("invalid shell arguments: {error}")))?;
@@ -110,7 +110,7 @@ struct ShellTimeoutDetails {
 
 async fn run_shell_command(
     parameters: ShellCommandParameters,
-) -> Result<ShellCommandResult, ToolExecutionProblem> {
+) -> Result<ShellCommandResult, OperationFailure> {
     if parameters.command.trim().is_empty() {
         return Err(invalid_arguments(
             "the shell command must not be blank".to_owned(),
@@ -167,7 +167,7 @@ fn shell_timed_out(
     timeout_seconds: u64,
     stdout: CapturedOutput,
     stderr: CapturedOutput,
-) -> ToolExecutionProblem {
+) -> OperationFailure {
     let details = ShellTimeoutDetails {
         timeout_seconds,
         stdout: stdout.text,
@@ -175,7 +175,8 @@ fn shell_timed_out(
         stdout_truncated: stdout.truncated,
         stderr_truncated: stderr.truncated,
     };
-    ToolExecutionProblem::try_timed_out(
+    OperationFailure::try_new(
+        FailureCategory::TimedOut,
         format!("the shell command timed out after {timeout_seconds} seconds"),
         Some(serde_json::to_value(details).expect("the shell timeout details should serialize")),
     )
@@ -185,7 +186,7 @@ fn shell_timed_out(
 fn take_pipe<Stream>(
     stream: Option<Stream>,
     stream_name: &str,
-) -> Result<Stream, ToolExecutionProblem> {
+) -> Result<Stream, OperationFailure> {
     stream.ok_or_else(|| {
         execution_failed(format!(
             "the shell {stream_name} pipe was not captured after spawning"
@@ -208,7 +209,7 @@ fn terminate_process_group(process_id: Option<u32>, child: &mut Child) {
 async fn join_capture(
     capture: JoinHandle<CapturedOutput>,
     stream_name: &str,
-) -> Result<CapturedOutput, ToolExecutionProblem> {
+) -> Result<CapturedOutput, OperationFailure> {
     capture.await.map_err(|error| {
         execution_failed(format!("the shell {stream_name} reader failed: {error}"))
     })
@@ -264,13 +265,13 @@ fn shell_exit_status(exit_status: ExitStatus) -> ShellExitStatus {
     }
 }
 
-fn invalid_arguments(message: String) -> ToolExecutionProblem {
-    ToolExecutionProblem::try_invalid_arguments(message)
+fn invalid_arguments(message: String) -> OperationFailure {
+    OperationFailure::try_new(FailureCategory::InvalidArguments, message, None)
         .expect("the invalid-argument message should be valid")
 }
 
-fn execution_failed(message: String) -> ToolExecutionProblem {
-    ToolExecutionProblem::try_execution_failed(message)
+fn execution_failed(message: String) -> OperationFailure {
+    OperationFailure::try_new(FailureCategory::ExecutionFailed, message, None)
         .expect("the execution failure message should be valid")
 }
 
@@ -279,9 +280,9 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::{ExecutableTool, MAXIMUM_RETAINED_OUTPUT_BYTES, ShellTool};
-    use crate::conversation_event::{ToolExecutionProblem, ToolExecutionProblemKind};
+    use crate::conversation::{FailureCategory, OperationFailure};
 
-    async fn execute(arguments: Value) -> Result<Value, ToolExecutionProblem> {
+    async fn execute(arguments: Value) -> Result<Value, OperationFailure> {
         ShellTool::new().execute(arguments).await
     }
 
@@ -345,7 +346,7 @@ mod tests {
         .await
         .expect_err("the timeout should be a problem");
 
-        assert_eq!(problem.kind(), ToolExecutionProblemKind::TimedOut);
+        assert_eq!(problem.category(), FailureCategory::TimedOut);
         assert_eq!(
             problem.message(),
             "the shell command timed out after 1 seconds"
@@ -371,7 +372,7 @@ mod tests {
         .await
         .expect_err("the timeout should be a problem");
 
-        assert_eq!(problem.kind(), ToolExecutionProblemKind::TimedOut);
+        assert_eq!(problem.category(), FailureCategory::TimedOut);
         let details = problem.details().expect("the timeout should carry details");
         assert_eq!(details["timeout_seconds"], 1);
         assert_eq!(
@@ -412,8 +413,8 @@ mod tests {
             .await
             .expect_err("a blank command should fail");
 
-        assert_eq!(missing.kind(), ToolExecutionProblemKind::InvalidArguments);
-        assert_eq!(blank.kind(), ToolExecutionProblemKind::InvalidArguments);
+        assert_eq!(missing.category(), FailureCategory::InvalidArguments);
+        assert_eq!(blank.category(), FailureCategory::InvalidArguments);
     }
 
     #[tokio::test]
@@ -425,7 +426,7 @@ mod tests {
         .await
         .expect_err("an unusable working directory should fail to start the process");
 
-        assert_eq!(problem.kind(), ToolExecutionProblemKind::ExecutionFailed);
+        assert_eq!(problem.category(), FailureCategory::ExecutionFailed);
         assert!(
             problem.message().contains("could not be started"),
             "the message should explain that the process could not be started"

@@ -1,9 +1,6 @@
-use std::collections::HashSet;
-
 use super::Conversation;
-use crate::conversation_event::{
-    ConversationCommand, ConversationEventKind, ConversationEventRecord, ConversationFact,
-    ConversationMessage, StoredConversationEventKind, ToolDefinition, UserMessageRequest,
+use crate::conversation::events::{
+    Context, ConversationEvent, ConversationEventRecord, ToolDefinition,
 };
 
 pub(crate) struct ConversationView<'conversation> {
@@ -19,46 +16,28 @@ impl<'conversation> ConversationView<'conversation> {
         self.conversation.events()
     }
 
-    pub(crate) fn pending_user_requests(&self) -> Vec<UserMessageRequest> {
-        let mut requests = Vec::new();
-        let mut accepted_request_ids = HashSet::new();
-        for event in self.events() {
-            let StoredConversationEventKind::Shared(kind) = &event.kind else {
-                continue;
-            };
-            match kind {
-                ConversationEventKind::Command(ConversationCommand::UserMessageRequested(
-                    request,
-                )) => requests.push(request.clone()),
-                ConversationEventKind::Fact(ConversationFact::Message {
-                    message:
-                        ConversationMessage::User {
-                            caused_by: Some(command_id),
-                            ..
-                        },
-                    ..
-                }) => {
-                    accepted_request_ids.insert(*command_id);
-                }
-                _ => {}
-            }
-        }
-        requests
-            .into_iter()
-            .filter(|request| !accepted_request_ids.contains(&request.command_id))
-            .collect()
+    pub(crate) fn events_through(&self, position: u64) -> &[ConversationEventRecord] {
+        let events = self.events();
+        events
+            .iter()
+            .position(|event| event.position > position)
+            .map(|boundary| &events[..boundary])
+            .unwrap_or(events)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn available_tools(&self) -> &[ToolDefinition] {
-        self.events()
-            .iter()
-            .rev()
-            .find_map(|event| match &event.kind {
-                StoredConversationEventKind::Shared(ConversationEventKind::Fact(
-                    ConversationFact::ToolsAvailable { tools },
-                )) => Some(tools.as_slice()),
-                _ => None,
-            })
-            .unwrap_or(&[])
+        latest_tools(self.events())
     }
+}
+
+pub(crate) fn latest_tools(events: &[ConversationEventRecord]) -> &[ToolDefinition] {
+    events
+        .iter()
+        .rev()
+        .find_map(|event| match &event.event {
+            ConversationEvent::Context(Context::ToolsAvailable { tools }) => Some(tools.as_slice()),
+            _ => None,
+        })
+        .unwrap_or(&[])
 }

@@ -152,12 +152,11 @@ fn write_response(stream: &mut TcpStream, response: MockResponse) {
             "text/event-stream",
             format!(
                 concat!(
-                    "data: {{\"type\":\"response.created\",\"response\":{{\"id\":\"{}\"}}}}\n\n",
-                    "data: {{\"type\":\"response.output_text.delta\",\"delta\":\"{}\"}}\n\n",
+                    "data: {{\"type\":\"response.output_text.done\",\"text\":\"{}\"}}\n\n",
                     "data: {{\"type\":\"response.completed\",\"response\":{{\"id\":\"{}\"}}}}\n\n",
                     "data: [DONE]\n\n"
                 ),
-                response_id, assistant_text, response_id
+                assistant_text, response_id
             ),
         ),
         MockResponse::SuccessWithReasoning {
@@ -170,14 +169,13 @@ fn write_response(stream: &mut TcpStream, response: MockResponse) {
             "text/event-stream",
             format!(
                 concat!(
-                    "data: {{\"type\":\"response.created\",\"response\":{{\"id\":\"{}\"}}}}\n\n",
-                    "data: {{\"type\":\"response.reasoning_text.delta\",\"delta\":\"{}\"}}\n\n",
-                    "data: {{\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"{}\"}}\n\n",
-                    "data: {{\"type\":\"response.output_text.delta\",\"delta\":\"{}\"}}\n\n",
+                    "data: {{\"type\":\"response.reasoning_text.done\",\"text\":\"{}\"}}\n\n",
+                    "data: {{\"type\":\"response.reasoning_summary_text.done\",\"text\":\"{}\"}}\n\n",
+                    "data: {{\"type\":\"response.output_text.done\",\"text\":\"{}\"}}\n\n",
                     "data: {{\"type\":\"response.completed\",\"response\":{{\"id\":\"{}\"}}}}\n\n",
                     "data: [DONE]\n\n"
                 ),
-                response_id, detailed, interesting, important, response_id
+                detailed, interesting, important, response_id
             ),
         ),
         MockResponse::Failure { status } => (
@@ -209,7 +207,6 @@ fn write_response(stream: &mut TcpStream, response: MockResponse) {
             format!(
                 concat!(
                     "data: {{\"type\":\"response.refusal.done\",\"refusal\":\"{}\"}}\n\n",
-                    "data: {{\"type\":\"response.completed\",\"response\":{{}}}}\n\n",
                     "data: [DONE]\n\n"
                 ),
                 message
@@ -308,64 +305,61 @@ fn turn_persists_events_and_prints_semantic_output() {
     let conversation_id = reported_conversation_id(&command_output.stderr);
     assert!(conversation_id.starts_with("conversation_"));
     assert!(standard_error.contains("## waiting for model gpt-5.6\n"));
-    assert!(!data_directory.join("agent-runs").exists());
-    let conversation_directory = data_directory
-        .join("conversations")
-        .join(conversation_id.trim_start_matches("conversation_"));
-    assert!(!conversation_directory.join("conversation.json").exists());
-    assert!(conversation_directory.join("events.log").exists());
+    assert!(conversation_id.trim_start_matches("conversation_").len() > 8);
     let events = persisted_events(&data_directory, &conversation_id);
-    let first_event = &events[0];
+    let event_types = events
+        .iter()
+        .map(|event| {
+            event["type"]
+                .as_str()
+                .expect("each event has a type")
+                .to_owned()
+        })
+        .collect::<Vec<_>>();
     assert_eq!(
-        first_event["conversation_id"]
+        event_types,
+        [
+            "user",
+            "turn_start",
+            "context",
+            "model_request",
+            "assistant_response",
+            "model_response",
+            "turn_end"
+        ]
+    );
+    let user = &events[0];
+    assert_eq!(user["schema_version"], 13);
+    assert_eq!(
+        user["conversation_id"]
             .as_str()
             .expect("the event should carry its conversation identifier")
             .replace('-', ""),
         conversation_id.trim_start_matches("conversation_")
     );
-    assert_eq!(first_event["schema_version"], 13);
-    assert_eq!(first_event["class"], "command");
-    assert_eq!(first_event["event"]["type"], "user_message_requested");
-    assert_eq!(first_event["event"]["content"][0]["type"], "text");
-    assert_eq!(first_event["event"]["content"][0]["value"], "say hi");
-    assert!(first_event.get("kind").is_none());
-    assert!(first_event.get("model").is_none());
-    let turn_request = &events[1];
-    assert_eq!(turn_request["class"], "command");
-    assert_eq!(turn_request["event"]["type"], "turn_requested");
-    let tools_available = &events[2];
-    assert_eq!(tools_available["schema_version"], 13);
-    assert_eq!(tools_available["class"], "fact");
-    assert_eq!(tools_available["event"]["tools"][0]["name"], "shell");
-    assert!(
-        tools_available["event"]["tools"][0]["parameters"]["properties"]["command"].is_object()
+    assert_eq!(user["content"][0]["type"], "text");
+    assert_eq!(user["content"][0]["value"], "say hi");
+    let context = &events[2];
+    assert_eq!(context["kind"], "tools_available");
+    assert_eq!(context["tools"][0]["name"], "shell");
+    assert!(context["tools"][0]["parameters"]["properties"]["command"].is_object());
+    assert!(context["tools"][0]["result"].is_object());
+    let model_request = &events[3];
+    assert_eq!(model_request["source"]["provider"], "openai");
+    assert_eq!(model_request["source"]["model"], "gpt-5.6");
+    assert!(model_request["input_through"].is_u64());
+    assert!(model_request["turn_id"].is_string());
+    let assistant = &events[4];
+    assert_eq!(assistant["content"], "Hello");
+    assert!(assistant["model_request_id"].is_string());
+    let model_response = &events[5];
+    assert_eq!(model_response["outcome"]["type"], "succeeded");
+    assert_eq!(
+        model_response["output_event_ids"][0], events[4]["id"],
+        "the terminal response seals the assistant output"
     );
-    assert!(tools_available["event"]["tools"][0]["result"].is_object());
-    let user_event = &events[3];
-    assert_eq!(user_event["schema_version"], 13);
-    assert_eq!(user_event["class"], "fact");
-    assert_eq!(user_event["event"]["type"], "user");
-    let invocation_event = &events[4];
-    assert_eq!(invocation_event["class"], "command");
-    assert_eq!(invocation_event["namespace"], "openai");
-    assert_eq!(invocation_event["namespace_version"], "1");
-    assert_eq!(invocation_event["event_type"], "model_invocation_requested");
-    assert_eq!(invocation_event["event_schema_version"], 1);
-    assert!(invocation_event["description"].is_string());
-    assert!(invocation_event["payload"]["invocation_id"].is_string());
-    assert_eq!(invocation_event["payload"]["model"]["provider"], "openai");
-    assert_eq!(invocation_event["payload"]["model"]["model"], "gpt-5.6");
-    let model_event = &events[5];
-    assert_eq!(model_event["schema_version"], 13);
-    assert_eq!(model_event["class"], "fact");
-    assert_eq!(model_event["event"]["type"], "assistant");
-    assert_eq!(model_event["event"]["response"]["message"], "Hello");
-    assert!(model_event.get("kind").is_none());
-    assert!(model_event.get("data").is_none());
-    let completion = &events[6];
-    assert_eq!(completion["class"], "fact");
-    assert_eq!(completion["event"]["type"], "turn_completed");
-    assert_eq!(completion["event"]["outcome"], "succeeded");
+    let turn_end = &events[6];
+    assert_eq!(turn_end["outcome"]["type"], "succeeded");
     let requests = server.finish();
     assert_eq!(requests[0]["model"], "gpt-5.6");
     assert_eq!(requests[0]["input"][0]["content"], "say hi");
@@ -423,7 +417,7 @@ fn turn_runs_the_shell_tool_and_reports_the_result() {
             .expect("the tool output should be a JSON string"),
     )
     .expect("the tool output should be JSON");
-    assert_eq!(output["type"], "result");
+    assert_eq!(output["type"], "succeeded");
     assert_eq!(output["value"]["exit_status"]["type"], "exited");
     assert_eq!(output["value"]["exit_status"]["code"], 0);
     assert_eq!(output["value"]["stdout_truncated"], false);
@@ -466,10 +460,7 @@ fn high_verbosity_prints_all_model_event_messages() {
 fn cli_output_is_incremental_and_not_duplicated() {
     let (continue_response, response_permission) = mpsc::channel();
     let server = MockOpenAiServer::start(vec![MockResponse::Incremental {
-        first_events: concat!(
-            "data: {\"type\":\"response.reasoning_text.delta\",\"delta\":\"Detailed thought\"}\n\n",
-            "data: {\"type\":\"response.reasoning_text.done\",\"text\":\"Detailed thought\"}\n\n"
-        ),
+        first_events: "data: {\"type\":\"response.reasoning_text.done\",\"text\":\"Detailed thought\"}\n\n",
         remaining_events: concat!(
             "data: {\"type\":\"response.output_text.done\",\"text\":\"Final answer\"}\n\n",
             "data: {\"type\":\"response.completed\",\"response\":{}}\n\n",
@@ -514,7 +505,7 @@ fn cli_output_is_incremental_and_not_duplicated() {
 }
 
 #[test]
-fn model_issue_is_rendered_and_persisted_as_a_top_level_problem() {
+fn a_refusal_is_a_failed_terminal_response_and_fails_the_turn() {
     let server = MockOpenAiServer::start(vec![MockResponse::Refusal {
         message: "I cannot comply.",
     }]);
@@ -532,18 +523,32 @@ fn model_issue_is_rendered_and_persisted_as_a_top_level_problem() {
     );
     let conversation_id = reported_conversation_id(&command_output.stderr);
     let events = persisted_events(&data_directory, &conversation_id);
-    let problem = &events[5];
-    assert_eq!(problem["class"], "fact");
-    assert_eq!(problem["event"]["type"], "problem");
-    assert_eq!(problem["event"]["problem"]["category"], "issue");
-    assert_eq!(problem["event"]["problem"]["detail"]["type"], "refusal");
+    let event_types = events
+        .iter()
+        .map(|event| event["type"].as_str().expect("each event has a type"))
+        .collect::<Vec<_>>();
     assert_eq!(
-        problem["event"]["problem"]["detail"]["message"],
+        event_types,
+        [
+            "user",
+            "turn_start",
+            "context",
+            "model_request",
+            "model_response",
+            "turn_end"
+        ]
+    );
+    let model_response = &events[4];
+    assert_eq!(model_response["outcome"]["type"], "failed");
+    assert_eq!(model_response["outcome"]["failure"]["category"], "refusal");
+    assert_eq!(
+        model_response["outcome"]["failure"]["message"],
         "I cannot comply."
     );
-    assert!(problem["event"]["invocation_id"].is_string());
-    assert!(problem.get("message").is_none());
-    assert!(problem.get("severity").is_none());
+    assert!(model_response.get("message").is_none());
+    assert!(model_response.get("severity").is_none());
+    let turn_end = &events[5];
+    assert_eq!(turn_end["outcome"]["type"], "failed");
     assert_eq!(server.finish().len(), 1);
 }
 
@@ -566,6 +571,29 @@ fn low_verbosity_prints_only_the_assistant_response() {
     assert_eq!(
         String::from_utf8(command_output.stdout).expect("standard output should be UTF-8"),
         "Final answer\n"
+    );
+    server.finish();
+}
+
+#[test]
+fn medium_verbosity_prints_auxiliary_model_messages() {
+    let server = MockOpenAiServer::start(vec![MockResponse::SuccessWithReasoning {
+        response_id: "resp_medium",
+        detailed: "Detailed thought",
+        interesting: "Reasoning summary",
+        important: "Final answer",
+    }]);
+    let data_directory = temporary_data_directory();
+
+    let command_output = configured_command(&server, &data_directory)
+        .args(["--verbosity", "medium", "Explain ownership"])
+        .output()
+        .expect("tog should run");
+
+    assert!(command_output.status.success());
+    assert_eq!(
+        String::from_utf8(command_output.stdout).expect("standard output should be UTF-8"),
+        "### Detailed thought\n### Reasoning summary\nFinal answer\n"
     );
     server.finish();
 }
@@ -598,26 +626,15 @@ fn reasoning_events_are_persisted_and_printed_but_not_replayed_as_assistant_mess
     );
     let conversation_id = reported_conversation_id(&first_output.stderr);
     let persisted_events = persisted_events(&data_directory, &conversation_id);
-    assert_eq!(persisted_events[5]["class"], "fact");
-    assert_eq!(persisted_events[5]["event"]["type"], "communication");
+    assert_eq!(persisted_events[4]["type"], "model_specific_event");
+    assert_eq!(persisted_events[4]["provider_event_type"], "reasoning");
+    assert_eq!(persisted_events[4]["message"], "Detailed thought");
+    assert_eq!(persisted_events[5]["type"], "model_specific_event");
     assert_eq!(
-        persisted_events[5]["event"]["communication"]["subtype"],
-        "reasoning"
-    );
-    assert_eq!(
-        persisted_events[5]["event"]["communication"]["message"],
-        "Detailed thought"
-    );
-    assert_eq!(persisted_events[6]["class"], "fact");
-    assert_eq!(persisted_events[6]["event"]["type"], "communication");
-    assert_eq!(
-        persisted_events[6]["event"]["communication"]["subtype"],
+        persisted_events[5]["provider_event_type"],
         "reasoning_summary"
     );
-    assert_eq!(
-        persisted_events[6]["event"]["communication"]["message"],
-        "Reasoning summary"
-    );
+    assert_eq!(persisted_events[5]["message"], "Reasoning summary");
 
     let second_output = configured_command(&server, &data_directory)
         .args([
@@ -635,29 +652,6 @@ fn reasoning_events_are_persisted_and_printed_but_not_replayed_as_assistant_mess
     assert_eq!(requests[1]["input"][0]["content"], "First question");
     assert_eq!(requests[1]["input"][1]["content"], "Final answer");
     assert_eq!(requests[1]["input"][2]["content"], "Second question");
-}
-
-#[test]
-fn medium_verbosity_hides_detailed_model_event_messages() {
-    let server = MockOpenAiServer::start(vec![MockResponse::SuccessWithReasoning {
-        response_id: "resp_verbose",
-        detailed: "Detailed thought",
-        interesting: "Reasoning summary",
-        important: "Final answer",
-    }]);
-    let data_directory = temporary_data_directory();
-
-    let command_output = configured_command(&server, &data_directory)
-        .args(["--verbosity", "medium", "Explain ownership"])
-        .output()
-        .expect("tog should run");
-
-    assert!(command_output.status.success());
-    assert_eq!(
-        String::from_utf8(command_output.stdout).expect("standard output should be UTF-8"),
-        "### Reasoning summary\nFinal answer\n"
-    );
-    server.finish();
 }
 
 #[test]
@@ -738,27 +732,21 @@ fn failed_user_turn_is_included_in_the_next_local_reconstruction() {
         reported_conversation_id(&failed_output.stderr),
         conversation_id
     );
-    let invocation_problem = persisted_events(&data_directory, &conversation_id)
+    let invocation_failure = persisted_events(&data_directory, &conversation_id)
         .into_iter()
-        .find(|event| event["class"] == "fact" && event["event"]["type"] == "problem")
-        .expect("the invocation problem should be persisted");
-    assert_eq!(invocation_problem["class"], "fact");
-    assert_eq!(invocation_problem["event"]["type"], "problem");
+        .rev()
+        .find(|event| event["type"] == "model_response")
+        .expect("the failed terminal model response should be persisted");
+    assert_eq!(invocation_failure["outcome"]["type"], "failed");
     assert_eq!(
-        invocation_problem["event"]["problem"]["category"],
-        "invocation"
-    );
-    assert_eq!(
-        invocation_problem["event"]["problem"]["detail"]["type"],
+        invocation_failure["outcome"]["failure"]["category"],
         "provider_failure"
     );
     assert_eq!(
-        invocation_problem["event"]["problem"]["detail"]["message"],
+        invocation_failure["outcome"]["failure"]["message"],
         "The model provider failed the invocation."
     );
-    assert!(invocation_problem.get("message").is_none());
-    assert!(invocation_problem.get("severity").is_none());
-    assert!(!invocation_problem.to_string().contains("request rejected"));
+    assert!(!invocation_failure.to_string().contains("request rejected"));
 
     let recovered_output = configured_command(&server, &data_directory)
         .args([

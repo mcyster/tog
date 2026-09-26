@@ -1,35 +1,36 @@
-use crate::conversation::{Conversation, ConversationView};
-use crate::conversation_event::{ConversationTurnId, UserMessageRequest};
+use crate::conversation::{
+    Conversation, ConversationEventId, ConversationEventRecord, ConversationView, ToolDefinition,
+    latest_tools,
+};
 
 pub(crate) struct TurnInput<'conversation> {
     conversation: ConversationView<'conversation>,
-    pending_user_requests: Vec<UserMessageRequest>,
-    turn_id: ConversationTurnId,
+    model_request_id: ConversationEventId,
+    input_through: u64,
 }
 
 impl<'conversation> TurnInput<'conversation> {
     pub(crate) fn new(
         conversation: &'conversation dyn Conversation,
-        turn_id: ConversationTurnId,
+        model_request_id: ConversationEventId,
+        input_through: u64,
     ) -> Self {
-        let conversation = ConversationView::new(conversation);
-        let pending_user_requests = conversation.pending_user_requests();
         Self {
-            conversation,
-            pending_user_requests,
-            turn_id,
+            conversation: ConversationView::new(conversation),
+            model_request_id,
+            input_through,
         }
     }
 
-    pub(crate) fn conversation(&self) -> &ConversationView<'conversation> {
-        &self.conversation
+    pub(crate) fn events(&self) -> &[ConversationEventRecord] {
+        self.conversation.events_through(self.input_through)
     }
 
-    pub(crate) fn pending_user_requests(&self) -> &[UserMessageRequest] {
-        &self.pending_user_requests
+    pub(crate) fn available_tools(&self) -> &[ToolDefinition] {
+        latest_tools(self.events())
     }
 
-    pub(crate) fn turn_id(&self) -> ConversationTurnId {
-        self.turn_id
+    pub(crate) fn model_request_id(&self) -> ConversationEventId {
+        self.model_request_id
     }
 }
