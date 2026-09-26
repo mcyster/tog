@@ -1,13 +1,13 @@
+mod asset;
 mod error;
 mod file_asset_store;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use file_asset_store::FileAssetStore;
-
 use std::io::{self, Read};
 
-use crate::asset::{AssetId, AssetMetadata, AssetName, MimeType};
+pub(crate) use asset::{AssetId, AssetMetadata, AssetName, MimeType};
+pub(crate) use file_asset_store::FileAssetStore;
 
 pub(crate) trait AssetStore {
     fn add(
@@ -20,7 +20,7 @@ pub(crate) trait AssetStore {
     fn metadata(&self, asset_id: AssetId) -> Result<AssetMetadata, AssetStoreLoadError>;
 
     #[allow(dead_code)]
-    fn open_content(&self, asset_id: AssetId) -> Result<Box<dyn Read>, AssetStoreLoadError>;
+    fn read(&self, asset_id: AssetId) -> Result<Box<dyn Read>, AssetStoreLoadError>;
 
     fn list(&self) -> Result<Vec<AssetMetadata>, AssetStoreError>;
 }

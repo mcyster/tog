@@ -1,4 +1,3 @@
-mod asset;
 mod asset_store;
 mod command_line;
 mod conversation;

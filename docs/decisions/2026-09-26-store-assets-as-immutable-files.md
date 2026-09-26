@@ -16,7 +16,7 @@ content referenced by a strongly typed identifier.
 Assets are immutable files stored under `<data>/assets/<asset-id>/` in the same
 resolved data directory that holds `conversations/`. Each asset directory
 contains a `metadata.json` record and a `content` file. The contract is a
-neutral `AssetStore` trait with add, metadata, content-open, and list
+neutral `AssetStore` trait with add, metadata, read, and list
 operations that stream content and expose no filesystem types, so a future
 remote or object-storage implementation can replace the filesystem
 implementation.

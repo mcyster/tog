@@ -27,7 +27,7 @@ the content size in bytes.
 
 - adding an asset from a reader and returning its `AssetId`
 - reading metadata by `AssetId`
-- opening content as a reader
+- reading content as a reader
 - listing metadata without loading content
 
 Content is streamed both in and out, so large assets need not fit in memory.
@@ -39,16 +39,18 @@ object-storage implementation can replace the filesystem implementation.
 Assets live under the resolved data directory alongside `conversations/`:
 
 ```text
-<data>/assets/<asset-id>/metadata.json
-<data>/assets/<asset-id>/content
+<data>/assets/<storage-key>/metadata.json
+<data>/assets/<storage-key>/content
 ```
 
 `<data>` is resolved from `$TOG_DATA_DIR`, else `$XDG_DATA_HOME/tog`, else
-`$HOME/.local/share/tog`, matching the event store. An asset directory appears
-only after both files are fully written and synced, so a torn write stays in a
-hidden staging directory that listings ignore. Adding an asset returns its
-`AssetId` only after the commit succeeds, and an existing asset is never
-overwritten or mutated.
+`$HOME/.local/share/tog`, matching the event store. The storage key is the
+`AssetId`'s internal uuid; the `asset_<uuid>` form is used for display,
+serialization, and references. An asset directory appears only after both files
+are fully written and synced, so a torn write stays in a hidden staging
+directory that listings ignore. Adding an asset returns its `AssetId` only
+after the commit succeeds, and an existing asset is never overwritten or
+mutated.
 
 ## Command line
 

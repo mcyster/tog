@@ -2,11 +2,11 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::str::FromStr;
 
-use serde::{Deserialize, Serialize};
+use serde::de::Error as DeserializeError;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use uuid::Uuid;
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
-#[serde(transparent)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct AssetId(Uuid);
 
 impl AssetId {
@@ -31,6 +31,30 @@ impl FromStr for AssetId {
     fn from_str(text: &str) -> Result<Self, Self::Err> {
         let uuid_text = text.strip_prefix("asset_").unwrap_or(text);
         Uuid::parse_str(uuid_text).map(Self).map_err(InvalidAssetId)
+    }
+}
+
+impl Serialize for AssetId {
+    fn serialize<SerializerType>(
+        &self,
+        serializer: SerializerType,
+    ) -> Result<SerializerType::Ok, SerializerType::Error>
+    where
+        SerializerType: Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for AssetId {
+    fn deserialize<DeserializerType>(
+        deserializer: DeserializerType,
+    ) -> Result<Self, DeserializerType::Error>
+    where
+        DeserializerType: Deserializer<'de>,
+    {
+        let unvalidated_value = String::deserialize(deserializer)?;
+        Self::from_str(&unvalidated_value).map_err(DeserializerType::Error::custom)
     }
 }
 
@@ -82,15 +106,17 @@ mod tests {
     }
 
     #[test]
-    fn asset_identifier_round_trips_through_serde() {
+    fn asset_identifier_serializes_to_its_display_representation_and_round_trips() {
         let asset_id = AssetId::new();
 
         let serialized =
             serde_json::to_value(asset_id).expect("the asset identifier should serialize");
+        assert_eq!(
+            serialized,
+            serde_json::Value::String(format!("asset_{}", asset_id.storage_key()))
+        );
         let deserialized: AssetId =
-            serde_json::from_value(serialized.clone()).expect("the asset identifier should parse");
-
+            serde_json::from_value(serialized).expect("the asset identifier should parse");
         assert_eq!(deserialized, asset_id);
-        assert!(matches!(serialized, serde_json::Value::String(_)));
     }
 }

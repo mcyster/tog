@@ -3,8 +3,8 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
+use super::asset::{AssetId, AssetName, MimeType};
 use super::{AssetStore, AssetStoreLoadError, FileAssetStore};
-use crate::asset::{AssetId, AssetName, MimeType};
 
 fn temporary_store() -> FileAssetStore {
     let directory = std::env::temp_dir().join(format!("tog-asset-test-{}", uuid::Uuid::now_v7()));
@@ -64,11 +64,7 @@ fn adding_an_asset_round_trips_its_metadata_and_content() {
     assert_eq!(metadata.mime_type().as_str(), "text/plain");
     assert_eq!(metadata.byte_size(), b"hello asset".len() as u64);
     assert_eq!(
-        read_all(
-            store
-                .open_content(asset_id)
-                .expect("the asset content should open")
-        ),
+        read_all(store.read(asset_id).expect("the asset content should open")),
         b"hello asset"
     );
 }
@@ -96,7 +92,7 @@ fn asset_store_preserves_assets_across_reopen() {
     assert_eq!(
         read_all(
             reopened
-                .open_content(asset_id)
+                .read(asset_id)
                 .expect("the asset content should open")
         ),
         b"persisted bytes"
@@ -118,11 +114,7 @@ fn stored_asset_content_survives_source_changes() {
     std::fs::write(&source_path, b"changed").expect("the source file should change");
 
     assert_eq!(
-        read_all(
-            store
-                .open_content(asset_id)
-                .expect("the asset content should open")
-        ),
+        read_all(store.read(asset_id).expect("the asset content should open")),
         b"original"
     );
 }
@@ -169,7 +161,7 @@ fn asset_store_reports_missing_assets() {
         Err(AssetStoreLoadError::NotFound(_))
     ));
     assert!(matches!(
-        store.open_content(missing_id),
+        store.read(missing_id),
         Err(AssetStoreLoadError::NotFound(_))
     ));
 }

@@ -7,8 +7,7 @@ use std::str::FromStr;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
-use crate::asset::{AssetMetadata, AssetName, MimeType};
-use crate::asset_store::{AssetStore, FileAssetStore};
+use crate::asset_store::{AssetMetadata, AssetName, AssetStore, FileAssetStore, MimeType};
 use crate::conversation::ConversationId;
 use crate::conversation_event::{
     ConversationEventRecord, ConversationFact, ConversationMessage, ConversationProblem,

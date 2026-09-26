@@ -5,8 +5,8 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
+use super::asset::{AssetId, AssetMetadata, AssetName, MimeType};
 use super::{AssetStore, AssetStoreError, AssetStoreLoadError};
-use crate::asset::{AssetId, AssetMetadata, AssetName, MimeType};
 use crate::data_directory;
 
 const ASSETS_DIRECTORY_NAME: &str = "assets";
@@ -56,7 +56,7 @@ impl AssetStore for FileAssetStore {
         }
 
         fs::rename(&staging_directory, &asset_directory).map_err(AssetStoreError::from)?;
-        let _ = File::open(&assets_directory)?.sync_all();
+        File::open(&assets_directory)?.sync_all()?;
         Ok(asset_id)
     }
 
@@ -67,7 +67,7 @@ impl AssetStore for FileAssetStore {
         Ok(metadata)
     }
 
-    fn open_content(&self, asset_id: AssetId) -> Result<Box<dyn Read>, AssetStoreLoadError> {
+    fn read(&self, asset_id: AssetId) -> Result<Box<dyn Read>, AssetStoreLoadError> {
         self.metadata(asset_id)?;
         let content_path = self.asset_directory(asset_id).join(CONTENT_FILE_NAME);
         match File::open(&content_path) {
@@ -118,7 +118,7 @@ fn write_staged_asset(
     content_file.sync_all()?;
     let metadata = AssetMetadata::new(asset_id, name, mime_type, byte_size);
     write_metadata_file(&staging_directory.join(METADATA_FILE_NAME), &metadata)?;
-    let _ = File::open(staging_directory)?.sync_all();
+    File::open(staging_directory)?.sync_all()?;
     Ok(())
 }
 
