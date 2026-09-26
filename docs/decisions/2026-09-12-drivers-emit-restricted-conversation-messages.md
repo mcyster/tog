@@ -56,12 +56,20 @@ and driver extensions cannot carry a shared lifecycle fact. The session attaches
 the current turn association where appropriate, validates user-request
 associations, and converts each driver output into the persisted vocabulary.
 
-The session owns turn completion. It records `TurnCompleted` after the driver
-stream ends. An assistant response ends a successful turn; any problem fails the
-turn even when an assistant response was already persisted. Stream exhaustion
-without an assistant response or problem is an incomplete turn. Drivers create
-invocation identities and driver-defined invocation events; they do not record
-or assign durable envelope metadata.
+The engine owns model-call identity and turn completion. As clarified on
+2026-09-26, it commits a common `ModelCallRequest` before invoking the driver;
+the driver associates output with that request. The engine records terminal
+call outcomes and `TurnCompleted`. Assistant messages are content, not completion
+markers, and a problem does not automatically fail the whole turn. Failure is
+recorded on the operation that failed.
+
+The interface examples above describe the current Phase 1 implementation. They
+still permit driver acceptance of user content and driver-owned invocation
+records, which the [durable execution plan](../plans/execute-commands-durably.md)
+replaces. The [conversation model](../conversation.md#model-calls-and-turns)
+defines the accepted lifecycle semantics. Drivers continue to emit a restricted
+subset of the conversation vocabulary and never own turn completion or durable
+envelope metadata.
 
 ## Consequences
 

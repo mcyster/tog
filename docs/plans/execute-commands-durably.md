@@ -33,7 +33,13 @@ request and its immediate turn request, or the final prerequisite outcome and an
 eligible continuation request. When prerequisites finish separately, recovery must
 still derive the missing continuation without creating it twice.
 
-Only committed requests may execute. Do not hold a transaction open during a model
+Only committed requests may execute. The engine creates and commits each
+`ModelCallRequest` before invoking the driver, which receives that request and
+its fixed input. A failed request commit must prevent invocation; a driver-emitted
+record after external work starts cannot establish durable intent. The engine
+also owns acceptance of pending user input.
+
+Do not hold a transaction open during a model
 call or while tools run. External side effects are outside the file transaction;
 the log cannot prove that an interrupted external operation never happened.
 
@@ -59,6 +65,12 @@ serialization and replay even when its driver is unavailable; interpretation may
 require the driver. Provider invocation IDs remain metadata, not substitutes for
 the common request reference. These are extensible payloads within a stable
 lifecycle, not driver-defined replacements for the lifecycle events.
+
+Keep portable continuation distinct from native replay. A compatible driver may
+omit optional enrichment when using portable content; native replay requires a
+recognized payload format and version. Unsupported required replay state must
+produce an explicit limitation, never silently become prompt text. See
+[Layered Semantic Representation](../conversation.md#layered-semantic-representation).
 
 Streamed model outputs reference their `ModelCallRequest`. Each tool response
 references its particular tool request. The model-call response lists only outputs
@@ -89,18 +101,23 @@ establish membership: events from concurrent turns can interleave. Resolve and
 validate the reference chain when reconstructing the conversation.
 
 Retain explicit `TurnStart` and `TurnCompleted` lifecycle events.
-`TurnCompleted` references its turn and, on successful completion, the final
-assistant response belonging to that turn. The engine records the terminal turn
-outcome; it is not inferred from an assistant message or model-call completion
-alone. A failed model attempt can be followed by a successful retry in the same
-successful turn.
+`TurnCompleted` references its turn. A successful turn requires a successful
+terminal model call with no tool work or continuation outstanding; it does not
+require a final assistant message. Any assistant reference is optional and must
+belong to that turn. Assistant text may accompany tools, and a successful call
+may produce no text. Stream exhaustion without a terminal call response is not
+success. The engine records the terminal turn outcome; a failed model attempt
+can be followed by a successful retry in the same successful turn.
 
 ## Fixed input and tool dependencies
 
 `inputThrough` bounds the committed conversation used to construct a call's
 input. It does not mean every preceding event is sent verbatim to the provider.
 Capture this position after prerequisites are recorded and before invoking the
-driver; concurrent appends must not change that call's selected input.
+driver. Select the boundary and history from one snapshot; concurrent appends
+must not change that call's selected input. The engine determines eligibility;
+the driver translates eligible history into provider input. This separation does
+not require a decorator or another particular code structure.
 
 `dependsOn` uses tool-request IDs to identify operations. Each dependency is
 satisfied when its correlated `ToolResponse` is recorded, including a failure
@@ -189,6 +206,12 @@ Correlate tool failures to `ToolResponse`; separate conversation problems descri
 failures outside a tool call. Failure details need a portable category, useful
 message, retry guidance, and known versus uncertain execution outcome.
 
+Record failure on the operation's outcome: `ToolResponse`, `ModelCallResponse`,
+or `TurnCompleted`. An explanatory problem message neither substitutes for that
+outcome nor automatically fails the turn. Keep storage failures separate from
+provider failures; an unsuccessful append may leave an unfinished request for
+recovery rather than permit a terminal response to be recorded.
+
 The runtime applies bounded retries, backoff, deadlines, and cancellation policy.
 A recorded request without an outcome does not prove that external execution never
 began. Reuse recorded successful tool results; do not rerun successful side effects
@@ -250,7 +273,12 @@ outside the initial scope.
 
 Verify these observable boundaries when implementing:
 
+- A failed model-call request commit prevents driver invocation.
 - A torn batch never dispatches tools or exposes partial output.
+- Assistant text with tools does not complete a turn; a successful terminal call
+  with no outstanding work can complete it without assistant text.
+- Stream exhaustion without a terminal response is not mistaken for success.
+- Storage failure is not recorded as provider failure.
 - Crash recovery finds requests and eligible continuations that never started.
 - Streaming tools and results interleave as in the example, while call completion
   and tool completion remain independent.
@@ -267,7 +295,8 @@ Verify these observable boundaries when implementing:
 - Timeout after tool dispatch preserves side-effect evidence and follows the
   explicitly chosen recovery/projection policy.
 - Optional driver data round-trips without loading its driver; common lifecycle
-  handling does not require interpreting that data.
+  handling does not require interpreting that data. Supported native replay uses
+  preserved state, and unsupported required state is reported explicitly.
 - Cancellation, restart during backoff, and late results obey the selected policy.
 
 Ordinary replay reconstructs state without executing requests. Recovery then

@@ -3,6 +3,13 @@
 **Status:** Phase 1 asynchronous streaming text and bounded tool-calling slice implemented
 **Purpose:** Define a simple, durable conversation model and a narrow `ModelDriver` boundary that can be implemented against the OpenAI Responses API now and can support switching models/providers within a conversation.
 
+The Phase 1 API and lifecycle descriptions below describe the earlier implementation.
+The accepted [conversation model](conversation.md#model-calls-and-turns) and
+[durable execution plan](plans/execute-commands-durably.md) supersede driver-owned
+invocation identity, assistant-based completion, and automatic turn failure on any
+problem. They also clarify portable continuation versus provider replay. These
+changes remain intended work; the Phase 1 API examples are not the target contract.
+
 This design is intentionally incomplete.
 
 Phase 1 is not trying to build a perfect event-sourcing framework, a durable provider-protocol log, a distributed runtime, or a universal multi-provider SDK.
