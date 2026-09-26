@@ -6,6 +6,8 @@ This document describes the intended conversation model. The [durable execution 
 
 The current implementation still has driver-created invocation records and uses assistant output or problems to determine turn completion. The common model-call lifecycle below is accepted direction, not a claim that it is implemented.
 
+The proposed [event hierarchy and driver API](plans/conversation-design.md) flattens the vocabulary described here, removes structural command/fact and kind wrappers, and replaces `Communication` with `ModelSpecificEvent`. That plan records the remaining type and migration choices before implementation.
+
 ## Conversation
 
 A conversation begins with its first accepted semantic event. `Conversation` is an immutable projection reconstructed from non-command records carrying one `ConversationId`:
