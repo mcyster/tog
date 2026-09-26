@@ -28,7 +28,7 @@ The complete development standards are in [`docs/development-standards.md`](docs
 - Keep provider-neutral contracts independent of concrete integrations; integrations depend on contracts, never the reverse.
 - Classify values by lifetime before designing an API: object-stable values belong to the object, per-operation values are parameters, derived values are not passed twice, and produced values are returned.
 - Prefer direct parameters and return values. Add input structs, result wrappers, callbacks, sinks, or streams only for a concrete current requirement.
-- Prefer concrete implementations. Introduce traits and generic abstractions only when a demonstrated need exists.
+- Use traits when an independently readable contract provides value; multiple implementations are not required. Justify other generic abstractions by a current need.
 - Do not use unsafe Rust.
 - Prefer conventional, idiomatic Rust and standard-library facilities when they adequately represent the problem.
 - Do not create custom types, abstractions, utilities, or implementations merely to avoid a normal standard-library facility. Domain types must enforce a genuine distinction or invariant.
@@ -40,6 +40,8 @@ The complete development standards are in [`docs/development-standards.md`](docs
 
 - Keep `src/main.rs` limited to application composition and process input or output.
 - Organize modules by feature or responsibility, not by generic technical layers.
+- Keep module entry points focused on contracts: trait signatures and important type, identifier, and error declarations. Put constructors, validation, conversions, formatting, and other implementation bodies in private child modules.
+- Keep identifiers and supporting types alongside their concept. Group implementation blocks by cohesive responsibility; do not create a file per implementation or group unrelated items by technical form. Prefer clarity over indirection.
 - Keep the project as one binary package until a concrete requirement justifies a library target or workspace.
 - Keep durable documentation in `docs/`.
 - Record consequential decisions in `docs/decisions/`.
