@@ -2,7 +2,9 @@
 
 The Conversation Log is `tog`'s ordered append-only record stream. It records requested work and semantic facts without exposing provider transport protocol.
 
-The [Conversation and ModelDriver Architecture](conversation-design.md) is authoritative for model invocation, provider events, replay strategies, and Phase 1 implementation boundaries. This document summarizes the conversation concepts that should remain stable across those details.
+This document describes the intended conversation model. The [durable execution plan](plans/execute-commands-durably.md) develops its model-call lifecycle and recovery rules. The [Conversation and ModelDriver Architecture](conversation-design.md) describes the earlier Phase 1 implementation; where its invocation ownership or completion rules differ, the intent here takes precedence.
+
+The current implementation still has driver-created invocation records and uses assistant output or problems to determine turn completion. The common model-call lifecycle below is accepted direction, not a claim that it is implemented.
 
 ## Conversation
 
@@ -56,7 +58,7 @@ Fact record
     something was accepted or happened
 ```
 
-For example, `UserMessageRequested` records input received by the system and `User` records the accepted conversation content. `TurnRequested` starts agent work, while the session records `TurnCompleted` with its terminal outcome. A driver-defined invocation record carries its stable `ModelInvocationId`; produced model facts reference that identifier.
+For example, `UserMessageRequested` records input received by the system and `User` records the accepted conversation content. `TurnRequested` requests agent work, while the session records `TurnCompleted` with its terminal outcome. The engine commits a `ModelCallRequest` before invoking a driver; its durable event ID identifies the attempt, and produced model facts reference that request.
 
 The shared event vocabulary is organized by command or fact:
 
@@ -64,6 +66,7 @@ The shared event vocabulary is organized by command or fact:
 Command
     UserMessageRequested
     TurnRequested
+    ModelCallRequest
 
 Fact
     User
@@ -71,6 +74,7 @@ Fact
     Communication
     Problem
     TurnCompleted
+    ModelCallResponse
     ToolsAvailable
     ToolRequest
     ToolResponse
@@ -81,16 +85,68 @@ Data
 
 The vocabulary should grow only when a repeated semantic or lifecycle need justifies another record type.
 
+## Model Calls And Turns
+
+A model call is one attempt within a turn. The engine selects a committed input
+boundary and its history from one snapshot, then commits a `ModelCallRequest`
+containing the model selection, input boundary, and turn association before
+invoking the driver. If the request cannot be committed, the driver must not run.
+Recording intent after starting an HTTP request leaves a crash window in which
+external work has no durable record.
+
+The driver receives that request and immutable input. It translates provider
+input and output; it does not create the authoritative attempt identity or accept
+pending user requests on the engine's behalf. Provider request IDs remain
+optional metadata.
+
+The engine commits output associated with the request and one terminal
+`ModelCallResponse`. The response records the observed outcome, ordered output
+references, and known usage with its completeness. The driver supplies provider
+observations; the engine also records failures it observes outside the driver,
+such as a timeout. Stream exhaustion without a terminal response is not success,
+even if assistant text was already committed.
+
+An assistant message is content, not turn completion. It may precede tool
+requests, accompany them, or be absent from a successful call. A turn succeeds
+when its terminal model call succeeds and no tool work or continuation remains
+outstanding. The engine records that decision as `TurnCompleted`; a final
+assistant message is not required. Closing a call that requested tools does not
+close its turn. A failed call may be retried within a turn that ultimately
+succeeds.
+
 ## Layered Semantic Representation
 
-Conversation events define a universal semantic minimum and permit lossless enrichment beyond that minimum. Every compatible `ModelDriver` must understand the minimum, may interpret recognized enrichment for richer or more efficient continuation, and must safely ignore enrichment it does not understand. The conversation is therefore portable without being restricted to the lowest common denominator.
+Portable meaning and provider replay state serve different purposes. This
+separation is part of tog's original intent: changing drivers should preserve
+meaningful conversation history without requiring another provider's protocol.
 
-Driver-specific data enriches portable semantics; it must not replace them. The portable representation must contain enough information for another compatible driver to continue meaningfully, and semantically important structured concepts remain structured. For example, a tool request retains its portable call ID, tool name, and arguments even if it also contains a provider-specific call ID.
+| Representation | Purpose |
+| --- | --- |
+| Portable content | User input, assistant content, structured tool requests and results understood by compatible drivers |
+| Provider replay state | Opaque, versioned data a compatible driver can use to preserve native continuation |
+| Execution records | Requests, outcomes, dependencies, and lifecycle used by the engine; not prompt text by default |
 
-Driver-defined invocation records own model source, model, and invocation-specific
-configuration. Shared model-produced facts carry only a `ModelInvocationId` and
-optional event-specific `ModelData`. Raw provider transport events do not become
-semantic conversation events merely because they are provider-specific.
+Driver-specific data enriches portable semantics; it must not replace them. A
+tool request retains its portable identity, tool name, and arguments even when
+it also preserves a provider-specific call ID. Common completion, failure, and
+dependency meaning must remain readable without the originating driver.
+
+Preserve provider state through serialization and reconstruction even when its
+driver is unavailable. Reading the log does not require interpreting that state.
+Using it for native replay does: a driver must recognize its format and version.
+A reasoning summary is portable communication, not a substitute for opaque
+reasoning state, and opaque state must never be converted into prompt text.
+
+Portable continuation may omit optional enrichment. If the requested native
+continuation requires state the selected driver cannot interpret, report that
+limitation explicitly; do not silently claim equivalent replay. Preserving data
+alone does not implement replay, and replay does not promise identical model
+responses. Raw transport deltas remain outside the durable semantic vocabulary.
+
+The engine determines the input boundary and eligible history. The driver
+converts that history to provider input and interprets supported replay state.
+Decorators are an implementation style for this separation, not a requirement
+of the conversation model.
 
 ## Event Meanings
 
@@ -102,21 +158,39 @@ Large or binary content belongs in a content store and is referenced by a strong
 
 ### Assistant And Communication
 
-`Assistant` records the model's actual response to the conversation. It participates in portable continuation and is always `Important`. Its `ModelInvocationId` identifies the producing invocation; provenance remains in the driver-defined invocation event.
+`Assistant` records the model's actual response to the conversation. It participates in portable continuation and is always `Important`. Its model-call request reference identifies the producing attempt; provenance belongs to that request.
 
 `Communication` records auxiliary model-produced information such as detailed reasoning, reasoning summaries, status, or emerging concepts. Communications are persisted but are not automatically replayed as assistant responses.
 
 Communication importance has three ordered levels: `Detailed`, `Interesting`, and `Important`. Consumers decide which messages to present, and the CLI maps low, medium, and high verbosity to progressively broader levels. Repeated cross-driver communication concepts may later receive more specific top-level event kinds.
 
-Both event kinds retain meaningful portable messages, and the portable event kind contains the complete meaning of the event. Optional `ModelData` may preserve native fidelity or improve continuation, but understanding the conversation never requires it. Exposed reasoning is aggregated into coherent communications rather than persisting every transport delta.
+Both event kinds retain meaningful portable messages. Optional `ModelData` may preserve native fidelity or improve continuation; understanding their portable meaning never requires it, while native replay may. Exposed reasoning is aggregated into coherent communications rather than persisting every transport delta.
 
 ### Problem
 
 `Problem` records a `ConversationProblem` as a top-level conversation event. It is not model output merely because it concerns a model invocation. Applicable problems may carry an invocation ID and event-specific model data, but do not repeat invocation provenance. `ConversationProblem::Issue` records a semantic model limitation or unsuccessful outcome, such as refusal or context exhaustion. `ConversationProblem::Invocation` records a sanitized operational invocation failure. Every concrete problem provides one meaningful message, and the shared parent exposes that message and whether retrying the unchanged invocation may reasonably succeed. The enclosing conversation event does not duplicate the message and does not add generic severity.
 
-There is no `Other` problem kind. A newly understood semantic problem receives a specific shared kind, while unusable provider output and unclassified invocation failure retain their distinct existing meanings. Problems are not automatically projected into every provider request; each driver decides how a retained problem should inform a later model.
+There is no `Other` problem kind. A newly understood semantic problem receives a specific shared kind, while unusable provider output and unclassified invocation failure retain their distinct existing meanings. Problems are not automatically projected into every provider request; the engine's input projection selects eligible history, and the driver translates it.
 
-`ModelDriverError` is not durable conversation state. It carries detailed Rust control-flow information from invocation setup or stream consumption. The driver converts provider failures into sanitized `ConversationProblem::Invocation` facts on its stream, and a `ModelDriverError` that escapes the stream is a contract failure. The session appends driver output and records `TurnCompleted` after the stream ends. An assistant response ends a successful turn, and any problem fails the turn. Raw provider bodies, credentials, stack traces, and sensitive request data are not copied into durable problems.
+Failure belongs to the operation that failed:
+
+| Operation | Durable outcome |
+| --- | --- |
+| Tool execution | The correlated `ToolResponse`, including failure details |
+| Model attempt | Its `ModelCallResponse`, including failure details |
+| Turn | `TurnCompleted` with the engine's terminal outcome |
+
+A problem message may explain a failure, but its presence does not replace the
+operation's outcome or automatically fail the entire turn. A tool failure can be
+input to a subsequent model call, and a failed model attempt can be retried.
+Problems outside a particular operation remain conversation-level information.
+
+`ModelDriverError` carries Rust control-flow information, not durable state. The
+engine must record an appropriate call outcome when such a failure escapes, if
+storage remains available. Storage failure is not provider failure: an append
+failure may leave a request without a response for recovery to reconcile.
+Committed partial output remains in history. Raw provider bodies, credentials,
+stack traces, and sensitive request data are not copied into durable failures.
 
 For example, several provider events may project to one response:
 
@@ -124,7 +198,7 @@ For example, several provider events may project to one response:
 text.delta "Hel"
 text.delta "lo"
 output.done
-    -> Assistant(model=..., invocation_id=..., message="Hello")
+    -> Assistant(model_call_request=..., message="Hello")
 ```
 
 ### ToolsAvailable
@@ -139,7 +213,7 @@ conversation context, not a user or assistant message.
 
 `ToolRequest` records that a model requested a tool invocation. Each request has
 a stable portable `ToolCallId`, the tool name, JSON arguments, the producing
-`ModelInvocationId`, and optional `ModelData` that may preserve a provider-native
+model-call request reference, and optional `ModelData` that may preserve a provider-native
 call identifier while the portable contract remains provider-neutral.
 
 `ToolResponse` records the result of one request and references exactly one
@@ -174,7 +248,6 @@ ConversationId
 ConversationEventId
 ConversationCommandId
 ConversationTurnId
-ModelInvocationId
 ToolCallId
 ImageId
 FileId
@@ -192,13 +265,25 @@ Event positions must not be used as semantic identifiers.
 
 ## Durability And Projection
 
-User input and commands are appended before model invocation. `TurnRequested` establishes the session-to-driver request. The driver creates any invocation record and identity, then returns a stream of ordered, nonempty batches of permitted conversation messages: accepted user content, assistant responses, communications, problems, and driver-defined events. A batch groups events that must become visible together; single-event batches are the normal case. The session commits each batch atomically before reporting any of its events, so readers never observe a partially committed batch. The consumer controls demand by polling that stream for its next batch; receiving several events or batches does not represent several model requests.
+User input and the model-call request are committed before driver invocation.
+The driver returns ordered, nonempty batches of completed semantic output
+associated with that request. A batch groups events that must become visible
+together; single-event batches are the normal case. The session commits each
+batch atomically before publishing its events or dispatching requested work.
+The append boundary assigns durable envelope metadata.
 
-The driver combines each model-produced result with its `ModelInvocationId` and optional event-specific `ModelData`, but does not allocate durable envelope metadata. The append boundary assigns record identity, timestamp, and position. If invocation setup or the stream fails, the driver emits a sanitized `ConversationProblem::Invocation` on its stream. The session persists driver output and records `TurnCompleted` from its own completion policy. An assistant response ends a successful turn; a problem fails the turn. Stream exhaustion without an assistant response or problem is incomplete execution, not success. Completed semantic events already yielded remain valid conversation facts and appended events are not rolled back.
+The consumer controls demand by polling for the next batch. Receiving several
+events or batches does not represent several model calls. Completed output stays
+durable when a later batch or the call fails; it is not rolled back. A caller
+that needs the complete output can collect the stream.
 
-This supersedes the earlier contract in which all model events were withheld until the complete invocation succeeded and all model output was discarded on a late provider failure. A caller that needs the complete model output can collect the stream.
+The engine validates output ownership and records terminal call and turn
+outcomes independently of content. Unknown usage stays unknown rather than
+being counted as zero. Recovery reconciles requests without outcomes; replaying
+history alone must not execute them.
 
-Provider-native state may later improve same-provider continuation, but the Conversation Log remains the durable representation used for local reconstruction and cross-provider replay.
+The Conversation Log remains the source for local reconstruction, portable
+continuation, and provider replay where supported.
 
 ## System Boundary
 
@@ -206,9 +291,9 @@ The conversation model deliberately excludes:
 
 - provider request construction and transport
 - raw provider events
-- model invocation lifecycle and diagnostics
+- provider transport diagnostics
 - tool execution policy
 - retry and scheduling policy
 - CLI rendering and interactive progress
 
-Those concerns consume, produce, or project conversation events without becoming part of the semantic model. Their detailed boundaries are defined in [Conversation and ModelDriver Architecture](conversation-design.md).
+Those concerns consume, produce, or project conversation events. Model-call and turn lifecycle records do belong in the log, even though they are not ordinary prompt content. Their intended execution boundaries are defined in the [durable execution plan](plans/execute-commands-durably.md).
