@@ -1,10 +1,14 @@
 mod prompt;
 
 use std::ffi::OsString;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
+use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
+use crate::asset::{AssetMetadata, AssetName, MimeType};
+use crate::asset_store::{AssetStore, FileAssetStore};
 use crate::conversation::ConversationId;
 use crate::conversation_event::{
     ConversationEventRecord, ConversationFact, ConversationMessage, ConversationProblem,
@@ -24,7 +28,7 @@ use prompt::UserPrompt;
     version,
     about = "Command-line access to agentic services",
     disable_help_subcommand = true,
-    override_usage = "tog [:turn] [OPTIONS] <USER_PROMPT>...\n       tog :log [CONVERSATION_ID]",
+    override_usage = "tog [:turn] [OPTIONS] <USER_PROMPT>...\n       tog :log [CONVERSATION_ID]\n       tog :asset add [OPTIONS] <SOURCE_PATH>\n       tog :asset list",
     after_help = "When no command is specified, :turn is used."
 )]
 pub(crate) struct CommandLine {
@@ -98,6 +102,38 @@ impl CommandLine {
                 write_conversation_log(&events, &mut standard_output)?;
                 Ok(CommandOutcome::ConversationLogged)
             }
+            Command::Asset(arguments) => {
+                let asset_store = FileAssetStore::from_environment()?;
+                match arguments.command {
+                    AssetCommand::Add(add_arguments) => {
+                        let name = match add_arguments.name {
+                            Some(name) => name,
+                            None => default_asset_name(&add_arguments.source_path)?,
+                        };
+                        let mime_type = match add_arguments.mime_type {
+                            Some(mime_type) => mime_type,
+                            None => inferred_mime_type(&add_arguments.source_path)?,
+                        };
+                        let source = std::fs::File::open(&add_arguments.source_path)?;
+                        let asset_id =
+                            asset_store.add(name, mime_type, Box::new(source) as Box<dyn Read>)?;
+                        let metadata = asset_store.metadata(asset_id)?;
+                        let standard_output = io::stdout();
+                        let mut standard_output = standard_output.lock();
+                        write_asset_metadata(&metadata, &mut standard_output)?;
+                        Ok(CommandOutcome::AssetAdded)
+                    }
+                    AssetCommand::List(_) => {
+                        let metadatas = asset_store.list()?;
+                        let standard_output = io::stdout();
+                        let mut standard_output = standard_output.lock();
+                        for metadata in metadatas {
+                            write_asset_metadata(&metadata, &mut standard_output)?;
+                        }
+                        Ok(CommandOutcome::AssetsListed)
+                    }
+                }
+            }
         }
     }
 }
@@ -105,6 +141,8 @@ impl CommandLine {
 pub(crate) enum CommandOutcome {
     Turn(TurnOutcome),
     ConversationLogged,
+    AssetAdded,
+    AssetsListed,
 }
 
 fn write_conversation_log(
@@ -116,6 +154,36 @@ fn write_conversation_log(
         output.write_all(b"\n")?;
     }
     output.flush()
+}
+
+fn write_asset_metadata(metadata: &AssetMetadata, output: &mut impl Write) -> io::Result<()> {
+    let value = serde_json::json!({
+        "id": metadata.id().to_string(),
+        "name": metadata.name().as_str(),
+        "mime_type": metadata.mime_type().as_str(),
+        "byte_size": metadata.byte_size(),
+    });
+    serde_json::to_writer(&mut *output, &value).map_err(io::Error::other)?;
+    output.write_all(b"\n")?;
+    output.flush()
+}
+
+fn default_asset_name(source_path: &Path) -> io::Result<AssetName> {
+    let Some(file_name) = source_path.file_name() else {
+        return Err(io::Error::other("the source path has no file name"));
+    };
+    let Some(file_name_text) = file_name.to_str() else {
+        return Err(io::Error::other("the source file name is not valid UTF-8"));
+    };
+    AssetName::from_str(file_name_text).map_err(io::Error::other)
+}
+
+fn inferred_mime_type(source_path: &Path) -> io::Result<MimeType> {
+    let inferred = infer::get_from_path(source_path)?;
+    match inferred {
+        Some(kind) => MimeType::from_str(kind.mime_type()).map_err(io::Error::other),
+        None => MimeType::from_str("application/octet-stream").map_err(io::Error::other),
+    }
 }
 
 fn render_model_event(event: &ConversationFact, verbosity: Verbosity) -> io::Result<()> {
@@ -158,7 +226,50 @@ enum Command {
         override_usage = "tog :log [CONVERSATION_ID]"
     )]
     Log(LogArguments),
+
+    #[command(
+        name = ":asset",
+        about = "Manage immutable stored assets",
+        override_usage = "tog :asset add [OPTIONS] <SOURCE_PATH>\n       tog :asset list"
+    )]
+    Asset(AssetArguments),
 }
+
+#[derive(Debug, Args)]
+struct AssetArguments {
+    #[command(subcommand)]
+    command: AssetCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum AssetCommand {
+    #[command(
+        about = "Store a file as an immutable asset",
+        override_usage = "tog :asset add [OPTIONS] <SOURCE_PATH>"
+    )]
+    Add(AssetAddArguments),
+
+    #[command(about = "List stored assets as JSON Lines")]
+    List(AssetListArguments),
+}
+
+#[derive(Debug, Args)]
+struct AssetAddArguments {
+    /// Path of the file to store.
+    #[arg(value_name = "SOURCE_PATH")]
+    source_path: PathBuf,
+
+    /// Name to store the asset under; defaults to the source file name.
+    #[arg(long, value_name = "NAME")]
+    name: Option<AssetName>,
+
+    /// MIME type of the asset; inferred from content when omitted.
+    #[arg(long, value_name = "MIME_TYPE")]
+    mime_type: Option<MimeType>,
+}
+
+#[derive(Debug, Args)]
+struct AssetListArguments {}
 
 #[derive(Debug, Args)]
 struct LogArguments {

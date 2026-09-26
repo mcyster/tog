@@ -1,6 +1,5 @@
 use std::fs;
 use std::io;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use super::log;
@@ -12,6 +11,7 @@ use crate::conversation::ConversationId;
 use crate::conversation_event::{
     ConversationEvent, ConversationEventKind, ConversationEventRecord, StoredConversationEventKind,
 };
+use crate::data_directory;
 
 const CONVERSATIONS_DIRECTORY_NAME: &str = "conversations";
 
@@ -21,26 +21,15 @@ pub(crate) struct FileEventStore {
 
 impl FileEventStore {
     pub(crate) fn new(root_directory: PathBuf) -> io::Result<Self> {
-        create_private_directory(&root_directory)?;
-        create_private_directory(&root_directory.join(CONVERSATIONS_DIRECTORY_NAME))?;
+        data_directory::create_private_directory(&root_directory)?;
+        data_directory::create_private_directory(
+            &root_directory.join(CONVERSATIONS_DIRECTORY_NAME),
+        )?;
         Ok(Self { root_directory })
     }
 
     pub(crate) fn from_environment() -> io::Result<Self> {
-        let root_directory = if let Some(configured_directory) = std::env::var_os("TOG_DATA_DIR") {
-            PathBuf::from(configured_directory)
-        } else if let Some(data_home) = std::env::var_os("XDG_DATA_HOME") {
-            PathBuf::from(data_home).join("tog")
-        } else if let Some(home_directory) = std::env::var_os("HOME") {
-            PathBuf::from(home_directory).join(".local/share/tog")
-        } else {
-            return Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                "TOG_DATA_DIR, XDG_DATA_HOME, or HOME must be set",
-            ));
-        };
-
-        Self::new(root_directory)
+        Self::new(data_directory::from_environment()?)
     }
 
     pub(super) fn conversation_directory(&self, conversation_id: ConversationId) -> PathBuf {
@@ -91,7 +80,7 @@ impl ConversationEventStore for FileEventStore {
     ) -> Result<Vec<ConversationEventRecord>, ConversationStoreAppendError> {
         let kinds = stored_event_kinds(events)?;
         let conversation_directory = self.conversation_directory(conversation_id);
-        create_private_directory(&conversation_directory)?;
+        data_directory::create_private_directory(&conversation_directory)?;
         let existing_log = log::read(&conversation_directory)?;
         let existing_events = existing_log
             .as_ref()
@@ -204,9 +193,4 @@ fn next_position(previous_position: Option<u64>) -> io::Result<u64> {
             .ok_or_else(|| io::Error::other("event position overflow")),
         None => Ok(0),
     }
-}
-
-fn create_private_directory(path: &Path) -> io::Result<()> {
-    fs::create_dir_all(path)?;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
 }
