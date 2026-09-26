@@ -1,16 +1,16 @@
 use std::str::FromStr;
 
-use serde_json::{Map, Value, json};
+use serde_json::json;
 use time::OffsetDateTime;
 
 use super::{
     AssistantResponse, Automation, Context, ConversationEvent, ConversationEventId,
-    ConversationEventRecord, Data, FailureCategory, InvalidUser, ModelData, ModelId, ModelOutcome,
+    ConversationEventRecord, FailureCategory, InvalidUser, ModelData, ModelId, ModelOutcome,
     ModelRequest, ModelResponse, ModelSource, ModelSpecificEvent, OperationFailure, ProviderId,
-    ToolDefinition, ToolName, ToolOutcome, ToolRequest, ToolResponse, TurnEnd, TurnOutcome,
-    TurnStart, User, UserContent,
+    ToolOutcome, ToolRequest, ToolResponse, TurnEnd, TurnOutcome, TurnStart, User, UserContent,
 };
 use crate::conversation::ConversationId;
+use crate::toolset::{ToolAvailability, ToolDefinition, ToolName, Toolset, ToolsetEntry};
 
 fn record(event: ConversationEvent) -> ConversationEventRecord {
     ConversationEventRecord {
@@ -28,6 +28,16 @@ fn source() -> ModelSource {
         ProviderId::from_str("test").expect("the provider should be valid"),
         ModelId::from_str("test-model").expect("the model should be valid"),
     )
+}
+
+fn tool_definition(name: &str) -> ToolDefinition {
+    ToolDefinition::try_new(
+        ToolName::try_new(name.to_owned()).expect("the tool name should be valid"),
+        "Run a command.".to_owned(),
+        schemars::json_schema!({ "type": "object" }),
+        schemars::json_schema!({ "type": "object" }),
+    )
+    .expect("the tool definition should be valid")
 }
 
 #[test]
@@ -53,6 +63,8 @@ fn event_records_serialize_with_a_flat_type_discriminator() {
 #[test]
 fn every_event_kind_keeps_its_stable_discriminator() {
     let id = ConversationEventId::new();
+    let toolset =
+        Toolset::immediate(vec![tool_definition("shell")]).expect("the toolset should be valid");
     let events = [
         (
             ConversationEvent::TurnStart(TurnStart::new(None, 0)),
@@ -124,19 +136,17 @@ fn every_event_kind_keeps_its_stable_discriminator() {
             "automation",
         ),
         (
-            ConversationEvent::Context(Context::tools_available(Vec::new())),
+            ConversationEvent::Context(
+                Context::try_new(
+                    "workspace".to_owned(),
+                    "tog.workspace".to_owned(),
+                    json!({}),
+                )
+                .expect("the context should be valid"),
+            ),
             "context",
         ),
-        (
-            ConversationEvent::Data(
-                Data::new(Map::from_iter([(
-                    "key".to_owned(),
-                    Value::String("value".to_owned()),
-                )]))
-                .expect("the data should be valid"),
-            ),
-            "data",
-        ),
+        (ConversationEvent::Toolset(toolset), "toolset"),
     ];
 
     for (event, expected_type) in events {
@@ -149,22 +159,64 @@ fn every_event_kind_keeps_its_stable_discriminator() {
 }
 
 #[test]
-fn a_tools_available_context_keeps_its_kind_discriminator() {
-    let context = record(ConversationEvent::Context(Context::tools_available(vec![
-        ToolDefinition::try_new(
-            ToolName::from_str("shell").expect("the tool name should be valid"),
-            "Run a command.".to_owned(),
-            schemars::json_schema!({ "type": "object" }),
-            schemars::json_schema!({ "type": "object" }),
-        )
-        .expect("the tool definition should be valid"),
-    ])));
-    let value = serde_json::to_value(&context).expect("the record should serialize");
-    assert_eq!(value["type"], "context");
-    assert_eq!(value["kind"], "tools_available");
-    let restored: ConversationEventRecord =
-        serde_json::from_value(value).expect("the record should deserialize");
+fn a_named_typed_context_round_trips_with_resolved_defaults() {
+    let context = Context::try_new(
+        String::new(),
+        "tog.workspace".to_owned(),
+        json!({ "note": "x" }),
+    )
+    .expect("the context should be valid");
+    assert_eq!(
+        context.name(),
+        "tog.workspace",
+        "the name defaults to the type"
+    );
+    assert_eq!(context.context_type(), "tog.workspace");
+
+    let value = serde_json::to_value(&context).expect("the context should serialize");
+    assert_eq!(value["name"], "tog.workspace");
+    assert_eq!(value["context_type"], "tog.workspace");
+    let restored: Context = serde_json::from_value(value).expect("the context should deserialize");
     assert_eq!(restored, context);
+
+    let string_context = Context::try_new(String::new(), String::new(), json!("text"))
+        .expect("the context should be valid");
+    assert_eq!(string_context.context_type(), "string");
+    assert_eq!(string_context.name(), "string");
+    let value = serde_json::to_value(&string_context).expect("the string context should serialize");
+    assert_eq!(value["context_type"], "string");
+}
+
+#[test]
+fn context_explicit_names_distinguish_repeated_types() {
+    let workspace_ctx = Context::try_new(
+        "source".to_owned(),
+        "extole.client".to_owned(),
+        json!({ "client_id": "a" }),
+    )
+    .expect("the context should be valid");
+    assert_eq!(workspace_ctx.name(), "source");
+    assert_eq!(workspace_ctx.context_type(), "extole.client");
+}
+
+#[test]
+fn a_toolset_persists_full_definitions_with_availability() {
+    let toolset = Toolset::new(vec![
+        ToolsetEntry::new(tool_definition("shell"), ToolAvailability::Immediate),
+        ToolsetEntry::new(tool_definition("search"), ToolAvailability::Discoverable),
+    ])
+    .expect("the toolset should be valid");
+    let event = record(ConversationEvent::Toolset(toolset.clone()));
+
+    let value = serde_json::to_value(&event).expect("the toolset should serialize");
+    assert_eq!(value["type"], "toolset");
+    assert_eq!(value["entries"][0]["availability"], "immediate");
+    assert_eq!(value["entries"][1]["availability"], "discoverable");
+    assert_eq!(value["entries"][0]["definition"]["name"], "shell");
+    let restored: ConversationEventRecord =
+        serde_json::from_value(value).expect("the toolset should deserialize");
+    assert_eq!(restored, event);
+    assert_eq!(restored.event, ConversationEvent::Toolset(toolset));
 }
 
 #[test]
@@ -192,7 +244,7 @@ fn a_model_specific_event_round_trips_its_payload_version_and_message() {
 }
 
 #[test]
-fn automation_and_data_round_trip_their_content() {
+fn automation_round_trips_its_content() {
     let automation =
         Automation::new("an observed event".to_owned()).expect("the automation should be valid");
     let restored: Automation = serde_json::from_value(
@@ -201,18 +253,6 @@ fn automation_and_data_round_trip_their_content() {
     .expect("the event should deserialize");
     assert_eq!(restored, automation);
     assert_eq!(restored.content(), "an observed event");
-
-    let data = Data::new(
-        [("key".to_owned(), Value::String("value".to_owned()))]
-            .into_iter()
-            .collect(),
-    )
-    .expect("the data should be valid");
-    let restored: Data =
-        serde_json::from_value(serde_json::to_value(&data).expect("the event should serialize"))
-            .expect("the event should deserialize");
-    assert_eq!(restored, data);
-    assert_eq!(restored.content()["key"], "value");
 }
 
 #[test]

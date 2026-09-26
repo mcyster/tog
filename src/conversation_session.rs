@@ -5,13 +5,14 @@ use std::fmt::{Display, Formatter};
 use futures_util::StreamExt;
 
 use crate::conversation::{
-    Context, Conversation, ConversationEvent, ConversationEventId, ConversationHistory,
-    ConversationId, FailureCategory, ModelOutcome, ModelRequest, ModelResponse, OperationFailure,
-    ToolResponse, TurnEnd, TurnOutcome, TurnStart, User,
+    Conversation, ConversationEvent, ConversationEventId, ConversationHistory, ConversationId,
+    FailureCategory, ModelOutcome, ModelRequest, ModelResponse, OperationFailure, ToolResponse,
+    TurnEnd, TurnOutcome, TurnStart, User, latest_toolset,
 };
 use crate::conversation_event_store::ConversationEventStore;
 use crate::model_driver::{ModelDriver, ModelDriverError, ModelDriverOutput, TurnInput};
 use crate::tools::ToolRegistry;
+use crate::toolset::Toolset;
 
 pub(crate) type ConversationSessionResult<T> = Result<T, Box<dyn Error>>;
 
@@ -93,13 +94,19 @@ impl<Store: ConversationEventStore> ConversationSession<Store> {
         let mut completed_tool_rounds = 0_u32;
 
         loop {
-            let definitions = self.tool_registry.definitions();
-            self.event_store.append(
-                self.conversation_id,
-                vec![ConversationEvent::Context(Context::tools_available(
-                    definitions,
-                ))],
-            )?;
+            let desired_toolset =
+                Toolset::immediate(self.tool_registry.definitions()).map_err(Box::new)?;
+            let conversation = self.load()?;
+            let should_emit_toolset = match latest_toolset(conversation.events()) {
+                None => !desired_toolset.entries().is_empty(),
+                Some(effective) => effective != &desired_toolset,
+            };
+            if should_emit_toolset {
+                self.event_store.append(
+                    self.conversation_id,
+                    vec![ConversationEvent::Toolset(desired_toolset)],
+                )?;
+            }
             let conversation = self.load()?;
             let input_through = last_position(&conversation);
             let source = self.model_driver.source().clone();
@@ -387,8 +394,7 @@ mod tests {
     use crate::conversation::{
         AssistantResponse, ConversationEvent, ConversationEventId, ConversationEventRecord,
         FailureCategory, ModelId, ModelOutcome, ModelResponse, ModelSource, ModelSpecificEvent,
-        OperationFailure, ProviderId, ToolDefinition, ToolName, ToolOutcome, ToolRequest,
-        TurnOutcome, UserContent,
+        OperationFailure, ProviderId, ToolOutcome, ToolRequest, TurnOutcome, UserContent,
     };
     use crate::conversation_event_store::{ConversationEventStore, FileEventStore};
     use crate::model_driver::{
@@ -396,6 +402,7 @@ mod tests {
         ModelOutputStream, TurnInput,
     };
     use crate::tools::{ExecutableTool, ShellTool, ToolRegistry};
+    use crate::toolset::{ToolAvailability, ToolDefinition, ToolName};
 
     fn source() -> ModelSource {
         ModelSource::new(
@@ -558,10 +565,15 @@ mod tests {
             input: TurnInput<'invoke>,
         ) -> BoxFuture<'invoke, Result<ModelOutputStream, ModelDriverError>> {
             let available_tools = input
-                .available_tools()
-                .iter()
-                .map(|tool| tool.name().as_str().to_owned())
-                .collect();
+                .toolset()
+                .map(|toolset| {
+                    toolset
+                        .entries()
+                        .iter()
+                        .map(|entry| entry.definition().name().as_str().to_owned())
+                        .collect()
+                })
+                .unwrap_or_default();
             let tool_responses = input
                 .events()
                 .iter()
@@ -681,7 +693,7 @@ mod tests {
             ConversationEvent::ModelSpecificEvent(_) => "model_specific_event",
             ConversationEvent::Automation(_) => "automation",
             ConversationEvent::Context(_) => "context",
-            ConversationEvent::Data(_) => "data",
+            ConversationEvent::Toolset(_) => "toolset",
         }
     }
 
@@ -728,7 +740,6 @@ mod tests {
             [
                 "user",
                 "turn_start",
-                "context",
                 "model_request",
                 "model_specific_event",
                 "assistant_response",
@@ -736,6 +747,45 @@ mod tests {
                 "turn_end"
             ]
         ));
+    }
+
+    #[tokio::test]
+    async fn the_session_exposes_registered_tools_as_immediate() {
+        let directory = temporary_directory();
+        let driver = Arc::new(ScriptedDriver::new(vec![vec![
+            assistant_response(),
+            terminated_response(),
+        ]]));
+        let session = ConversationSession::create(
+            FileEventStore::new(directory.clone()).expect("the store should be created"),
+            Box::new(SharedScriptedDriver(Arc::clone(&driver))),
+            shell_registry(),
+        );
+        let conversation_id = session.id();
+        session
+            .add_user_request(user_content("hello"))
+            .expect("the request should be recorded");
+        session
+            .invoke(|_| Ok(()))
+            .await
+            .expect("the invocation should complete");
+
+        let events = loaded_events(&directory, conversation_id);
+        let toolset = events
+            .iter()
+            .find_map(|event| match &event.event {
+                ConversationEvent::Toolset(toolset) => Some(toolset),
+                _ => None,
+            })
+            .expect("the toolset should be persisted");
+        assert_eq!(toolset.entries().len(), 1);
+        assert!(
+            toolset
+                .entries()
+                .iter()
+                .all(|entry| entry.availability() == ToolAvailability::Immediate)
+        );
+        assert_eq!(toolset.entries()[0].definition().name().as_str(), "shell");
     }
 
     #[tokio::test]

@@ -8,9 +8,10 @@ use super::{Conversation, ConversationHistory, ConversationId, ConversationView}
 use crate::conversation::{
     AssistantResponse, Context, ConversationEvent, ConversationEventId, ConversationEventRecord,
     FailureCategory, ModelId, ModelOutcome, ModelRequest, ModelResponse, ModelSource,
-    ModelSpecificEvent, OperationFailure, ProviderId, ToolDefinition, ToolName, ToolOutcome,
-    ToolRequest, ToolResponse, TurnEnd, TurnOutcome, TurnStart, User, UserContent,
+    ModelSpecificEvent, OperationFailure, ProviderId, ToolOutcome, ToolRequest, ToolResponse,
+    TurnEnd, TurnOutcome, TurnStart, User, UserContent,
 };
+use crate::toolset::{ToolDefinition, ToolName, Toolset};
 
 fn tool_definition(name: &str) -> ToolDefinition {
     ToolDefinition::try_new(
@@ -50,7 +51,7 @@ fn user_event(conversation_id: ConversationId, position: u64) -> ConversationEve
     )
 }
 
-fn tools_available_event(
+fn toolset_event(
     conversation_id: ConversationId,
     position: u64,
     tools: Vec<ToolDefinition>,
@@ -59,7 +60,7 @@ fn tools_available_event(
         conversation_id,
         position,
         ConversationEventId::new(),
-        ConversationEvent::Context(Context::tools_available(tools)),
+        ConversationEvent::Toolset(Toolset::immediate(tools).expect("the toolset should be valid")),
     )
 }
 
@@ -136,47 +137,82 @@ fn available_tools_uses_the_latest_declaration() {
     let conversation_id = ConversationId::new();
 
     let conversation = ConversationHistory::from_events(vec![
-        tools_available_event(conversation_id, 0, vec![tool_definition("first")]),
+        toolset_event(conversation_id, 0, vec![tool_definition("first")]),
         user_event(conversation_id, 1),
-        tools_available_event(conversation_id, 2, vec![tool_definition("second")]),
+        toolset_event(conversation_id, 2, vec![tool_definition("second")]),
     ])
     .expect("the conversation should be valid");
 
     let view = ConversationView::new(&conversation);
-    let available_tools = view.available_tools();
-    assert_eq!(available_tools.len(), 1);
-    assert_eq!(available_tools[0].name().as_str(), "second");
+    let toolset = view.toolset().expect("the toolset should be declared");
+    assert_eq!(toolset.entries().len(), 1);
+    assert_eq!(toolset.entries()[0].definition().name().as_str(), "second");
 }
 
 #[test]
-fn an_empty_tools_available_declaration_removes_all_tools() {
+fn an_empty_toolset_declaration_removes_all_tools() {
     let conversation_id = ConversationId::new();
 
     let conversation = ConversationHistory::from_events(vec![
-        tools_available_event(conversation_id, 0, vec![tool_definition("first")]),
-        tools_available_event(conversation_id, 1, Vec::new()),
+        toolset_event(conversation_id, 0, vec![tool_definition("first")]),
+        toolset_event(conversation_id, 1, Vec::new()),
     ])
     .expect("the conversation should be valid");
 
-    assert!(
-        ConversationView::new(&conversation)
-            .available_tools()
-            .is_empty()
-    );
+    let view = ConversationView::new(&conversation);
+    let toolset = view
+        .toolset()
+        .expect("the empty toolset should be declared");
+    assert!(toolset.entries().is_empty());
 }
 
 #[test]
-fn a_conversation_without_a_tools_available_declaration_has_no_tools() {
+fn a_conversation_without_a_toolset_declaration_has_no_tools() {
     let conversation_id = ConversationId::new();
 
     let conversation = ConversationHistory::from_events(vec![user_event(conversation_id, 0)])
         .expect("the conversation should be valid");
 
-    assert!(
-        ConversationView::new(&conversation)
-            .available_tools()
-            .is_empty()
-    );
+    let view = ConversationView::new(&conversation);
+    assert!(view.toolset().is_none());
+}
+
+#[test]
+fn effective_context_takes_the_latest_value_per_name() {
+    let conversation_id = ConversationId::new();
+    let first = Context::try_new(
+        "workspace".to_owned(),
+        "tog.workspace".to_owned(),
+        json!({ "path": "/one" }),
+    )
+    .expect("the first context should be valid");
+    let second = Context::try_new(
+        "workspace".to_owned(),
+        "tog.workspace".to_owned(),
+        json!({ "path": "/two" }),
+    )
+    .expect("the second context should be valid");
+
+    let conversation = ConversationHistory::from_events(vec![
+        record(
+            conversation_id,
+            0,
+            ConversationEventId::new(),
+            ConversationEvent::Context(first),
+        ),
+        record(
+            conversation_id,
+            1,
+            ConversationEventId::new(),
+            ConversationEvent::Context(second),
+        ),
+    ])
+    .expect("the conversation should be valid");
+
+    let view = ConversationView::new(&conversation);
+    let effective = view.effective_contexts();
+    assert_eq!(effective.len(), 1);
+    assert_eq!(effective["workspace"].value(), &json!({ "path": "/two" }));
 }
 
 #[test]
@@ -188,13 +224,15 @@ fn conversation_rejects_invalid_deserialized_tool_definitions() {
         "id": ConversationEventId::new(),
         "timestamp": "2026-08-22T18:42:31.482Z",
         "schema_version": 13,
-        "type": "context",
-        "kind": "tools_available",
-        "tools": [{
-            "name": "shell",
-            "description": "   ",
-            "parameters": { "type": "object" },
-            "result": { "type": "object" }
+        "type": "toolset",
+        "entries": [{
+            "definition": {
+                "name": "shell",
+                "description": "   ",
+                "parameters": { "type": "object" },
+                "result": { "type": "object" }
+            },
+            "availability": "immediate"
         }]
     }))
     .expect("derived deserialization should construct the conversation event");

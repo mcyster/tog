@@ -321,7 +321,7 @@ fn turn_persists_events_and_prints_semantic_output() {
         [
             "user",
             "turn_start",
-            "context",
+            "toolset",
             "model_request",
             "assistant_response",
             "model_response",
@@ -339,11 +339,11 @@ fn turn_persists_events_and_prints_semantic_output() {
     );
     assert_eq!(user["content"][0]["type"], "text");
     assert_eq!(user["content"][0]["value"], "say hi");
-    let context = &events[2];
-    assert_eq!(context["kind"], "tools_available");
-    assert_eq!(context["tools"][0]["name"], "shell");
-    assert!(context["tools"][0]["parameters"]["properties"]["command"].is_object());
-    assert!(context["tools"][0]["result"].is_object());
+    let toolset = &events[2];
+    assert_eq!(toolset["entries"][0]["availability"], "immediate");
+    assert_eq!(toolset["entries"][0]["definition"]["name"], "shell");
+    assert!(toolset["entries"][0]["definition"]["parameters"]["properties"]["command"].is_object());
+    assert!(toolset["entries"][0]["definition"]["result"].is_object());
     let model_request = &events[3];
     assert_eq!(model_request["source"]["provider"], "openai");
     assert_eq!(model_request["source"]["model"], "gpt-5.6");
@@ -532,7 +532,7 @@ fn a_refusal_is_a_failed_terminal_response_and_fails_the_turn() {
         [
             "user",
             "turn_start",
-            "context",
+            "toolset",
             "model_request",
             "model_response",
             "turn_end"

@@ -8,9 +8,7 @@ pub(crate) use assistant_response::{AssistantResponse, InvalidAssistantResponse}
 pub(crate) use request::{InvalidModelRequest, ModelRequest};
 pub(crate) use response::{InvalidModelResponse, ModelOutcome, ModelResponse, Usage};
 pub(crate) use specific::{InvalidModelSpecificEvent, ModelSpecificEvent};
-pub(crate) use tool_request::{
-    InvalidToolData, InvalidToolRequest, ToolDefinition, ToolName, ToolRequest,
-};
+pub(crate) use tool_request::{InvalidToolRequest, ToolRequest};
 
 use std::error::Error;
 use std::fmt::{Display, Formatter};

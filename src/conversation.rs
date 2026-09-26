@@ -9,13 +9,12 @@ pub(crate) use events::{
     AssistantResponse, Context, ConversationEvent, ConversationEventId, ConversationEventRecord,
     FailureCategory, InvalidAssistantResponse, InvalidModelResponse, InvalidModelSpecificEvent,
     InvalidToolRequest, ModelData, ModelEvent, ModelId, ModelOutcome, ModelRequest, ModelResponse,
-    ModelSource, ModelSpecificEvent, OperationFailure, ProviderId, ToolDefinition, ToolName,
-    ToolOutcome, ToolRequest, ToolResponse, TurnEnd, TurnOutcome, TurnStart, Usage, User,
-    UserContent,
+    ModelSource, ModelSpecificEvent, OperationFailure, ProviderId, ToolOutcome, ToolRequest,
+    ToolResponse, TurnEnd, TurnOutcome, TurnStart, Usage, User, UserContent,
 };
 pub(crate) use history::ConversationHistory;
 pub(crate) use id::ConversationId;
-pub(crate) use view::{ConversationView, latest_tools};
+pub(crate) use view::{ConversationView, latest_toolset};
 
 pub(crate) trait Conversation {
     #[allow(dead_code)]

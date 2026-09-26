@@ -1,7 +1,9 @@
+use std::collections::HashMap;
+
 use super::Conversation;
-use crate::conversation::events::{
-    Context, ConversationEvent, ConversationEventRecord, ToolDefinition,
-};
+use crate::conversation::Context;
+use crate::conversation::events::{ConversationEvent, ConversationEventRecord};
+use crate::toolset::Toolset;
 
 pub(crate) struct ConversationView<'conversation> {
     conversation: &'conversation dyn Conversation,
@@ -26,18 +28,27 @@ impl<'conversation> ConversationView<'conversation> {
     }
 
     #[allow(dead_code)]
-    pub(crate) fn available_tools(&self) -> &[ToolDefinition] {
-        latest_tools(self.events())
+    pub(crate) fn toolset(&self) -> Option<&Toolset> {
+        latest_toolset(self.events())
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn effective_contexts(
+        &'conversation self,
+    ) -> HashMap<&'conversation str, &'conversation Context> {
+        let mut effective = HashMap::new();
+        for event in self.events() {
+            if let ConversationEvent::Context(context) = &event.event {
+                effective.insert(context.name(), context);
+            }
+        }
+        effective
     }
 }
 
-pub(crate) fn latest_tools(events: &[ConversationEventRecord]) -> &[ToolDefinition] {
-    events
-        .iter()
-        .rev()
-        .find_map(|event| match &event.event {
-            ConversationEvent::Context(Context::ToolsAvailable { tools }) => Some(tools.as_slice()),
-            _ => None,
-        })
-        .unwrap_or(&[])
+pub(crate) fn latest_toolset(events: &[ConversationEventRecord]) -> Option<&Toolset> {
+    events.iter().rev().find_map(|event| match &event.event {
+        ConversationEvent::Toolset(toolset) => Some(toolset),
+        _ => None,
+    })
 }

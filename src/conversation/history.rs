@@ -176,7 +176,7 @@ fn validate_references(
             ConversationEvent::User(_)
             | ConversationEvent::Automation(_)
             | ConversationEvent::Context(_)
-            | ConversationEvent::Data(_) => {}
+            | ConversationEvent::Toolset(_) => {}
         }
     }
     Ok(())

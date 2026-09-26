@@ -8,10 +8,11 @@ use super::{
     ConversationEventStore, ConversationStoreError, ConversationStoreLoadError, FileEventStore, log,
 };
 use crate::conversation::{
-    Context, Conversation, ConversationEvent, ConversationEventId, ConversationEventRecord,
-    ConversationHistory, ConversationId, ConversationView, ModelData, ToolDefinition, ToolName,
-    ToolOutcome, ToolRequest, ToolResponse, User, UserContent,
+    Conversation, ConversationEvent, ConversationEventId, ConversationEventRecord,
+    ConversationHistory, ConversationId, ConversationView, ModelData, ToolOutcome, ToolRequest,
+    ToolResponse, User, UserContent,
 };
+use crate::toolset::{ToolDefinition, ToolName, Toolset};
 
 fn temporary_store() -> FileEventStore {
     let directory = std::env::temp_dir().join(format!("tog-test-{}", uuid::Uuid::now_v7()));
@@ -306,7 +307,10 @@ fn event_store_round_trips_tool_definitions_requests_and_responses() {
         .append(
             conversation_id,
             vec![
-                ConversationEvent::Context(Context::tools_available(vec![tool_definition.clone()])),
+                ConversationEvent::Toolset(
+                    Toolset::immediate(vec![tool_definition.clone()])
+                        .expect("the toolset should be valid"),
+                ),
                 tool_request_event.clone(),
             ],
         )
@@ -343,10 +347,10 @@ fn event_store_round_trips_tool_definitions_requests_and_responses() {
     let conversation =
         ConversationHistory::from_events(events).expect("the stored events should reconstruct");
 
-    assert_eq!(
-        ConversationView::new(&conversation).available_tools(),
-        [tool_definition]
-    );
+    let view = ConversationView::new(&conversation);
+    let toolset = view.toolset().expect("the toolset should be declared");
+    assert_eq!(toolset.entries().len(), 1);
+    assert_eq!(toolset.entries()[0].definition().clone(), tool_definition);
     assert!(matches!(
         &conversation.events()[4].event,
         ConversationEvent::ToolRequest(request) if request == &tool_request_payload(&tool_request_event)

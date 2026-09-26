@@ -21,7 +21,7 @@ ModelResponse
 ModelSpecificEvent
 Automation
 Context
-Data
+Toolset
 ```
 
 `Command`, `Fact`, `Message`, and `Lifecycle` no longer exist as structural
@@ -90,9 +90,22 @@ for native replay; other drivers ignore them.
   `User` its `TurnStart` references; `TurnStart.user_id` records that trigger.
   `TurnStart` records actual start and never substitutes for the queued intent.
   Delivery to a model is bounded by each `ModelRequest.input_through`.
-- **ToolsAvailable.** It is a `Context` value (`context` event with a `tools_available`
-  kind). Each declaration replaces the previous toolset; the latest declaration
-  within the bounded view is authoritative.
+- **Toolset.** Tool availability is a shared concept; a `Toolset` event is a
+  complete replacement toolset persisted with its full tool definitions. Each
+  entry pairs a definition with an availability policy (`immediate` or
+  `discoverable`). An empty toolset clears tools, and the effective toolset is
+  derived from the latest declaration within an invocation's history boundary.
+  The session emits a toolset only when the effective toolset would change.
+  Discovery and fallback for drivers without discovery remain unsettled and are
+  not implemented.
+- **Context.** Other conversation-associated values use typed context: a
+  `Context` holds a resolved type identifier, a name (defaulting to the type),
+  and a JSON value. The latest context event under a name replaces the effective
+  value regardless of its previous type. A workspace can be recorded as
+  `Context(name: "workspace", type: "tog.workspace", value: ...)`; workspace
+  shape and its session relationship are separate work.
+- **Data.** The standalone `Data` event was removed; classification, tags, tool
+  execution context, and other associated values use `Context`.
 - **Model data attachments.** The ad-hoc `ModelData` attachment stays only where
   a concrete durable replay need exists: on `ToolRequest` (provider-native call
   correlation) and as `ModelRequest.options`. Model-associated auxiliary data and
@@ -110,10 +123,12 @@ for native replay; other drivers ignore them.
 ## Module layout
 
 Event types live under `src/conversation/events/`; the reading path is
-conversation → events → model → concrete event. `Automation`, `Context`, `Data`,
-`User`, `TurnStart`, `TurnEnd`, `OperationFailure`, and `ToolResponse` sit beside
-the model tree. Entry files declare relationships; payload implementations live
-in the concrete child modules.
+conversation → events → model → concrete event. `Automation`, `Context`, `User`,
+`TurnStart`, `TurnEnd`, `OperationFailure`, and `ToolResponse` sit beside the
+model tree. `Toolset` and its availability policy and tool definitions live at
+`src/toolset.rs`, which both conversations and model drivers depend on directly.
+Entry files declare relationships; payload implementations live in the concrete
+child modules.
 
 ## Out of scope
 

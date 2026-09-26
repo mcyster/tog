@@ -15,12 +15,13 @@ use crate::conversation::{
     AssistantResponse, ConversationEvent, ConversationEventId, ConversationEventRecord,
     FailureCategory, InvalidAssistantResponse, InvalidModelResponse, InvalidModelSpecificEvent,
     InvalidToolRequest, ModelData, ModelId, ModelOutcome, ModelResponse, ModelSource,
-    ModelSpecificEvent, OperationFailure, ProviderId, ToolName, ToolRequest, Usage, UserContent,
+    ModelSpecificEvent, OperationFailure, ProviderId, ToolRequest, Usage, UserContent,
 };
 use crate::model_driver::{
     ModelDriver, ModelDriverError, ModelDriverOutput, ModelDriverOutputBatch, ModelOutputStream,
     TurnInput,
 };
+use crate::toolset::{ToolAvailability, ToolName};
 
 type ResponseByteStream = BoxStream<'static, Result<Vec<u8>, OpenAiError>>;
 type ProviderOutputStream = BoxStream<'static, Result<ModelDriverEvent, OpenAiError>>;
@@ -131,12 +132,19 @@ impl ModelDriver for OpenAiModelDriver {
             Value::String(self.source.model().as_str().to_owned()),
         );
         request_body.insert("input".to_owned(), semantic_input(events));
-        let available_tools = input.available_tools();
-        if !available_tools.is_empty() {
-            request_body.insert(
-                "tools".to_owned(),
-                Value::Array(available_tools.iter().map(provider_tool).collect()),
-            );
+        let immediate_tools = input
+            .toolset()
+            .map(|toolset| {
+                toolset
+                    .entries()
+                    .iter()
+                    .filter(|entry| entry.availability() == ToolAvailability::Immediate)
+                    .map(|entry| provider_tool(entry.definition()))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if !immediate_tools.is_empty() {
+            request_body.insert("tools".to_owned(), Value::Array(immediate_tools));
         }
         request_body.insert("reasoning".to_owned(), json!({ "summary": "auto" }));
         request_body.insert("stream".to_owned(), Value::Bool(true));
@@ -244,13 +252,13 @@ fn semantic_input(events: &[ConversationEventRecord]) -> Value {
             | ConversationEvent::ModelSpecificEvent(_)
             | ConversationEvent::Automation(_)
             | ConversationEvent::Context(_)
-            | ConversationEvent::Data(_) => None,
+            | ConversationEvent::Toolset(_) => None,
         })
         .collect::<Vec<_>>();
     Value::Array(input)
 }
 
-fn provider_tool(definition: &crate::conversation::ToolDefinition) -> Value {
+fn provider_tool(definition: &crate::toolset::ToolDefinition) -> Value {
     json!({
         "type": "function",
         "name": definition.name().as_str(),
@@ -1587,10 +1595,10 @@ mod tests {
         AssistantResponse, Conversation, ConversationEvent, ConversationEventId,
         ConversationEventRecord, ConversationHistory, ConversationId, FailureCategory, ModelData,
         ModelId, ModelOutcome, ModelRequest, ModelSource, ModelSpecificEvent, ProviderId,
-        ToolDefinition, ToolName, ToolOutcome, ToolRequest, ToolResponse, TurnStart, User,
-        UserContent,
+        ToolOutcome, ToolRequest, ToolResponse, TurnStart, User, UserContent,
     };
     use crate::model_driver::{ModelDriver, ModelDriverOutput, ModelOutputStream, TurnInput};
+    use crate::toolset::{ToolDefinition, ToolName};
 
     use super::{
         ModelDriverEvent, OpenAiError, OpenAiModelDriver, ResponseByteStream, TerminalModelOutcome,

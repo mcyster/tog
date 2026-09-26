@@ -61,7 +61,7 @@ ModelResponse
 ModelSpecificEvent
 Automation
 Context
-Data
+Toolset
 ```
 
 `User` is the durable record of submitted input: it is both the request to
@@ -154,14 +154,32 @@ output.done
 
 ### Context
 
-`Context` records state that may affect later model invocation, such as
+`Context` records named, typed conversation-associated values, such as
 instructions, working directory, selected files, project, or permissions.
-Context is distinct from user input.
+Each context carries a resolved type identifier, a name (defaulting to the
+resolved type), and a JSON value; consumers that understand a type interpret and
+validate its payload. The latest context event under a name replaces the
+effective value for that name regardless of its previous type; earlier events
+remain unchanged. Context is distinct from user input, is not automatically sent
+to the model, and is not passed to every tool.
 
-The complete toolset offered by the caller before a model invocation is a
-`Context` value (`tools_available`). The latest declaration in the conversation
-is authoritative: each declaration replaces the previous toolset, and an empty
-list removes all tools. Earlier declarations remain in the ordered history.
+A workspace can be recorded as `Context(name: "workspace", type:
+"tog.workspace", value: ...)`; workspace shape and its session relationship are
+separate work. If workspace and toolset change as one logical operation, their
+events are appended atomically.
+
+### Toolset
+
+Tool availability is a shared concept understood by model drivers. A `Toolset`
+event supplies the complete replacement toolset with its full tool definitions:
+each entry pairs a tool definition with an availability policy (`immediate` for
+direct model exposure, `discoverable` for discovery). An empty toolset clears
+available tools, and a new event is emitted when the effective toolset changes.
+The effective toolset is derived from the latest declaration within an
+invocation's history boundary, preserving definition order and provider-visible
+content. Model drivers translate the toolset into their provider representation;
+executable implementations remain the application's responsibility. The
+discovery mechanism is unsettled and is not part of this model.
 
 ### ToolRequest And ToolResponse
 
@@ -184,10 +202,6 @@ bounds continuation rounds.
 ### Automation
 
 `Automation` records information contributed by an external or asynchronous actor. It is distinct from `ToolResponse`, which answers a model-requested tool invocation.
-
-### Data
-
-`Data` records durable machine-readable metadata such as external IDs, usage summaries, annotations, tags, or diagnostics. It is not model input by default.
 
 ## Identity, Order, And Relationships
 

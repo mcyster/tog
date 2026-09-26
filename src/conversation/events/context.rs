@@ -2,27 +2,65 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
-use super::model::{InvalidToolData, ToolDefinition};
+#[allow(dead_code)]
+const DEFAULT_CONTEXT_TYPE: &str = "string";
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub(crate) enum Context {
-    ToolsAvailable { tools: Vec<ToolDefinition> },
+pub(crate) struct Context {
+    name: String,
+    context_type: String,
+    value: Value,
 }
 
 impl Context {
-    pub(crate) fn tools_available(tools: Vec<ToolDefinition>) -> Self {
-        Self::ToolsAvailable { tools }
+    #[allow(dead_code)]
+    pub(crate) fn try_new(
+        name: String,
+        context_type: String,
+        value: Value,
+    ) -> Result<Self, InvalidContext> {
+        let context_type = if context_type.trim().is_empty() {
+            DEFAULT_CONTEXT_TYPE.to_owned()
+        } else {
+            context_type
+        };
+        let name = if name.trim().is_empty() {
+            context_type.clone()
+        } else {
+            name
+        };
+        let context = Self {
+            name,
+            context_type,
+            value,
+        };
+        context.ensure_valid()?;
+        Ok(context)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn name(&self) -> &str {
+        &self.name
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn context_type(&self) -> &str {
+        &self.context_type
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn value(&self) -> &Value {
+        &self.value
     }
 
     pub(crate) fn ensure_valid(&self) -> Result<(), InvalidContext> {
-        match self {
-            Self::ToolsAvailable { tools } => {
-                for tool in tools {
-                    tool.ensure_valid().map_err(InvalidContext::Tool)?;
-                }
-            }
+        if self.name.trim().is_empty() {
+            return Err(InvalidContext::EmptyName);
+        }
+        if self.context_type.trim().is_empty() {
+            return Err(InvalidContext::EmptyType);
         }
         Ok(())
     }
@@ -30,13 +68,15 @@ impl Context {
 
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum InvalidContext {
-    Tool(InvalidToolData),
+    EmptyName,
+    EmptyType,
 }
 
 impl Display for InvalidContext {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Tool(error) => Display::fmt(error, formatter),
+            Self::EmptyName => write!(formatter, "context name must not be empty"),
+            Self::EmptyType => write!(formatter, "context type must not be empty"),
         }
     }
 }

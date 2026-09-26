@@ -48,7 +48,9 @@ impl ConversationEvent {
             Self::Context(event) => event
                 .ensure_valid()
                 .map_err(InvalidConversationEvent::Context),
-            Self::Data(event) => event.ensure_valid().map_err(InvalidConversationEvent::Data),
+            Self::Toolset(event) => event
+                .ensure_valid()
+                .map_err(InvalidConversationEvent::Toolset),
         }
     }
 }

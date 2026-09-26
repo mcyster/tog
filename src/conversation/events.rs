@@ -1,6 +1,5 @@
 mod automation;
 mod context;
-mod data;
 mod error;
 mod event;
 mod failure;
@@ -17,16 +16,15 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::conversation::ConversationId;
+use crate::toolset::Toolset;
 
 pub(crate) use automation::{Automation, InvalidAutomation};
 pub(crate) use context::{Context, InvalidContext};
-pub(crate) use data::{Data, InvalidData};
 pub(crate) use failure::{FailureCategory, InvalidOperationFailure, OperationFailure};
 pub(crate) use model::{
     AssistantResponse, InvalidAssistantResponse, InvalidModelRequest, InvalidModelResponse,
     InvalidModelSpecificEvent, InvalidToolRequest, ModelData, ModelEvent, ModelId, ModelOutcome,
-    ModelRequest, ModelResponse, ModelSource, ModelSpecificEvent, ProviderId, ToolDefinition,
-    ToolName, ToolRequest, Usage,
+    ModelRequest, ModelResponse, ModelSource, ModelSpecificEvent, ProviderId, ToolRequest, Usage,
 };
 pub(crate) use tool_response::{InvalidToolOutcome, ToolOutcome, ToolResponse};
 pub(crate) use turn_end::{InvalidTurnOutcome, TurnEnd, TurnOutcome};
@@ -51,7 +49,7 @@ pub(crate) enum ConversationEvent {
     ModelSpecificEvent(ModelSpecificEvent),
     Automation(Automation),
     Context(Context),
-    Data(Data),
+    Toolset(Toolset),
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -78,5 +76,5 @@ pub(crate) enum InvalidConversationEvent {
     ModelSpecificEvent(InvalidModelSpecificEvent),
     Automation(InvalidAutomation),
     Context(InvalidContext),
-    Data(InvalidData),
+    Toolset(crate::toolset::InvalidToolset),
 }

@@ -1,7 +1,7 @@
 use crate::conversation::{
-    Conversation, ConversationEventId, ConversationEventRecord, ConversationView, ToolDefinition,
-    latest_tools,
+    Conversation, ConversationEventId, ConversationEventRecord, ConversationView, latest_toolset,
 };
+use crate::toolset::Toolset;
 
 pub(crate) struct TurnInput<'conversation> {
     conversation: ConversationView<'conversation>,
@@ -26,8 +26,8 @@ impl<'conversation> TurnInput<'conversation> {
         self.conversation.events_through(self.input_through)
     }
 
-    pub(crate) fn available_tools(&self) -> &[ToolDefinition] {
-        latest_tools(self.events())
+    pub(crate) fn toolset(&self) -> Option<&Toolset> {
+        latest_toolset(self.events())
     }
 
     pub(crate) fn model_request_id(&self) -> ConversationEventId {
