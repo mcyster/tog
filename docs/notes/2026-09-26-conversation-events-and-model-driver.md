@@ -1,0 +1,151 @@
+# Conversation Events And ModelDriver Boundary
+
+Dated note recording the agreed conversation-event vocabulary and driver
+boundary, and the concrete decisions that implement it. Implementation is
+authoritative for exact field names; this note preserves the intent and the
+deliberate choices.
+
+## Agreed direction
+
+`ConversationEvent` is a flat vocabulary owned by the conversation concept:
+
+```text
+User
+TurnStart
+TurnEnd
+AssistantResponse
+ToolRequest
+ToolResponse
+ModelRequest
+ModelResponse
+ModelSpecificEvent
+Automation
+Context
+Tools
+```
+
+`Command`, `Fact`, `Message`, and `Lifecycle` no longer exist as structural
+intermediate branches, and there is no separate `Kind` domain layer. A serialized
+`type` discriminator remains for storage but does not introduce a second
+hierarchy. A request is a fact to one consumer and a command to another; its
+concrete contract describes who acts on it.
+
+## Identity
+
+One `ConversationEventId` identifies events and references. There are no
+separate model-request, tool-request, or turn identifier types. References use
+descriptive fields: `model_request_id`, `tool_request_id`, `turn_id`.
+`ConversationId` remains distinct.
+
+A complete `ConversationEvent` owns its `ConversationEventId`, `ConversationId`,
+timestamp, and its `ConversationEventPayload` (the payload vocabulary above).
+Event
+construction assigns the ID and timestamp and receives the conversation ID;
+storage preserves these values and assigns only the record position. Cross-event
+references use the complete event's ID.
+
+`ConversationEventRecord` is a storage record: position, schema version, and the
+complete event. It lives with the event-store contract (`conversation_event_store`)
+and is a store return type; the store assigns positions, retains validation that
+appended events belong to the requested conversation, and restores identity and
+timestamp on load.
+
+## Model relationship
+
+Five events are model-related: `AssistantResponse`, `ToolRequest`, `ModelRequest`,
+`ModelResponse`, and `ModelSpecificEvent`. A `ModelEvent` trait expresses that
+relationship for the four events that reference a model request. It is distinct
+from permission to produce events.
+
+The driver receives the full conversation vocabulary through an immutable bounded
+view (events through the request's `input_through` position). The engine commits
+`ModelRequest` before invoking the driver; the driver cannot produce it. The
+driver stream may contain only `AssistantResponse`, `ToolRequest`,
+`ModelResponse`, and `ModelSpecificEvent`, and the restricted output enum reuses
+those payloads rather than copying them. The engine records the terminal
+`ModelResponse` it receives and fills `output_event_ids` from the outputs
+committed during the call; drivers cannot know those durable identifiers. A
+stream that ends without a terminal response is closed by the engine as a failed
+`ModelResponse`, never as success.
+
+## Completion and failure
+
+Assistant output is content, not turn completion. A successful terminal model
+call with no outstanding tool work completes a turn without assistant text.
+
+Failure belongs to the operation that failed:
+
+- `ToolResponse` carries the tool outcome
+- `ModelResponse` carries the model-attempt outcome
+- `TurnEnd` carries the turn outcome
+
+`OperationFailure` is a shared payload: portable `category`, message, retry
+guidance, and known-versus-uncertain execution outcome. Storage failures are
+never relabeled as provider failures.
+
+## ModelSpecificEvent
+
+`ModelSpecificEvent` carries a model-request reference, provider event type,
+payload version, provider-specific payload, and an optional human-readable
+message. The message is for display only; its presence does not make the event
+assistant content or provider input. Compatible drivers interpret their payloads
+for native replay; other drivers ignore them.
+
+## Decisions on the open choices
+
+- **Queued intent.** `User` is the durable record of submitted input; it is both
+  the request to process and the accepted content. A turn's queued intent is the
+  `User` its `TurnStart` references; `TurnStart.user_id` records that trigger.
+  `TurnStart` records actual start and never substitutes for the queued intent.
+  Delivery to a model is bounded by each `ModelRequest.input_through`.
+- **Toolset and Tools.** Tool availability is a shared concept. A `Tools` event
+  (`ConversationEventPayload::Tools(Tools)`) is a complete replacement list
+  persisted with its full tool definitions and availability policies
+  (`immediate` or `discoverable`). An empty list clears tools, and the effective
+  tools are derived from the latest declaration within an invocation's history
+  boundary. The session emits a `Tools` event only when the effective list would
+  change. `Tools`, `Tool`, `ToolAvailability`, `ToolDefinition`, and `ToolName`
+  are conversation vocabulary under `conversation/events/tools.rs`. `Toolset`
+  stays at `src/toolset.rs` as the separate concept that obtains or assembles
+  tools and builds the values carried by the `Tools` event; it does not appear in
+  the event model. Discovery and fallback for drivers without discovery remain
+  unsettled and are not implemented.
+- **Context.** Other conversation-associated values use typed context: a
+  `Context` holds a resolved type identifier, a name (defaulting to the type),
+  and a JSON value. The latest context event under a name replaces the effective
+  value regardless of its previous type. A workspace can be recorded as
+  `Context(name: "workspace", type: "tog.workspace", value: ...)`; workspace
+  shape and its session relationship are separate work.
+- **Data.** The standalone `Data` event was removed; classification, tags, tool
+  execution context, and other associated values use `Context`.
+- **Model data attachments.** The ad-hoc `ModelData` attachment stays only where
+  a concrete durable replay need exists: on `ToolRequest` (provider-native call
+  correlation) and as `ModelRequest.options`. Model-associated auxiliary data and
+  native replay state move to standalone `ModelSpecificEvent` values.
+- **Communication importance.** The three-level importance scale was removed.
+  Display is governed by event kind: assistant content always renders,
+  `ModelSpecificEvent` messages render at medium and high verbosity, and a failed
+  `ModelResponse` renders its failure message. No generic severity field was
+  added.
+- **Migration.** Existing persisted events are explicitly not migrated. The
+  serialized shapes changed across the vocabulary, identity, and failure model;
+  before the first release the old path is removed outright rather than carried
+  forward.
+
+## Module layout
+
+Event types live under `src/conversation/events/`; the reading path is
+conversation → events → model → concrete event. `Automation`, `Context`, `User`,
+`TurnStart`, `TurnEnd`, `OperationFailure`, and `ToolResponse` sit beside the
+model tree, and the tool vocabulary (`Tools`, `Tool`, `ToolDefinition`,
+`ToolAvailability`) lives under `conversation/events/tools/`. `Toolset` at
+`src/toolset.rs` assembles tools and supplies the `Tools` event data; it depends
+on the conversation's tool definitions and is not part of the event model.
+Entry files declare relationships; payload implementations live in the concrete
+child modules.
+
+## Out of scope
+
+A daemon, concurrent tool execution, automatic retries, and the queued-intent
+recovery policy are separate work. `ModelRequest.retry_of` exists for the durable
+record; retry scheduling is not implemented.

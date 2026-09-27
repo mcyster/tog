@@ -1,9 +1,52 @@
+mod assistant_response;
+mod request;
+mod response;
+mod specific;
+mod tool_request;
+
+pub(crate) use assistant_response::{AssistantResponse, InvalidAssistantResponse};
+pub(crate) use request::{InvalidModelRequest, ModelRequest};
+pub(crate) use response::{InvalidModelResponse, ModelOutcome, ModelResponse, Usage};
+pub(crate) use specific::{InvalidModelSpecificEvent, ModelSpecificEvent};
+pub(crate) use tool_request::{InvalidToolRequest, ToolRequest};
+
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::str::FromStr;
 
 use serde::de::Error as DeserializeError;
 use serde::{Deserialize, Deserializer, Serialize};
+use serde_json::{Map, Value};
+
+use super::ConversationEventId;
+
+pub(crate) trait ModelEvent {
+    fn model_request_id(&self) -> ConversationEventId;
+}
+
+impl ModelEvent for AssistantResponse {
+    fn model_request_id(&self) -> ConversationEventId {
+        self.model_request_id()
+    }
+}
+
+impl ModelEvent for ToolRequest {
+    fn model_request_id(&self) -> ConversationEventId {
+        self.model_request_id()
+    }
+}
+
+impl ModelEvent for ModelResponse {
+    fn model_request_id(&self) -> ConversationEventId {
+        self.model_request_id()
+    }
+}
+
+impl ModelEvent for ModelSpecificEvent {
+    fn model_request_id(&self) -> ConversationEventId {
+        self.model_request_id()
+    }
+}
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct ModelSource {
@@ -19,23 +62,11 @@ impl ModelSource {
     pub(crate) fn model(&self) -> &ModelId {
         &self.model
     }
-
-    #[allow(dead_code)]
-    pub(crate) fn provider(&self) -> &ProviderId {
-        &self.provider
-    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(transparent)]
 pub(crate) struct ProviderId(String);
-
-impl ProviderId {
-    #[allow(dead_code)]
-    pub(crate) fn as_str(&self) -> &str {
-        &self.0
-    }
-}
 
 impl FromStr for ProviderId {
     type Err = InvalidProviderId;
@@ -117,37 +148,42 @@ impl Display for InvalidModelId {
 
 impl Error for InvalidModelId {}
 
-#[cfg(test)]
-mod tests {
-    use std::str::FromStr;
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(transparent)]
+pub(crate) struct ModelData {
+    content: Map<String, Value>,
+}
 
-    use super::{InvalidModelId, InvalidProviderId, ModelId, ModelSource, ProviderId};
-
-    #[test]
-    fn model_source_identifiers_reject_empty_values() {
-        assert_eq!(ProviderId::from_str("  "), Err(InvalidProviderId));
-        assert_eq!(ModelId::from_str("  "), Err(InvalidModelId));
-        assert!(serde_json::from_str::<ProviderId>("\" \"").is_err());
-        assert!(serde_json::from_str::<ModelId>("\" \"").is_err());
+impl ModelData {
+    pub(crate) fn new(content: Map<String, Value>) -> Result<Self, InvalidModelData> {
+        let model_data = Self { content };
+        model_data.ensure_valid()?;
+        Ok(model_data)
     }
 
-    #[test]
-    fn model_source_normalizes_identifiers_and_round_trips_through_json() {
-        let source = ModelSource::new(
-            ProviderId::from_str(" openai ").expect("the provider identifier should be valid"),
-            ModelId::from_str(" gpt-5.6 ").expect("the model identifier should be valid"),
-        );
+    pub(crate) fn content(&self) -> &Map<String, Value> {
+        &self.content
+    }
 
-        let json = serde_json::to_value(&source).expect("the model source should serialize");
-        let deserialized_source: ModelSource =
-            serde_json::from_value(json.clone()).expect("the model source should deserialize");
-
-        assert_eq!(
-            json,
-            serde_json::json!({ "provider": "openai", "model": "gpt-5.6" })
-        );
-        assert_eq!(deserialized_source, source);
-        assert_eq!(source.provider().as_str(), "openai");
-        assert_eq!(source.model().as_str(), "gpt-5.6");
+    pub(crate) fn ensure_valid(&self) -> Result<(), InvalidModelData> {
+        if self.content.is_empty() {
+            return Err(InvalidModelData::EmptyContent);
+        }
+        Ok(())
     }
 }
+
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) enum InvalidModelData {
+    EmptyContent,
+}
+
+impl Display for InvalidModelData {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::EmptyContent => write!(formatter, "model data content must not be empty"),
+        }
+    }
+}
+
+impl Error for InvalidModelData {}

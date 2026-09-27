@@ -6,7 +6,8 @@ use futures_util::FutureExt;
 use futures_util::future::BoxFuture;
 use serde_json::Value;
 
-use crate::conversation_event::{ToolDefinition, ToolExecutionProblem, ToolOutcome, ToolRequest};
+use crate::conversation::ToolDefinition;
+use crate::conversation::{OperationFailure, ToolOutcome, ToolRequest};
 
 pub(crate) trait ExecutableTool: Send + Sync {
     fn definition(&self) -> &ToolDefinition;
@@ -14,7 +15,7 @@ pub(crate) trait ExecutableTool: Send + Sync {
     fn execute<'execute>(
         &'execute self,
         arguments: Value,
-    ) -> BoxFuture<'execute, Result<Value, ToolExecutionProblem>>;
+    ) -> BoxFuture<'execute, Result<Value, OperationFailure>>;
 }
 
 #[derive(Default)]
@@ -43,13 +44,17 @@ impl ToolRegistry {
                 .iter()
                 .find(|tool| tool.definition().name() == &tool_name)
             else {
-                return ToolOutcome::Problem {
-                    problem: ToolExecutionProblem::unknown_tool(tool_name),
-                };
+                let failure = OperationFailure::try_new(
+                    crate::conversation::FailureCategory::UnknownTool,
+                    format!("unknown tool: {tool_name}"),
+                    None,
+                )
+                .expect("the unknown-tool failure should be valid");
+                return ToolOutcome::Failed { failure };
             };
             match tool.execute(arguments).await {
-                Ok(value) => ToolOutcome::Result { value },
-                Err(problem) => ToolOutcome::Problem { problem },
+                Ok(value) => ToolOutcome::Succeeded { value },
+                Err(failure) => ToolOutcome::Failed { failure },
             }
         }
         .boxed()
@@ -65,10 +70,10 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::{ExecutableTool, ToolRegistry};
-    use crate::conversation_event::{
-        ModelInvocationId, ToolCallId, ToolDefinition, ToolExecutionProblem,
-        ToolExecutionProblemKind, ToolName, ToolOutcome, ToolRequest,
+    use crate::conversation::{
+        ConversationEventId, FailureCategory, OperationFailure, ToolOutcome, ToolRequest,
     };
+    use crate::conversation::{ToolDefinition, ToolName};
 
     #[derive(Deserialize, JsonSchema, Serialize)]
     struct EchoParameters {
@@ -105,12 +110,16 @@ mod tests {
         fn execute<'execute>(
             &'execute self,
             arguments: Value,
-        ) -> BoxFuture<'execute, Result<Value, ToolExecutionProblem>> {
+        ) -> BoxFuture<'execute, Result<Value, OperationFailure>> {
             async move {
                 let parameters: EchoParameters =
                     serde_json::from_value(arguments).map_err(|error| {
-                        ToolExecutionProblem::try_invalid_arguments(error.to_string())
-                            .expect("the invalid-argument message should be valid")
+                        OperationFailure::try_new(
+                            FailureCategory::InvalidArguments,
+                            error.to_string(),
+                            None,
+                        )
+                        .expect("the invalid-argument message should be valid")
                     })?;
                 Ok(json!({ "echo": parameters.message }))
             }
@@ -120,10 +129,9 @@ mod tests {
 
     fn request(tool_name: &str, arguments: Value) -> ToolRequest {
         ToolRequest::try_new(
-            ToolCallId::new(),
+            ConversationEventId::new(),
             ToolName::try_new(tool_name.to_owned()).expect("the tool name should be valid"),
             arguments,
-            ModelInvocationId::new(),
             None,
         )
         .expect("the tool request should be valid")
@@ -151,7 +159,7 @@ mod tests {
 
         assert_eq!(
             outcome,
-            ToolOutcome::Result {
+            ToolOutcome::Succeeded {
                 value: json!({ "echo": "hello" })
             }
         );
@@ -166,8 +174,8 @@ mod tests {
 
         assert!(matches!(
             outcome,
-            ToolOutcome::Problem { problem }
-                if problem.kind() == ToolExecutionProblemKind::InvalidArguments
+            ToolOutcome::Failed { failure }
+                if failure.category() == FailureCategory::InvalidArguments
         ));
     }
 
@@ -181,9 +189,9 @@ mod tests {
 
         assert!(matches!(
             outcome,
-            ToolOutcome::Problem { problem }
-                if problem.kind() == ToolExecutionProblemKind::UnknownTool
-                    && problem.message() == "unknown tool: missing"
+            ToolOutcome::Failed { failure }
+                if failure.category() == FailureCategory::UnknownTool
+                    && failure.message() == "unknown tool: missing"
         ));
     }
 }

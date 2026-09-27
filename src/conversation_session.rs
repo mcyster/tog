@@ -4,15 +4,16 @@ use std::fmt::{Display, Formatter};
 
 use futures_util::StreamExt;
 
-use crate::conversation::{ConversationHistory, ConversationId};
-use crate::conversation_event::{
-    ConversationCommand, ConversationCommandId, ConversationEvent, ConversationFact,
-    ConversationLifecycle, ConversationMessage, ConversationProblem, ConversationTurnId,
-    ToolResponse, TurnOutcome, UserContent, UserMessageRequest,
+use crate::conversation::{
+    Conversation, ConversationEvent, ConversationEventId, ConversationEventPayload,
+    ConversationHistory, ConversationId, FailureCategory, ModelOutcome, ModelRequest,
+    ModelResponse, OperationFailure, ToolResponse, TurnEnd, TurnOutcome, TurnStart, User,
+    UserContent, latest_tools,
 };
 use crate::conversation_event_store::ConversationEventStore;
 use crate::model_driver::{ModelDriver, ModelDriverError, ModelDriverOutput, TurnInput};
 use crate::tools::ToolRegistry;
+use crate::toolset::Toolset;
 
 pub(crate) type ConversationSessionResult<T> = Result<T, Box<dyn Error>>;
 
@@ -20,8 +21,7 @@ pub(crate) const MAXIMUM_TOOL_CONTINUATION_ROUNDS: u32 = 8;
 
 pub(crate) enum ConversationSessionProgress {
     InvocationStarted { model: String },
-    EventCompleted { event: ConversationFact },
-    ProblemCompleted { problem: ConversationProblem },
+    EventCompleted { event: ConversationEvent },
 }
 
 pub(crate) struct ConversationSession<Store: ConversationEventStore> {
@@ -67,180 +67,250 @@ impl<Store: ConversationEventStore> ConversationSession<Store> {
     pub(crate) fn add_user_request(
         &self,
         content: Vec<UserContent>,
-    ) -> ConversationSessionResult<ConversationCommandId> {
-        let command_id = ConversationCommandId::new();
-        self.event_store.append(
+    ) -> ConversationSessionResult<ConversationEventId> {
+        let user = User::new(content).map_err(Box::new)?;
+        let records = self.event_store.append(
             self.conversation_id,
-            vec![ConversationEvent::Command(
-                ConversationCommand::UserMessageRequested(UserMessageRequest {
-                    content,
-                    command_id,
-                }),
-            )],
+            vec![self.complete_event(ConversationEventPayload::User(user))],
         )?;
-        Ok(command_id)
+        Ok(records[0].event().id())
     }
 
     pub(crate) async fn invoke(
         &self,
         mut report_progress: impl FnMut(ConversationSessionProgress) -> ConversationSessionResult<()>,
     ) -> ConversationSessionResult<TurnOutcome> {
-        let turn_id = ConversationTurnId::new();
-        self.event_store.append(
+        let conversation = self.load()?;
+        let trigger_user_id = pending_user_id(&conversation);
+        let input_through = last_position(&conversation);
+        let turn_records = self.event_store.append(
             self.conversation_id,
-            vec![ConversationEvent::Command(
-                ConversationCommand::TurnRequested {
-                    command_id: ConversationCommandId::new(),
-                    turn_id,
-                },
-            )],
+            vec![
+                self.complete_event(ConversationEventPayload::TurnStart(TurnStart::new(
+                    trigger_user_id,
+                    input_through,
+                ))),
+            ],
         )?;
-        let source = self.model_driver.source().clone();
-        let mut assistant_responded = false;
-        let mut turn_failed = false;
+        let turn_id = turn_records[0].event().id();
+
+        let mut depends_on = Vec::new();
         let mut completed_tool_rounds = 0_u32;
 
         loop {
-            self.append_shared_fact(ConversationFact::ToolsAvailable {
-                tools: self.tool_registry.definitions(),
-            })?;
-            let conversation =
-                ConversationHistory::from_events(self.event_store.load(self.conversation_id)?)?;
-            let turn_input = TurnInput::new(&conversation, turn_id);
-            let pending_request_ids = turn_input
-                .pending_user_requests()
-                .iter()
-                .map(|request| request.command_id)
-                .collect::<HashSet<_>>();
+            let desired_tools = Toolset::immediate(self.tool_registry.definitions()).into_tools();
+            let conversation = self.load()?;
+            let should_emit_tools = match latest_tools(conversation.events()) {
+                None => !desired_tools.tools().is_empty(),
+                Some(effective) => effective != &desired_tools,
+            };
+            if should_emit_tools {
+                self.event_store.append(
+                    self.conversation_id,
+                    vec![self.complete_event(ConversationEventPayload::Tools(desired_tools))],
+                )?;
+            }
+            let conversation = self.load()?;
+            let input_through = last_position(&conversation);
+            let source = self.model_driver.source().clone();
+            let request_records = self.event_store.append(
+                self.conversation_id,
+                vec![
+                    self.complete_event(ConversationEventPayload::ModelRequest(
+                        ModelRequest::new(
+                            turn_id,
+                            source.clone(),
+                            input_through,
+                            std::mem::take(&mut depends_on),
+                            None,
+                            None,
+                        )
+                        .map_err(Box::new)?,
+                    )),
+                ],
+            )?;
+            let model_request_id = request_records[0].event().id();
+            let turn_input = TurnInput::new(&conversation, model_request_id, input_through);
             report_progress(ConversationSessionProgress::InvocationStarted {
                 model: source.model().as_str().to_owned(),
             })?;
 
             let mut output_stream = self.model_driver.invoke(turn_input).await?;
-            let mut accepted_request_ids = HashSet::new();
+            let mut outputs_for_request = Vec::new();
             let mut tool_requests = Vec::new();
+            let mut terminal_response: Option<ModelResponse> = None;
 
             while let Some(output_batch) = output_stream.next().await {
                 let output_batch = output_batch?;
+                if terminal_response.is_some() {
+                    return Err(Box::new(ModelDriverError::OutputAfterTerminalResponse {
+                        model_request_id,
+                    }));
+                }
+                let mut outputs = output_batch.into_outputs();
+                if outputs.iter().any(|output| output.is_terminal_response()) {
+                    if outputs.len() != 1 {
+                        return Err(Box::new(ModelDriverError::TerminalResponseNotAlone {
+                            model_request_id,
+                        }));
+                    }
+                    let ModelDriverOutput::ModelResponse(driver_response) = outputs.remove(0)
+                    else {
+                        unreachable!("the terminal response output was just identified");
+                    };
+                    self.ensure_request_reference(&driver_response, model_request_id)?;
+                    let response = ModelResponse::new(
+                        model_request_id,
+                        std::mem::take(&mut outputs_for_request),
+                        driver_response.outcome().clone(),
+                        driver_response.usage().cloned(),
+                    )
+                    .map_err(Box::new)?;
+                    let records = self.event_store.append(
+                        self.conversation_id,
+                        vec![self.complete_event(ConversationEventPayload::ModelResponse(
+                            response.clone(),
+                        ))],
+                    )?;
+                    report_progress(ConversationSessionProgress::EventCompleted {
+                        event: records[0].event().clone(),
+                    })?;
+                    terminal_response = Some(response);
+                    continue;
+                }
+
                 let mut events = Vec::new();
-                let mut progress_reports = Vec::new();
-                for output in output_batch.into_outputs() {
+                for output in outputs {
                     match output {
-                        ModelDriverOutput::Message(ConversationMessage::User {
-                            caused_by,
-                            content,
-                        }) => {
-                            let Some(command_id) = caused_by else {
-                                return Err(Box::new(ModelDriverError::UnassociatedUserMessage));
-                            };
-                            if !pending_request_ids.contains(&command_id)
-                                || !accepted_request_ids.insert(command_id)
-                            {
-                                return Err(Box::new(ModelDriverError::UnexpectedUserRequest {
-                                    command_id,
-                                }));
-                            }
-                            events.push(ConversationEvent::Fact(ConversationFact::Message {
-                                message: ConversationMessage::User {
-                                    caused_by: Some(command_id),
-                                    content,
-                                },
-                                turn_id: None,
-                            }));
-                        }
-                        ModelDriverOutput::Message(ConversationMessage::AssistantResponse {
-                            invocation_id,
-                            data,
-                            response,
-                        }) => {
-                            assistant_responded = true;
-                            let fact = ConversationFact::Message {
-                                message: ConversationMessage::AssistantResponse {
-                                    invocation_id,
-                                    data,
-                                    response,
-                                },
-                                turn_id: Some(turn_id),
-                            };
-                            progress_reports.push(ConversationSessionProgress::EventCompleted {
-                                event: fact.clone(),
-                            });
-                            events.push(ConversationEvent::Fact(fact));
-                        }
-                        ModelDriverOutput::Message(ConversationMessage::Communication {
-                            invocation_id,
-                            data,
-                            communication,
-                        }) => {
-                            let fact = ConversationFact::Message {
-                                message: ConversationMessage::Communication {
-                                    invocation_id,
-                                    data,
-                                    communication,
-                                },
-                                turn_id: Some(turn_id),
-                            };
-                            progress_reports.push(ConversationSessionProgress::EventCompleted {
-                                event: fact.clone(),
-                            });
-                            events.push(ConversationEvent::Fact(fact));
-                        }
-                        ModelDriverOutput::Message(ConversationMessage::Problem {
-                            invocation_id,
-                            data,
-                            problem,
-                        }) => {
-                            turn_failed = true;
-                            progress_reports.push(ConversationSessionProgress::ProblemCompleted {
-                                problem: problem.clone(),
-                            });
-                            events.push(ConversationEvent::Fact(ConversationFact::Message {
-                                message: ConversationMessage::Problem {
-                                    invocation_id,
-                                    data,
-                                    problem,
-                                },
-                                turn_id: Some(turn_id),
-                            }));
+                        ModelDriverOutput::AssistantResponse(response) => {
+                            self.ensure_request_reference(&response, model_request_id)?;
+                            events.push(ConversationEventPayload::AssistantResponse(response));
                         }
                         ModelDriverOutput::ToolRequest(request) => {
-                            events.push(ConversationEvent::Fact(ConversationFact::ToolRequest {
-                                request: request.clone(),
-                                turn_id: Some(turn_id),
-                            }));
-                            tool_requests.push(request);
+                            self.ensure_request_reference(&request, model_request_id)?;
+                            events.push(ConversationEventPayload::ToolRequest(request));
                         }
-                        ModelDriverOutput::Command(event) | ModelDriverOutput::Extension(event) => {
-                            events.push(ConversationEvent::Extension(event));
+                        ModelDriverOutput::ModelSpecificEvent(event) => {
+                            self.ensure_request_reference(&event, model_request_id)?;
+                            events.push(ConversationEventPayload::ModelSpecificEvent(event));
+                        }
+                        ModelDriverOutput::ModelResponse(_) => {
+                            unreachable!("terminal responses are handled as the sole batch output")
                         }
                     }
                 }
-                self.event_store.append(self.conversation_id, events)?;
-                for progress in progress_reports {
-                    report_progress(progress)?;
+                let records = self.event_store.append(
+                    self.conversation_id,
+                    events
+                        .into_iter()
+                        .map(|content| self.complete_event(content))
+                        .collect(),
+                )?;
+                for record in &records {
+                    match record.event().payload() {
+                        ConversationEventPayload::AssistantResponse(_) => {
+                            outputs_for_request.push(record.event().id());
+                            report_progress(ConversationSessionProgress::EventCompleted {
+                                event: record.event().clone(),
+                            })?;
+                        }
+                        ConversationEventPayload::ToolRequest(request) => {
+                            outputs_for_request.push(record.event().id());
+                            tool_requests.push((record.event().id(), request.clone()));
+                            report_progress(ConversationSessionProgress::EventCompleted {
+                                event: record.event().clone(),
+                            })?;
+                        }
+                        ConversationEventPayload::ModelSpecificEvent(_) => {
+                            report_progress(ConversationSessionProgress::EventCompleted {
+                                event: record.event().clone(),
+                            })?;
+                        }
+                        _ => {}
+                    }
                 }
             }
 
-            if turn_failed || tool_requests.is_empty() {
-                break;
+            let terminal_response = match terminal_response {
+                Some(response) => response,
+                None => {
+                    let failure = OperationFailure::try_new(
+                        FailureCategory::StreamInterrupted,
+                        "The model response stream ended without a terminal model response."
+                            .to_owned(),
+                        None,
+                    )
+                    .map_err(Box::new)?;
+                    let response = ModelResponse::new(
+                        model_request_id,
+                        std::mem::take(&mut outputs_for_request),
+                        ModelOutcome::Failed { failure },
+                        None,
+                    )
+                    .map_err(Box::new)?;
+                    let records = self.event_store.append(
+                        self.conversation_id,
+                        vec![self.complete_event(ConversationEventPayload::ModelResponse(
+                            response.clone(),
+                        ))],
+                    )?;
+                    report_progress(ConversationSessionProgress::EventCompleted {
+                        event: records[0].event().clone(),
+                    })?;
+                    response
+                }
+            };
+
+            let succeeded = matches!(terminal_response.outcome(), ModelOutcome::Succeeded);
+            if !succeeded || tool_requests.is_empty() {
+                let outcome = if succeeded {
+                    TurnOutcome::Succeeded
+                } else {
+                    TurnOutcome::Failed {
+                        failure: match terminal_response.outcome() {
+                            ModelOutcome::Failed { failure } => failure.clone(),
+                            ModelOutcome::Succeeded => {
+                                unreachable!("a failed outcome is matched above")
+                            }
+                        },
+                    }
+                };
+                self.event_store.append(
+                    self.conversation_id,
+                    vec![self.complete_event(ConversationEventPayload::TurnEnd(
+                        TurnEnd::new(turn_id, outcome.clone()).map_err(Box::new)?,
+                    ))],
+                )?;
+                return Ok(outcome);
             }
 
-            for request in &tool_requests {
+            for (tool_request_id, request) in &tool_requests {
                 let outcome = self.tool_registry.execute(request).await;
-                self.append_shared_fact(ConversationFact::ToolResponse {
-                    response: ToolResponse::new(request.call_id(), outcome),
-                    turn_id: Some(turn_id),
-                })?;
+                self.event_store.append(
+                    self.conversation_id,
+                    vec![self.complete_event(ConversationEventPayload::ToolResponse(
+                        ToolResponse::new(*tool_request_id, outcome),
+                    ))],
+                )?;
             }
-            assistant_responded = false;
+            depends_on = tool_requests.iter().map(|(id, _)| *id).collect();
             completed_tool_rounds += 1;
             if completed_tool_rounds >= MAXIMUM_TOOL_CONTINUATION_ROUNDS {
-                self.append_shared_fact(ConversationFact::Lifecycle(
-                    ConversationLifecycle::TurnCompleted {
-                        turn_id,
-                        outcome: TurnOutcome::Failed,
-                    },
-                ))?;
+                let failure = OperationFailure::try_new(
+                    FailureCategory::ExecutionFailed,
+                    format!(
+                        "the tool continuation limit of {MAXIMUM_TOOL_CONTINUATION_ROUNDS} rounds was reached"
+                    ),
+                    None,
+                )
+                .map_err(Box::new)?;
+                let outcome = TurnOutcome::Failed { failure };
+                self.event_store.append(
+                    self.conversation_id,
+                    vec![self.complete_event(ConversationEventPayload::TurnEnd(
+                        TurnEnd::new(turn_id, outcome.clone()).map_err(Box::new)?,
+                    ))],
+                )?;
                 return Err(Box::new(
                     ConversationSessionError::ToolContinuationLimitReached {
                         limit: MAXIMUM_TOOL_CONTINUATION_ROUNDS,
@@ -248,23 +318,64 @@ impl<Store: ConversationEventStore> ConversationSession<Store> {
                 ));
             }
         }
-
-        let outcome = match (turn_failed, assistant_responded) {
-            (true, _) => TurnOutcome::Failed,
-            (false, true) => TurnOutcome::Succeeded,
-            (false, false) => return Err(Box::new(ModelDriverError::IncompleteTurn)),
-        };
-        self.append_shared_fact(ConversationFact::Lifecycle(
-            ConversationLifecycle::TurnCompleted { turn_id, outcome },
-        ))?;
-        Ok(outcome)
     }
 
-    fn append_shared_fact(&self, fact: ConversationFact) -> ConversationSessionResult<()> {
-        self.event_store
-            .append(self.conversation_id, vec![ConversationEvent::Fact(fact)])?;
+    fn load(&self) -> ConversationSessionResult<ConversationHistory> {
+        Ok(ConversationHistory::from_events(
+            self.event_store.load(self.conversation_id)?,
+        )?)
+    }
+
+    fn complete_event(&self, content: ConversationEventPayload) -> ConversationEvent {
+        ConversationEvent::new(self.conversation_id, content)
+    }
+
+    fn ensure_request_reference<T: crate::conversation::ModelEvent>(
+        &self,
+        model_event: &T,
+        model_request_id: ConversationEventId,
+    ) -> Result<(), Box<dyn Error>> {
+        let found = model_event.model_request_id();
+        if found != model_request_id {
+            return Err(Box::new(
+                ModelDriverError::UnexpectedModelRequestReference {
+                    expected: model_request_id,
+                    found,
+                },
+            ));
+        }
         Ok(())
     }
+}
+
+fn pending_user_id(conversation: &ConversationHistory) -> Option<ConversationEventId> {
+    let mut referenced_user_ids = HashSet::new();
+    for event in conversation.events() {
+        if let ConversationEventPayload::TurnStart(turn_start) = event.event.payload()
+            && let Some(user_id) = turn_start.user_id()
+        {
+            referenced_user_ids.insert(user_id);
+        }
+    }
+    conversation
+        .events()
+        .iter()
+        .find_map(|event| match event.event.payload() {
+            ConversationEventPayload::User(_)
+                if !referenced_user_ids.contains(&event.event.id()) =>
+            {
+                Some(event.event.id())
+            }
+            _ => None,
+        })
+}
+
+fn last_position(conversation: &ConversationHistory) -> u64 {
+    conversation
+        .events()
+        .last()
+        .map(|event| event.position)
+        .expect("a loaded conversation contains at least one event")
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -284,10 +395,9 @@ impl Display for ConversationSessionError {
 }
 
 impl Error for ConversationSessionError {}
-
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::collections::VecDeque;
     use std::str::FromStr;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
@@ -299,113 +409,21 @@ mod tests {
     use schemars::json_schema;
     use serde_json::{Value, json};
 
-    use super::{
-        ConversationSession, ConversationSessionProgress, MAXIMUM_TOOL_CONTINUATION_ROUNDS,
+    use super::{ConversationSession, MAXIMUM_TOOL_CONTINUATION_ROUNDS};
+    use crate::conversation::{
+        AssistantResponse, ConversationEventId, ConversationEventPayload, FailureCategory, ModelId,
+        ModelOutcome, ModelResponse, ModelSource, ModelSpecificEvent, OperationFailure, ProviderId,
+        ToolOutcome, ToolRequest, TurnOutcome, UserContent,
     };
-    use crate::conversation::ConversationId;
-    use crate::conversation_event::{
-        AssistantResponse, ConversationEventEnvelope, ConversationEventExtension,
-        ConversationEventKind, ConversationEventReadError, ConversationEventReader,
-        ConversationFact, ConversationLifecycle, ConversationMessage, ConversationProblem,
-        InvocationError, ModelId, ModelInvocationId, ModelSource, ProviderId,
-        StoredConversationEventKind, ToolCallId, ToolDefinition, ToolExecutionProblem,
-        ToolExecutionProblemKind, ToolName, ToolOutcome, ToolRequest, TurnOutcome, UserContent,
+    use crate::conversation::{ToolAvailability, ToolDefinition, ToolName};
+    use crate::conversation_event_store::{
+        ConversationEventRecord, ConversationEventStore, FileEventStore,
     };
-    use crate::conversation_event_store::{ConversationEventStore, FileEventStore};
     use crate::model_driver::{
         ModelDriver, ModelDriverError, ModelDriverOutput, ModelDriverOutputBatch,
         ModelOutputStream, TurnInput,
     };
     use crate::tools::{ExecutableTool, ShellTool, ToolRegistry};
-
-    enum RecordingResponse {
-        Assistant,
-        Problem,
-        AssistantThenProblem,
-        Nothing,
-    }
-
-    struct RecordingDriver {
-        source: ModelSource,
-        pending_counts: Arc<Mutex<Vec<usize>>>,
-        response: RecordingResponse,
-    }
-
-    impl ConversationEventReader for RecordingDriver {
-        fn read_event(
-            &self,
-            _envelope: &ConversationEventEnvelope,
-        ) -> Result<Box<dyn ConversationEventExtension>, ConversationEventReadError> {
-            Err(ConversationEventReadError::UnsupportedNamespace)
-        }
-    }
-
-    impl ModelDriver for RecordingDriver {
-        fn source(&self) -> &ModelSource {
-            &self.source
-        }
-
-        fn invoke<'invoke>(
-            &'invoke self,
-            input: TurnInput<'invoke>,
-        ) -> BoxFuture<'invoke, Result<ModelOutputStream, ModelDriverError>> {
-            let pending_requests = input.pending_user_requests().to_vec();
-            self.pending_counts
-                .lock()
-                .expect("the pending request list should lock")
-                .push(pending_requests.len());
-            let mut batches = Vec::new();
-            let pending_user_events = pending_requests
-                .into_iter()
-                .map(|request| {
-                    ModelDriverOutput::Message(ConversationMessage::User {
-                        caused_by: Some(request.command_id),
-                        content: request.content,
-                    })
-                })
-                .collect::<Vec<_>>();
-            if !pending_user_events.is_empty() {
-                batches.push(
-                    ModelDriverOutputBatch::try_new(pending_user_events)
-                        .expect("the pending user events should form a batch"),
-                );
-            }
-            match self.response {
-                RecordingResponse::Assistant => {
-                    batches.push(ModelDriverOutputBatch::from(assistant_response()));
-                }
-                RecordingResponse::Problem => {
-                    batches.push(ModelDriverOutputBatch::from(problem_message()));
-                }
-                RecordingResponse::AssistantThenProblem => batches.push(
-                    ModelDriverOutputBatch::try_new(vec![assistant_response(), problem_message()])
-                        .expect("the response and problem should form a batch"),
-                ),
-                RecordingResponse::Nothing => {}
-            }
-            async move { Ok(stream::iter(batches.into_iter().map(Ok)).boxed()) }.boxed()
-        }
-    }
-
-    fn assistant_response() -> ModelDriverOutput {
-        ModelDriverOutput::Message(ConversationMessage::AssistantResponse {
-            invocation_id: ModelInvocationId::new(),
-            data: None,
-            response: AssistantResponse::new("Hello.".to_owned())
-                .expect("the assistant response should be valid"),
-        })
-    }
-
-    fn problem_message() -> ModelDriverOutput {
-        ModelDriverOutput::Message(ConversationMessage::Problem {
-            invocation_id: Some(ModelInvocationId::new()),
-            data: None,
-            problem: ConversationProblem::Invocation(
-                InvocationError::try_provider_failure("the provider failed".to_owned())
-                    .expect("the provider failure should be valid"),
-            ),
-        })
-    }
 
     fn source() -> ModelSource {
         ModelSource::new(
@@ -422,15 +440,128 @@ mod tests {
         vec![UserContent::Text(text.to_owned())]
     }
 
+    fn assistant_response() -> ModelDriverOutput {
+        ModelDriverOutput::AssistantResponse(
+            AssistantResponse::new(ConversationEventId::new(), "Hello.".to_owned())
+                .expect("the assistant response should be valid"),
+        )
+    }
+
+    fn terminated_response() -> ModelDriverOutput {
+        ModelDriverOutput::ModelResponse(
+            ModelResponse::new(
+                ConversationEventId::new(),
+                Vec::new(),
+                ModelOutcome::Succeeded,
+                None,
+            )
+            .expect("the terminal response should be valid"),
+        )
+    }
+
+    fn failed_response(failure: FailureCategory) -> ModelDriverOutput {
+        ModelDriverOutput::ModelResponse(
+            ModelResponse::new(
+                ConversationEventId::new(),
+                Vec::new(),
+                ModelOutcome::Failed {
+                    failure: OperationFailure::try_new(
+                        failure,
+                        "the provider failed".to_owned(),
+                        None,
+                    )
+                    .expect("the failure should be valid"),
+                },
+                None,
+            )
+            .expect("the failed terminal response should be valid"),
+        )
+    }
+
+    fn reasoning_event() -> ModelDriverOutput {
+        ModelDriverOutput::ModelSpecificEvent(
+            ModelSpecificEvent::new(
+                ConversationEventId::new(),
+                "reasoning".to_owned(),
+                1,
+                json!({}),
+                Some("Thinking.".to_owned()),
+            )
+            .expect("the reasoning event should be valid"),
+        )
+    }
+
+    fn tool_request(tool_name: &str, arguments: Value) -> ModelDriverOutput {
+        ModelDriverOutput::ToolRequest(
+            ToolRequest::try_new(
+                ConversationEventId::new(),
+                ToolName::try_new(tool_name.to_owned()).expect("the tool name should be valid"),
+                arguments,
+                None,
+            )
+            .expect("the tool request should be valid"),
+        )
+    }
+
+    fn bind_outputs(
+        outputs: Vec<ModelDriverOutput>,
+        model_request_id: ConversationEventId,
+    ) -> Vec<ModelDriverOutputBatch> {
+        outputs
+            .into_iter()
+            .map(|output| match output {
+                ModelDriverOutput::AssistantResponse(response) => {
+                    ModelDriverOutput::AssistantResponse(
+                        AssistantResponse::new(model_request_id, response.content().to_owned())
+                            .expect("the assistant response should be valid"),
+                    )
+                }
+                ModelDriverOutput::ToolRequest(request) => ModelDriverOutput::ToolRequest(
+                    ToolRequest::try_new(
+                        model_request_id,
+                        request.tool_name().clone(),
+                        request.arguments().clone(),
+                        request.data().cloned(),
+                    )
+                    .expect("the tool request should be valid"),
+                ),
+                ModelDriverOutput::ModelSpecificEvent(event) => {
+                    ModelDriverOutput::ModelSpecificEvent(
+                        ModelSpecificEvent::new(
+                            model_request_id,
+                            event.provider_event_type().to_owned(),
+                            event.provider_payload_version(),
+                            event.payload().clone(),
+                            event.message().map(str::to_owned),
+                        )
+                        .expect("the specific event should be valid"),
+                    )
+                }
+                ModelDriverOutput::ModelResponse(response) => ModelDriverOutput::ModelResponse(
+                    ModelResponse::new(
+                        model_request_id,
+                        Vec::new(),
+                        response.outcome().clone(),
+                        response.usage().cloned(),
+                    )
+                    .expect("the terminal response should be valid"),
+                ),
+            })
+            .map(ModelDriverOutputBatch::from)
+            .collect()
+    }
+
+    #[derive(Default)]
     struct ScriptedInvocation {
         available_tools: Vec<String>,
         tool_responses: Vec<ToolOutcome>,
+        events: Vec<ConversationEventRecord>,
     }
 
     struct ScriptedDriver {
         source: ModelSource,
         invocations: Arc<Mutex<Vec<ScriptedInvocation>>>,
-        script: Mutex<std::collections::VecDeque<Vec<ModelDriverOutput>>>,
+        script: Mutex<VecDeque<Vec<ModelDriverOutput>>>,
     }
 
     impl ScriptedDriver {
@@ -443,14 +574,7 @@ mod tests {
         }
     }
 
-    impl ConversationEventReader for ScriptedDriver {
-        fn read_event(
-            &self,
-            _envelope: &ConversationEventEnvelope,
-        ) -> Result<Box<dyn ConversationEventExtension>, ConversationEventReadError> {
-            Err(ConversationEventReadError::UnsupportedNamespace)
-        }
-    }
+    struct SharedScriptedDriver(Arc<ScriptedDriver>);
 
     impl ModelDriver for ScriptedDriver {
         fn source(&self) -> &ModelSource {
@@ -461,70 +585,44 @@ mod tests {
             &'invoke self,
             input: TurnInput<'invoke>,
         ) -> BoxFuture<'invoke, Result<ModelOutputStream, ModelDriverError>> {
-            let conversation = input.conversation();
-            let available_tools = conversation
-                .available_tools()
-                .iter()
-                .map(|tool| tool.name().as_str().to_owned())
-                .collect();
-            let tool_responses = conversation
+            let available_tools = input
+                .tools()
+                .map(|tools| {
+                    tools
+                        .tools()
+                        .iter()
+                        .map(|tool| tool.definition().name().as_str().to_owned())
+                        .collect()
+                })
+                .unwrap_or_default();
+            let tool_responses = input
                 .events()
                 .iter()
-                .filter_map(|event| match &event.kind {
-                    StoredConversationEventKind::Shared(ConversationEventKind::Fact(
-                        ConversationFact::ToolResponse { response, .. },
-                    )) => Some(response.outcome().clone()),
+                .filter_map(|event| match event.event.payload() {
+                    ConversationEventPayload::ToolResponse(response) => {
+                        Some(response.outcome().clone())
+                    }
                     _ => None,
                 })
                 .collect();
+            let events = input.events().to_vec();
             self.invocations
                 .lock()
                 .expect("the invocation list should lock")
                 .push(ScriptedInvocation {
                     available_tools,
                     tool_responses,
+                    events,
                 });
-            let pending_requests = input.pending_user_requests().to_vec();
-            let mut batches = Vec::new();
-            let pending_user_events = pending_requests
-                .into_iter()
-                .map(|request| {
-                    ModelDriverOutput::Message(ConversationMessage::User {
-                        caused_by: Some(request.command_id),
-                        content: request.content,
-                    })
-                })
-                .collect::<Vec<_>>();
-            if !pending_user_events.is_empty() {
-                batches.push(
-                    ModelDriverOutputBatch::try_new(pending_user_events)
-                        .expect("the pending user events should form a batch"),
-                );
-            }
+            let model_request_id = input.model_request_id();
             let scripted_outputs = self
                 .script
                 .lock()
                 .expect("the script should lock")
                 .pop_front()
                 .unwrap_or_default();
-            if !scripted_outputs.is_empty() {
-                batches.push(
-                    ModelDriverOutputBatch::try_new(scripted_outputs)
-                        .expect("the scripted outputs should form a batch"),
-                );
-            }
+            let batches = bind_outputs(scripted_outputs, model_request_id);
             async move { Ok(stream::iter(batches.into_iter().map(Ok)).boxed()) }.boxed()
-        }
-    }
-
-    struct SharedScriptedDriver(Arc<ScriptedDriver>);
-
-    impl ConversationEventReader for SharedScriptedDriver {
-        fn read_event(
-            &self,
-            envelope: &ConversationEventEnvelope,
-        ) -> Result<Box<dyn ConversationEventExtension>, ConversationEventReadError> {
-            self.0.read_event(envelope)
         }
     }
 
@@ -539,6 +637,12 @@ mod tests {
         ) -> BoxFuture<'invoke, Result<ModelOutputStream, ModelDriverError>> {
             self.0.invoke(input)
         }
+    }
+
+    fn shell_registry() -> ToolRegistry {
+        let mut registry = ToolRegistry::default();
+        registry.register(ShellTool::new());
+        registry
     }
 
     struct ObservingTool {
@@ -573,7 +677,7 @@ mod tests {
         fn execute<'execute>(
             &'execute self,
             arguments: Value,
-        ) -> BoxFuture<'execute, Result<Value, ToolExecutionProblem>> {
+        ) -> BoxFuture<'execute, Result<Value, OperationFailure>> {
             async move {
                 let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
                 self.maximum_active.fetch_max(active, Ordering::SeqCst);
@@ -589,133 +693,44 @@ mod tests {
         }
     }
 
-    fn shell_registry() -> ToolRegistry {
-        let mut registry = ToolRegistry::default();
-        registry.register(ShellTool::new());
-        registry
-    }
-
-    fn tool_request(tool_name: &str, arguments: Value) -> ModelDriverOutput {
-        ModelDriverOutput::ToolRequest(
-            ToolRequest::try_new(
-                ToolCallId::new(),
-                ToolName::try_new(tool_name.to_owned()).expect("the tool name should be valid"),
-                arguments,
-                ModelInvocationId::new(),
-                None,
-            )
-            .expect("the tool request should be valid"),
-        )
-    }
-
-    fn loaded_facts(directory: &Path, conversation_id: ConversationId) -> Vec<ConversationFact> {
+    fn loaded_events(
+        directory: &std::path::Path,
+        conversation_id: crate::conversation::ConversationId,
+    ) -> Vec<ConversationEventRecord> {
         FileEventStore::new(directory.to_path_buf())
             .expect("the store should reopen")
             .load(conversation_id)
             .expect("the conversation should load")
-            .iter()
-            .filter_map(|event| match &event.kind {
-                StoredConversationEventKind::Shared(ConversationEventKind::Fact(fact)) => {
-                    Some(fact.clone())
-                }
-                StoredConversationEventKind::Shared(ConversationEventKind::Command(_))
-                | StoredConversationEventKind::Extension(_) => None,
-            })
-            .collect()
+    }
+
+    fn event_type(event: &ConversationEventPayload) -> &'static str {
+        match event {
+            ConversationEventPayload::User(_) => "user",
+            ConversationEventPayload::TurnStart(_) => "turn_start",
+            ConversationEventPayload::TurnEnd(_) => "turn_end",
+            ConversationEventPayload::AssistantResponse(_) => "assistant_response",
+            ConversationEventPayload::ToolRequest(_) => "tool_request",
+            ConversationEventPayload::ToolResponse(_) => "tool_response",
+            ConversationEventPayload::ModelRequest(_) => "model_request",
+            ConversationEventPayload::ModelResponse(_) => "model_response",
+            ConversationEventPayload::ModelSpecificEvent(_) => "model_specific_event",
+            ConversationEventPayload::Automation(_) => "automation",
+            ConversationEventPayload::Context(_) => "context",
+            ConversationEventPayload::Tools(_) => "tools",
+        }
     }
 
     #[tokio::test]
-    async fn opening_a_session_preserves_pending_requests_and_invocation_without_new_input_works() {
+    async fn a_successful_turn_records_turn_lifecycle() {
         let directory = temporary_directory();
-        let pending_counts = Arc::new(Mutex::new(Vec::new()));
+        let driver = Arc::new(ScriptedDriver::new(vec![vec![
+            reasoning_event(),
+            assistant_response(),
+            terminated_response(),
+        ]]));
         let session = ConversationSession::create(
             FileEventStore::new(directory.clone()).expect("the store should be created"),
-            Box::new(RecordingDriver {
-                source: source(),
-                pending_counts: Arc::clone(&pending_counts),
-                response: RecordingResponse::Assistant,
-            }),
-            ToolRegistry::default(),
-        );
-        let conversation_id = session.id();
-        session
-            .add_user_request(user_content("hello"))
-            .expect("the request should be recorded");
-        assert_eq!(
-            session
-                .invoke(|_| Ok(()))
-                .await
-                .expect("the first invocation should complete"),
-            TurnOutcome::Succeeded
-        );
-
-        let reopened = ConversationSession::open(
-            conversation_id,
-            FileEventStore::new(directory).expect("the store should reopen"),
-            Box::new(RecordingDriver {
-                source: source(),
-                pending_counts: Arc::clone(&pending_counts),
-                response: RecordingResponse::Assistant,
-            }),
-            ToolRegistry::default(),
-        )
-        .expect("the session should open");
-        assert_eq!(reopened.id(), conversation_id);
-        assert_eq!(
-            reopened
-                .invoke(|progress| {
-                    if let ConversationSessionProgress::ProblemCompleted { problem } = progress {
-                        let _ = problem;
-                    }
-                    Ok(())
-                })
-                .await
-                .expect("an invocation without new input should complete"),
-            TurnOutcome::Succeeded
-        );
-
-        assert_eq!(
-            *pending_counts
-                .lock()
-                .expect("the pending request list should lock"),
-            [1, 0]
-        );
-    }
-
-    #[tokio::test]
-    async fn a_failed_turn_outcome_is_returned_to_the_caller() {
-        let session = ConversationSession::create(
-            FileEventStore::new(temporary_directory()).expect("the store should be created"),
-            Box::new(RecordingDriver {
-                source: source(),
-                pending_counts: Arc::new(Mutex::new(Vec::new())),
-                response: RecordingResponse::Problem,
-            }),
-            ToolRegistry::default(),
-        );
-        session
-            .add_user_request(user_content("hello"))
-            .expect("the request should be recorded");
-
-        assert_eq!(
-            session
-                .invoke(|_| Ok(()))
-                .await
-                .expect("the failed invocation should still complete"),
-            TurnOutcome::Failed
-        );
-    }
-
-    #[tokio::test]
-    async fn a_late_problem_fails_the_turn_but_preserves_earlier_output() {
-        let directory = temporary_directory();
-        let session = ConversationSession::create(
-            FileEventStore::new(directory.clone()).expect("the store should be created"),
-            Box::new(RecordingDriver {
-                source: source(),
-                pending_counts: Arc::new(Mutex::new(Vec::new())),
-                response: RecordingResponse::AssistantThenProblem,
-            }),
+            Box::new(SharedScriptedDriver(Arc::clone(&driver))),
             ToolRegistry::default(),
         );
         let conversation_id = session.id();
@@ -728,57 +743,147 @@ mod tests {
                 .invoke(|_| Ok(()))
                 .await
                 .expect("the invocation should complete"),
-            TurnOutcome::Failed
+            TurnOutcome::Succeeded
         );
 
-        let conversation = FileEventStore::new(directory)
-            .expect("the store should reopen")
-            .load(conversation_id)
-            .expect("the conversation should load");
-        let facts = conversation
+        assert_eq!(
+            driver
+                .invocations
+                .lock()
+                .expect("the invocation list should lock")
+                .len(),
+            1
+        );
+        let event_types = loaded_events(&directory, conversation_id)
             .iter()
-            .filter_map(|event| match &event.kind {
-                StoredConversationEventKind::Shared(ConversationEventKind::Fact(fact)) => {
-                    Some(fact.clone())
-                }
-                StoredConversationEventKind::Shared(ConversationEventKind::Command(_))
-                | StoredConversationEventKind::Extension(_) => None,
-            })
+            .map(|event| event_type(event.event.payload()))
             .collect::<Vec<_>>();
-
         assert!(matches!(
-            facts.as_slice(),
+            event_types.as_slice(),
             [
-                ConversationFact::ToolsAvailable { .. },
-                ConversationFact::Message {
-                    message: ConversationMessage::User { .. },
-                    ..
-                },
-                ConversationFact::Message {
-                    message: ConversationMessage::AssistantResponse { .. },
-                    ..
-                },
-                ConversationFact::Message {
-                    message: ConversationMessage::Problem { .. },
-                    ..
-                },
-                ConversationFact::Lifecycle(ConversationLifecycle::TurnCompleted {
-                    outcome: TurnOutcome::Failed,
-                    ..
-                })
+                "user",
+                "turn_start",
+                "model_request",
+                "model_specific_event",
+                "assistant_response",
+                "model_response",
+                "turn_end"
             ]
         ));
     }
 
     #[tokio::test]
-    async fn a_driver_that_ends_without_output_is_an_incomplete_turn() {
+    async fn the_session_exposes_registered_tools_as_immediate() {
+        let directory = temporary_directory();
+        let driver = Arc::new(ScriptedDriver::new(vec![vec![
+            assistant_response(),
+            terminated_response(),
+        ]]));
+        let session = ConversationSession::create(
+            FileEventStore::new(directory.clone()).expect("the store should be created"),
+            Box::new(SharedScriptedDriver(Arc::clone(&driver))),
+            shell_registry(),
+        );
+        let conversation_id = session.id();
+        session
+            .add_user_request(user_content("hello"))
+            .expect("the request should be recorded");
+        session
+            .invoke(|_| Ok(()))
+            .await
+            .expect("the invocation should complete");
+
+        let events = loaded_events(&directory, conversation_id);
+        let tools_event = events
+            .iter()
+            .find_map(|event| match event.event.payload() {
+                ConversationEventPayload::Tools(tools) => Some(tools),
+                _ => None,
+            })
+            .expect("the tools declaration should be persisted");
+        assert_eq!(tools_event.tools().len(), 1);
+        assert!(
+            tools_event
+                .tools()
+                .iter()
+                .all(|tool| tool.availability() == ToolAvailability::Immediate)
+        );
+        assert_eq!(tools_event.tools()[0].definition().name().as_str(), "shell");
+    }
+
+    #[tokio::test]
+    async fn a_failed_terminal_outcome_fails_the_turn() {
         let session = ConversationSession::create(
             FileEventStore::new(temporary_directory()).expect("the store should be created"),
-            Box::new(RecordingDriver {
-                source: source(),
-                pending_counts: Arc::new(Mutex::new(Vec::new())),
-                response: RecordingResponse::Nothing,
-            }),
+            Box::new(ScriptedDriver::new(vec![vec![failed_response(
+                FailureCategory::ProviderFailure,
+            )]])),
+            ToolRegistry::default(),
+        );
+        session
+            .add_user_request(user_content("hello"))
+            .expect("the request should be recorded");
+
+        assert!(matches!(
+            session
+                .invoke(|_| Ok(()))
+                .await
+                .expect("the failed invocation should still complete"),
+            TurnOutcome::Failed { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_stream_that_ends_without_a_terminal_response_fails_the_turn_explicitly() {
+        let directory = temporary_directory();
+        let session = ConversationSession::create(
+            FileEventStore::new(directory.clone()).expect("the store should be created"),
+            Box::new(ScriptedDriver::new(vec![vec![assistant_response()]])),
+            ToolRegistry::default(),
+        );
+        let conversation_id = session.id();
+        session
+            .add_user_request(user_content("hello"))
+            .expect("the request should be recorded");
+
+        assert!(matches!(
+            session
+                .invoke(|_| Ok(()))
+                .await
+                .expect("the incomplete stream should fail the turn"),
+            TurnOutcome::Failed { .. }
+        ));
+
+        let events = loaded_events(&directory, conversation_id);
+        let model_responses = events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event.event.payload(),
+                    ConversationEventPayload::ModelResponse(_)
+                )
+            })
+            .count();
+        assert_eq!(
+            model_responses, 1,
+            "the engine records one terminal response"
+        );
+        assert!(matches!(
+            events.last().map(|event| event.event.payload()),
+            Some(ConversationEventPayload::TurnEnd(turn_end))
+                if matches!(turn_end.outcome(), TurnOutcome::Failed { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_terminal_response_followed_by_more_output_is_a_contract_error() {
+        let driver = Arc::new(ScriptedDriver::new(vec![vec![
+            terminated_response(),
+            assistant_response(),
+        ]]));
+        let session = ConversationSession::create(
+            FileEventStore::new(temporary_directory()).expect("the store should be created"),
+            Box::new(SharedScriptedDriver(Arc::clone(&driver))),
             ToolRegistry::default(),
         );
         session
@@ -788,70 +893,19 @@ mod tests {
         let error = session
             .invoke(|_| Ok(()))
             .await
-            .expect_err("an invocation without output should be rejected");
-        assert_eq!(
-            error.to_string(),
-            "the model driver ended without an assistant response or problem"
-        );
-    }
-
-    #[tokio::test]
-    async fn tools_available_is_recorded_and_reaches_every_invocation() {
-        let directory = temporary_directory();
-        let mut registry = ToolRegistry::default();
-        registry.register(ObservingTool::new());
-        let driver = Arc::new(ScriptedDriver::new(vec![vec![assistant_response()]]));
-        let session = ConversationSession::create(
-            FileEventStore::new(directory.clone()).expect("the store should be created"),
-            Box::new(SharedScriptedDriver(Arc::clone(&driver))),
-            registry,
-        );
-        let conversation_id = session.id();
-        session
-            .add_user_request(user_content("hello"))
-            .expect("the request should be recorded");
-
-        assert_eq!(
-            session
-                .invoke(|_| Ok(()))
-                .await
-                .expect("the invocation should complete"),
-            TurnOutcome::Succeeded
-        );
-
-        let invocations = driver
-            .invocations
-            .lock()
-            .expect("the invocation list should lock");
-        assert_eq!(invocations.len(), 1);
-        assert_eq!(invocations[0].available_tools, ["observe"]);
-        let facts = loaded_facts(&directory, conversation_id);
-        assert!(matches!(
-            facts.as_slice(),
-            [
-                ConversationFact::ToolsAvailable { tools },
-                ConversationFact::Message {
-                    message: ConversationMessage::User { .. },
-                    ..
-                },
-                ConversationFact::Message {
-                    message: ConversationMessage::AssistantResponse { .. },
-                    ..
-                },
-                ConversationFact::Lifecycle(ConversationLifecycle::TurnCompleted {
-                    outcome: TurnOutcome::Succeeded,
-                    ..
-                })
-            ] if tools.len() == 1 && tools[0].name().as_str() == "observe"
-        ));
+            .expect_err("output after the terminal response should be rejected");
+        assert!(error.to_string().contains("after the terminal"));
     }
 
     #[tokio::test]
     async fn a_shell_request_executes_and_its_response_reaches_the_next_invocation() {
         let directory = temporary_directory();
         let driver = Arc::new(ScriptedDriver::new(vec![
-            vec![tool_request("shell", json!({ "command": "printf hello" }))],
-            vec![assistant_response()],
+            vec![
+                tool_request("shell", json!({ "command": "printf hello" })),
+                terminated_response(),
+            ],
+            vec![assistant_response(), terminated_response()],
         ]));
         let session = ConversationSession::create(
             FileEventStore::new(directory.clone()).expect("the store should be created"),
@@ -879,18 +933,14 @@ mod tests {
         assert_eq!(invocations[1].available_tools, ["shell"]);
         assert!(invocations[1].tool_responses.iter().any(|outcome| matches!(
             outcome,
-            ToolOutcome::Result { value } if value["stdout"] == "hello" && value["exit_status"]["code"] == 0
+            ToolOutcome::Succeeded { value } if value["stdout"] == "hello" && value["exit_status"]["code"] == 0
         )));
-        let facts = loaded_facts(&directory, conversation_id);
-        assert!(facts.iter().any(|fact| matches!(
-            fact,
-            ConversationFact::ToolResponse {
-                response,
-                ..
-            } if matches!(
-                response.outcome(),
-                ToolOutcome::Result { value } if value["stdout"] == "hello"
-            )
+        drop(invocations);
+        let events = loaded_events(&directory, conversation_id);
+        assert!(events.iter().any(|event| matches!(
+            event.event.payload(),
+            ConversationEventPayload::ToolResponse(response)
+                if matches!(response.outcome(), ToolOutcome::Succeeded { value } if value["stdout"] == "hello")
         )));
     }
 
@@ -906,8 +956,9 @@ mod tests {
             vec![
                 tool_request("observe", json!({ "order": "first" })),
                 tool_request("observe", json!({ "order": "second" })),
+                terminated_response(),
             ],
-            vec![assistant_response()],
+            vec![assistant_response(), terminated_response()],
         ]));
         let session = ConversationSession::create(
             FileEventStore::new(directory.clone()).expect("the store should be created"),
@@ -946,15 +997,16 @@ mod tests {
     #[tokio::test]
     async fn assistant_text_with_tool_requests_does_not_complete_the_turn() {
         let directory = temporary_directory();
+        let mut registry = ToolRegistry::default();
+        registry.register(ObservingTool::new());
         let driver = Arc::new(ScriptedDriver::new(vec![
             vec![
                 assistant_response(),
                 tool_request("observe", json!({ "order": "first" })),
+                terminated_response(),
             ],
-            vec![assistant_response()],
+            vec![assistant_response(), terminated_response()],
         ]));
-        let mut registry = ToolRegistry::default();
-        registry.register(ObservingTool::new());
         let session = ConversationSession::create(
             FileEventStore::new(directory.clone()).expect("the store should be created"),
             Box::new(SharedScriptedDriver(Arc::clone(&driver))),
@@ -982,62 +1034,16 @@ mod tests {
             2,
             "the driver must be invoked again after the tool response"
         );
-        let facts = loaded_facts(&directory, conversation_id);
+        let events = loaded_events(&directory, conversation_id);
         assert_eq!(
-            facts
+            events
                 .iter()
-                .filter(|fact| matches!(
-                    fact,
-                    ConversationFact::Lifecycle(ConversationLifecycle::TurnCompleted { .. })
-                ))
+                .filter(|event| {
+                    matches!(event.event.payload(), ConversationEventPayload::TurnEnd(_))
+                })
                 .count(),
             1,
             "the turn must complete exactly once"
-        );
-        let assistant_positions = facts
-            .iter()
-            .enumerate()
-            .filter_map(|(position, fact)| {
-                matches!(
-                    fact,
-                    ConversationFact::Message {
-                        message: ConversationMessage::AssistantResponse { .. },
-                        ..
-                    }
-                )
-                .then_some(position)
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(assistant_positions.len(), 2);
-    }
-
-    #[tokio::test]
-    async fn a_turn_is_incomplete_when_the_final_invocation_has_no_response() {
-        let driver = Arc::new(ScriptedDriver::new(vec![
-            vec![
-                assistant_response(),
-                tool_request("observe", json!({ "order": "first" })),
-            ],
-            Vec::new(),
-        ]));
-        let mut registry = ToolRegistry::default();
-        registry.register(ObservingTool::new());
-        let session = ConversationSession::create(
-            FileEventStore::new(temporary_directory()).expect("the store should be created"),
-            Box::new(SharedScriptedDriver(Arc::clone(&driver))),
-            registry,
-        );
-        session
-            .add_user_request(user_content("keep going"))
-            .expect("the request should be recorded");
-
-        let error = session
-            .invoke(|_| Ok(()))
-            .await
-            .expect_err("the turn should need a response after the last tool round");
-        assert_eq!(
-            error.to_string(),
-            "the model driver ended without an assistant response or problem"
         );
     }
 
@@ -1045,8 +1051,11 @@ mod tests {
     async fn a_tool_execution_problem_is_returned_to_the_model_without_failing_the_turn() {
         let directory = temporary_directory();
         let driver = Arc::new(ScriptedDriver::new(vec![
-            vec![tool_request("missing", json!({ "command": "pwd" }))],
-            vec![assistant_response()],
+            vec![
+                tool_request("missing", json!({ "command": "pwd" })),
+                terminated_response(),
+            ],
+            vec![assistant_response(), terminated_response()],
         ]));
         let session = ConversationSession::create(
             FileEventStore::new(directory.clone()).expect("the store should be created"),
@@ -1072,30 +1081,32 @@ mod tests {
             .expect("the invocation list should lock");
         assert!(invocations[1].tool_responses.iter().any(|outcome| matches!(
             outcome,
-            ToolOutcome::Problem { problem }
-                if problem.kind() == ToolExecutionProblemKind::UnknownTool
-                    && problem.message() == "unknown tool: missing"
-                    && problem.details().is_none()
+            ToolOutcome::Failed { failure }
+                if failure.category() == FailureCategory::UnknownTool
+                    && failure.message() == "unknown tool: missing"
+                    && failure.details().is_none()
         )));
         drop(invocations);
-
-        let facts = loaded_facts(&directory, conversation_id);
-        let request_call_id = facts
+        let events = loaded_events(&directory, conversation_id);
+        let tool_request = events
             .iter()
-            .find_map(|fact| match fact {
-                ConversationFact::ToolRequest { request, .. } => Some(request.call_id()),
+            .find_map(|event| match event.event.payload() {
+                ConversationEventPayload::ToolRequest(request) => {
+                    Some((event.event.id(), request.clone()))
+                }
                 _ => None,
             })
             .expect("the tool request should be persisted");
-        let response_call_id = facts
+        let tool_response = events
             .iter()
-            .find_map(|fact| match fact {
-                ConversationFact::ToolResponse { response, .. } => Some(response.call_id()),
+            .find_map(|event| match event.event.payload() {
+                ConversationEventPayload::ToolResponse(response) => Some(response.clone()),
                 _ => None,
             })
             .expect("the tool response should be persisted");
         assert_eq!(
-            response_call_id, request_call_id,
+            tool_response.tool_request_id(),
+            tool_request.0,
             "the problem response must stay correlated to its request"
         );
     }
@@ -1104,12 +1115,16 @@ mod tests {
     async fn reaching_the_tool_continuation_limit_is_reported_explicitly() {
         let directory = temporary_directory();
         let script = (0..MAXIMUM_TOOL_CONTINUATION_ROUNDS)
-            .map(|round| vec![tool_request("missing", json!({ "round": round }))])
+            .map(|round| {
+                vec![
+                    tool_request("missing", json!({ "round": round })),
+                    terminated_response(),
+                ]
+            })
             .collect();
-        let driver = Arc::new(ScriptedDriver::new(script));
         let session = ConversationSession::create(
             FileEventStore::new(directory.clone()).expect("the store should be created"),
-            Box::new(SharedScriptedDriver(Arc::clone(&driver))),
+            Box::new(ScriptedDriver::new(script)),
             ToolRegistry::default(),
         );
         let conversation_id = session.id();
@@ -1127,15 +1142,144 @@ mod tests {
                 "the tool continuation limit of {MAXIMUM_TOOL_CONTINUATION_ROUNDS} rounds was reached"
             )
         );
-        let facts = loaded_facts(&directory, conversation_id);
+        let events = loaded_events(&directory, conversation_id);
         assert!(matches!(
-            facts.last(),
-            Some(ConversationFact::Lifecycle(
-                ConversationLifecycle::TurnCompleted {
-                    outcome: TurnOutcome::Failed,
-                    ..
-                }
-            ))
+            events.last().map(|event| event.event.payload()),
+            Some(ConversationEventPayload::TurnEnd(turn_end))
+                if matches!(turn_end.outcome(), TurnOutcome::Failed { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn reopening_a_conversation_continues_without_new_input() {
+        let directory = temporary_directory();
+        let first_driver = Arc::new(ScriptedDriver::new(vec![vec![
+            assistant_response(),
+            terminated_response(),
+        ]]));
+        let session = ConversationSession::create(
+            FileEventStore::new(directory.clone()).expect("the store should be created"),
+            Box::new(SharedScriptedDriver(Arc::clone(&first_driver))),
+            ToolRegistry::default(),
+        );
+        let conversation_id = session.id();
+        session
+            .add_user_request(user_content("hello"))
+            .expect("the request should be recorded");
+        assert_eq!(
+            session
+                .invoke(|_| Ok(()))
+                .await
+                .expect("the first invocation should complete"),
+            TurnOutcome::Succeeded
+        );
+
+        let second_driver = Arc::new(ScriptedDriver::new(vec![vec![
+            assistant_response(),
+            terminated_response(),
+        ]]));
+        let reopened = ConversationSession::open(
+            conversation_id,
+            FileEventStore::new(directory.clone()).expect("the store should reopen"),
+            Box::new(SharedScriptedDriver(Arc::clone(&second_driver))),
+            ToolRegistry::default(),
+        )
+        .expect("the session should open");
+        assert_eq!(reopened.id(), conversation_id);
+        assert_eq!(
+            reopened
+                .invoke(|_| Ok(()))
+                .await
+                .expect("an invocation without new input should complete"),
+            TurnOutcome::Succeeded
+        );
+        assert_eq!(
+            second_driver
+                .invocations
+                .lock()
+                .expect("the invocation list should lock")[0]
+                .events
+                .iter()
+                .filter(|event| {
+                    matches!(event.event.payload(), ConversationEventPayload::User(_))
+                })
+                .count(),
+            1,
+            "the reopened session replays the committed user event"
+        );
+        let recorded = loaded_events(&directory.clone(), conversation_id);
+        let first_invocation = first_driver
+            .invocations
+            .lock()
+            .expect("the invocation list should lock");
+        let first_user = first_invocation[0]
+            .events
+            .iter()
+            .find(|event| matches!(event.event.payload(), ConversationEventPayload::User(_)))
+            .expect("the first session invoked with the user event");
+        let second_invocation = second_driver
+            .invocations
+            .lock()
+            .expect("the invocation list should lock");
+        let replayed_user = second_invocation[0]
+            .events
+            .iter()
+            .find(|event| matches!(event.event.payload(), ConversationEventPayload::User(_)))
+            .expect("the reopened session replayed the user event");
+        assert_eq!(
+            replayed_user.event.id(),
+            first_user.event.id(),
+            "the replayed event keeps its original identity"
+        );
+        assert!(
+            recorded
+                .iter()
+                .any(|event| event.event.id() == first_user.event.id())
+        );
+    }
+
+    #[tokio::test]
+    async fn the_second_invocation_depends_on_the_tool_requests_it_wait_for() {
+        let directory = temporary_directory();
+        let mut registry = ToolRegistry::default();
+        registry.register(ObservingTool::new());
+        let driver = Arc::new(ScriptedDriver::new(vec![
+            vec![
+                tool_request("observe", json!({ "order": "first" })),
+                terminated_response(),
+            ],
+            vec![assistant_response(), terminated_response()],
+        ]));
+        let session = ConversationSession::create(
+            FileEventStore::new(directory.clone()).expect("the store should be created"),
+            Box::new(SharedScriptedDriver(Arc::clone(&driver))),
+            registry,
+        );
+        let conversation_id = session.id();
+        session
+            .add_user_request(user_content("run it"))
+            .expect("the request should be recorded");
+        session
+            .invoke(|_| Ok(()))
+            .await
+            .expect("the tool turn should complete");
+
+        let events = loaded_events(&directory, conversation_id);
+        let tool_request_id = events
+            .iter()
+            .find_map(|event| match event.event.payload() {
+                ConversationEventPayload::ToolRequest(_) => Some(event.event.id()),
+                _ => None,
+            })
+            .expect("the tool request should be recorded");
+        let second_model_request = events
+            .iter()
+            .filter_map(|event| match event.event.payload() {
+                ConversationEventPayload::ModelRequest(request) => Some(request.clone()),
+                _ => None,
+            })
+            .next_back()
+            .expect("the second model request should be recorded");
+        assert_eq!(second_model_request.depends_on(), &[tool_request_id]);
     }
 }

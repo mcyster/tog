@@ -22,7 +22,7 @@ The root [`AGENTS.md`](../AGENTS.md) translates these standards into concise ins
 - Keep provider-neutral contracts independent of concrete integrations; integrations depend on contracts, never the reverse.
 - Classify values by lifetime before designing an interface: stable values belong to the object, per-operation values are parameters, derived values are not passed twice, and produced values are returned.
 - Prefer direct parameters and return values. Introduce input structs, result wrappers, callbacks, sinks, channels, or streams only when a concrete current requirement justifies them.
-- Prefer concrete implementations until multiple implementations create a demonstrated need for abstraction.
+- Use traits when an independently readable contract provides value. Multiple implementations are not required; keep concrete state and behavior behind the contract.
 - Do not use unsafe Rust.
 
 ## Conventional Solutions
@@ -58,6 +58,32 @@ The root [`AGENTS.md`](../AGENTS.md) translates these standards into concise ins
 - Record consequential architectural decisions in `docs/decisions/`.
 - Keep unfinished proposals in `docs/ideas.md` until they are accepted or removed.
 - Introduce a Cargo workspace only when the project has multiple independently useful packages.
+
+## Readable Contracts
+
+Present a concept's contract in its module entry point: trait signatures and the
+important struct, enum, identifier, and error declarations. Keep implementation
+bodies in private child modules under the corresponding module directory.
+Readers should be able to understand the concept before opening its mechanics.
+
+Move constructors, validation, conversions, formatting, and other `impl` blocks
+out of the contract file. Keep related implementations together by responsibility;
+do not create a file per trait implementation or collect unrelated identifiers
+and errors merely because they share a technical form.
+
+For example, `conversation/events.rs` declares the event, its identifier, record,
+and errors. Within `conversation/events/`, `event.rs` can implement the event and
+its identifier (including the identifier's `Display`), `error.rs` can implement
+the event error's `Display` and `Error`, and `record.rs` can implement the record.
+These filenames illustrate responsibilities, not a mandatory file taxonomy.
+
+Keep a concept's identifiers and supporting declarations alongside that concept.
+Child modules can implement parent-declared types without widening field
+visibility or adding forwarding methods. Structs and enums already describe
+data contracts; they do not need an extra trait just to separate their bodies.
+
+Prefer clarity over indirection. Evaluate each split by whether it improves
+understanding; avoid replacing a long file with excessive navigation.
 
 ## Design Revision
 

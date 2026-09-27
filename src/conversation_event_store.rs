@@ -1,6 +1,7 @@
 mod error;
 mod file_event_store;
 mod log;
+mod record;
 #[cfg(test)]
 mod tests;
 
@@ -8,8 +9,17 @@ pub(crate) use file_event_store::FileEventStore;
 
 use std::io;
 
-use crate::conversation::ConversationId;
-use crate::conversation_event::{ConversationEvent, ConversationEventRecord};
+use serde::{Deserialize, Serialize};
+
+use crate::conversation::{ConversationEvent, ConversationId};
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub(crate) struct ConversationEventRecord {
+    pub(crate) position: u64,
+    pub(crate) schema_version: u32,
+    #[serde(flatten)]
+    pub(crate) event: ConversationEvent,
+}
 
 pub(crate) trait ConversationEventStore {
     fn load(

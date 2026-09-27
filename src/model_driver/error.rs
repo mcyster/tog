@@ -6,17 +6,17 @@ use super::{EmptyModelDriverOutputBatch, ModelDriverError};
 impl Display for ModelDriverError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::UnassociatedUserMessage => write!(
+            Self::UnexpectedModelRequestReference { expected, found } => write!(
                 formatter,
-                "model driver emitted a user message without a request association"
+                "model driver produced a model event for model request {found}, expected {expected}"
             ),
-            Self::UnexpectedUserRequest { command_id } => write!(
+            Self::TerminalResponseNotAlone { model_request_id } => write!(
                 formatter,
-                "model driver accepted unexpected user request {command_id}"
+                "the terminal model response for {model_request_id} must be the only output in its batch"
             ),
-            Self::IncompleteTurn => write!(
+            Self::OutputAfterTerminalResponse { model_request_id } => write!(
                 formatter,
-                "the model driver ended without an assistant response or problem"
+                "model driver produced output after the terminal model response for {model_request_id}"
             ),
         }
     }
