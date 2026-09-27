@@ -37,10 +37,17 @@ separate model-request, tool-request, or turn identifier types. References use
 descriptive fields: `model_request_id`, `tool_request_id`, `turn_id`.
 `ConversationId` remains distinct.
 
-`ConversationEventRecord` is only a persistence envelope: conversation ID, event
-ID, position, timestamp, schema version, and event. It introduces no second rich
-event hierarchy; serialization and transaction framing stay persistence
-concerns.
+A complete `ConversationEvent` owns its `ConversationEventId`, `ConversationId`,
+timestamp, and `ConversationEventContent` (the payload vocabulary above). Event
+construction assigns the ID and timestamp and receives the conversation ID;
+storage preserves these values and assigns only the record position. Cross-event
+references use the complete event's ID.
+
+`ConversationEventRecord` is a storage record: position, schema version, and the
+complete event. It lives with the event-store contract (`conversation_event_store`)
+and is a store return type; the store assigns positions, retains validation that
+appended events belong to the requested conversation, and restores identity and
+timestamp on load.
 
 ## Model relationship
 
@@ -90,14 +97,16 @@ for native replay; other drivers ignore them.
   `User` its `TurnStart` references; `TurnStart.user_id` records that trigger.
   `TurnStart` records actual start and never substitutes for the queued intent.
   Delivery to a model is bounded by each `ModelRequest.input_through`.
-- **Toolset.** Tool availability is a shared concept; a `Toolset` event is a
-  complete replacement toolset persisted with its full tool definitions. Each
-  entry pairs a definition with an availability policy (`immediate` or
-  `discoverable`). An empty toolset clears tools, and the effective toolset is
-  derived from the latest declaration within an invocation's history boundary.
-  The session emits a toolset only when the effective toolset would change.
-  Discovery and fallback for drivers without discovery remain unsettled and are
-  not implemented.
+- **Toolset.** Tool availability is a shared concept; a `Toolset` event
+  (`ConversationEventContent::Toolset(ToolsetDeclared)`) is a complete
+  replacement toolset persisted with its full tool definitions. Each entry pairs
+  a definition with an availability policy (`immediate` or `discoverable`). An
+  empty toolset clears tools, and the effective toolset is derived from the
+  latest declaration within an invocation's history boundary. The session emits
+  a toolset only when the effective toolset would change. The `Toolset` domain
+  type stays independent in `src/toolset.rs`; `ToolsetDeclared` declares the
+  effective toolset inside a conversation. Discovery and fallback for drivers
+  without discovery remain unsettled and are not implemented.
 - **Context.** Other conversation-associated values use typed context: a
   `Context` holds a resolved type identifier, a name (defaulting to the type),
   and a JSON value. The latest context event under a name replaces the effective

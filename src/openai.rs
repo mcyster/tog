@@ -12,11 +12,12 @@ use schemars::Schema;
 use serde_json::{Map, Value, json};
 
 use crate::conversation::{
-    AssistantResponse, ConversationEvent, ConversationEventId, ConversationEventRecord,
-    FailureCategory, InvalidAssistantResponse, InvalidModelResponse, InvalidModelSpecificEvent,
-    InvalidToolRequest, ModelData, ModelId, ModelOutcome, ModelResponse, ModelSource,
-    ModelSpecificEvent, OperationFailure, ProviderId, ToolRequest, Usage, UserContent,
+    AssistantResponse, ConversationEventContent, ConversationEventId, FailureCategory,
+    InvalidAssistantResponse, InvalidModelResponse, InvalidModelSpecificEvent, InvalidToolRequest,
+    ModelData, ModelId, ModelOutcome, ModelResponse, ModelSource, ModelSpecificEvent,
+    OperationFailure, ProviderId, ToolRequest, Usage, UserContent,
 };
+use crate::conversation_event_store::ConversationEventRecord;
 use crate::model_driver::{
     ModelDriver, ModelDriverError, ModelDriverOutput, ModelDriverOutputBatch, ModelOutputStream,
     TurnInput,
@@ -222,38 +223,38 @@ fn semantic_input(events: &[ConversationEventRecord]) -> Value {
     let provider_call_ids = provider_tool_call_ids(events);
     let input = events
         .iter()
-        .filter_map(|conversation_event| match &conversation_event.event {
-            ConversationEvent::User(user) => {
-                let text = user
-                    .content()
-                    .iter()
-                    .map(|content| match content {
-                        UserContent::Text(text) => text.as_str(),
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                Some(json!({ "role": "user", "content": text }))
-            }
-            ConversationEvent::AssistantResponse(response) => {
-                Some(json!({ "role": "assistant", "content": response.content() }))
-            }
-            ConversationEvent::ToolRequest(request) => Some(provider_tool_request_input(
-                conversation_event,
-                request,
-                &provider_call_ids,
-            )),
-            ConversationEvent::ToolResponse(response) => {
-                Some(provider_tool_response_input(response, &provider_call_ids))
-            }
-            ConversationEvent::TurnStart(_)
-            | ConversationEvent::TurnEnd(_)
-            | ConversationEvent::ModelRequest(_)
-            | ConversationEvent::ModelResponse(_)
-            | ConversationEvent::ModelSpecificEvent(_)
-            | ConversationEvent::Automation(_)
-            | ConversationEvent::Context(_)
-            | ConversationEvent::Toolset(_) => None,
-        })
+        .filter_map(
+            |conversation_event| match conversation_event.event.content() {
+                ConversationEventContent::User(user) => {
+                    let text = user
+                        .content()
+                        .iter()
+                        .map(|content| match content {
+                            UserContent::Text(text) => text.as_str(),
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    Some(json!({ "role": "user", "content": text }))
+                }
+                ConversationEventContent::AssistantResponse(response) => {
+                    Some(json!({ "role": "assistant", "content": response.content() }))
+                }
+                ConversationEventContent::ToolRequest(request) => Some(
+                    provider_tool_request_input(conversation_event, request, &provider_call_ids),
+                ),
+                ConversationEventContent::ToolResponse(response) => {
+                    Some(provider_tool_response_input(response, &provider_call_ids))
+                }
+                ConversationEventContent::TurnStart(_)
+                | ConversationEventContent::TurnEnd(_)
+                | ConversationEventContent::ModelRequest(_)
+                | ConversationEventContent::ModelResponse(_)
+                | ConversationEventContent::ModelSpecificEvent(_)
+                | ConversationEventContent::Automation(_)
+                | ConversationEventContent::Context(_)
+                | ConversationEventContent::Toolset(_) => None,
+            },
+        )
         .collect::<Vec<_>>();
     Value::Array(input)
 }
@@ -280,12 +281,15 @@ fn provider_tool_call_ids(
 ) -> HashMap<ConversationEventId, String> {
     events
         .iter()
-        .filter_map(|conversation_event| match &conversation_event.event {
-            ConversationEvent::ToolRequest(request) => {
-                Some((conversation_event.id, provider_tool_call_id(request)))
-            }
-            _ => None,
-        })
+        .filter_map(
+            |conversation_event| match conversation_event.event.content() {
+                ConversationEventContent::ToolRequest(request) => Some((
+                    conversation_event.event.id(),
+                    provider_tool_call_id(request),
+                )),
+                _ => None,
+            },
+        )
         .collect()
 }
 
@@ -304,9 +308,9 @@ fn provider_tool_request_input(
     provider_call_ids: &HashMap<ConversationEventId, String>,
 ) -> Value {
     let call_id = provider_call_ids
-        .get(&conversation_event.id)
+        .get(&conversation_event.event.id())
         .cloned()
-        .unwrap_or_else(|| conversation_event.id.to_string());
+        .unwrap_or_else(|| conversation_event.event.id().to_string());
     json!({
         "type": "function_call",
         "call_id": call_id,
@@ -1589,14 +1593,14 @@ mod tests {
     use futures_util::{StreamExt, stream};
     use reqwest::StatusCode;
     use serde_json::{Map, Value, json};
-    use time::OffsetDateTime;
 
     use crate::conversation::{
-        AssistantResponse, Conversation, ConversationEvent, ConversationEventId,
-        ConversationEventRecord, ConversationHistory, ConversationId, FailureCategory, ModelData,
+        AssistantResponse, Conversation, ConversationEvent, ConversationEventContent,
+        ConversationEventId, ConversationHistory, ConversationId, FailureCategory, ModelData,
         ModelId, ModelOutcome, ModelRequest, ModelSource, ModelSpecificEvent, ProviderId,
         ToolOutcome, ToolRequest, ToolResponse, TurnStart, User, UserContent,
     };
+    use crate::conversation_event_store::ConversationEventRecord;
     use crate::model_driver::{ModelDriver, ModelDriverOutput, ModelOutputStream, TurnInput};
     use crate::toolset::{ToolDefinition, ToolName};
 
@@ -1608,16 +1612,9 @@ mod tests {
     fn conversation_event(
         conversation_id: ConversationId,
         position: u64,
-        event: ConversationEvent,
+        content: ConversationEventContent,
     ) -> ConversationEventRecord {
-        ConversationEventRecord {
-            conversation_id,
-            position,
-            id: ConversationEventId::new(),
-            timestamp: OffsetDateTime::UNIX_EPOCH,
-            schema_version: 13,
-            event,
-        }
+        ConversationEventRecord::new(position, ConversationEvent::new(conversation_id, content))
     }
 
     fn user_event(
@@ -1628,7 +1625,7 @@ mod tests {
         conversation_event(
             conversation_id,
             position,
-            ConversationEvent::User(
+            ConversationEventContent::User(
                 User::new(vec![UserContent::Text(text.to_owned())])
                     .expect("the user event should be valid"),
             ),
@@ -1641,13 +1638,13 @@ mod tests {
         let turn_start = conversation_event(
             conversation_id,
             1,
-            ConversationEvent::TurnStart(TurnStart::new(None, 0)),
+            ConversationEventContent::TurnStart(TurnStart::new(None, 0)),
         );
         let model_request = conversation_event(
             conversation_id,
             2,
-            ConversationEvent::ModelRequest(
-                ModelRequest::new(turn_start.id, source(), 1, Vec::new(), None, None)
+            ConversationEventContent::ModelRequest(
+                ModelRequest::new(turn_start.event.id(), source(), 1, Vec::new(), None, None)
                     .expect("the model request should be valid"),
             ),
         );
@@ -1658,7 +1655,7 @@ mod tests {
     fn semantic_input_projects_canonical_events_and_ignores_auxiliary_records() {
         let conversation_id = ConversationId::new();
         let (turn_start, model_request) = turn_and_request(conversation_id);
-        let request_id = model_request.id;
+        let request_id = model_request.event.id();
         let reasoning = ModelSpecificEvent::new(
             request_id,
             "reasoning".to_owned(),
@@ -1676,12 +1673,12 @@ mod tests {
             conversation_event(
                 conversation_id,
                 3,
-                ConversationEvent::ModelSpecificEvent(reasoning),
+                ConversationEventContent::ModelSpecificEvent(reasoning),
             ),
             conversation_event(
                 conversation_id,
                 4,
-                ConversationEvent::AssistantResponse(assistant),
+                ConversationEventContent::AssistantResponse(assistant),
             ),
         ])
         .expect("the conversation should be valid");
@@ -1735,7 +1732,7 @@ mod tests {
     fn semantic_input_reconstructs_tool_requests_and_responses() {
         let conversation_id = ConversationId::new();
         let (turn_start, model_request) = turn_and_request(conversation_id);
-        let request_id = model_request.id;
+        let request_id = model_request.event.id();
         let model_data = ModelData::new(Map::from_iter([(
             "call_id".to_owned(),
             Value::String("call_native".to_owned()),
@@ -1748,13 +1745,16 @@ mod tests {
             Some(model_data),
         )
         .expect("the tool request should be valid");
-        let tool_request_record =
-            conversation_event(conversation_id, 3, ConversationEvent::ToolRequest(request));
-        let tool_request_id = tool_request_record.id;
+        let tool_request_record = conversation_event(
+            conversation_id,
+            3,
+            ConversationEventContent::ToolRequest(request),
+        );
+        let tool_request_id = tool_request_record.event.id();
         let response_record = conversation_event(
             conversation_id,
             4,
-            ConversationEvent::ToolResponse(ToolResponse::new(
+            ConversationEventContent::ToolResponse(ToolResponse::new(
                 tool_request_id,
                 ToolOutcome::succeeded(json!({ "stdout": "/tmp\n" })),
             )),

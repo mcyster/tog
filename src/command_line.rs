@@ -6,10 +6,12 @@ use std::io::{self, Write};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use crate::conversation::{
-    ConversationEvent, ConversationEventRecord, ConversationId, ModelId, ModelOutcome, TurnOutcome,
-    UserContent,
+    ConversationEvent, ConversationEventContent, ConversationId, ModelId, ModelOutcome,
+    TurnOutcome, UserContent,
 };
-use crate::conversation_event_store::{ConversationEventStore, FileEventStore};
+use crate::conversation_event_store::{
+    ConversationEventRecord, ConversationEventStore, FileEventStore,
+};
 use crate::conversation_session::{
     ConversationSession, ConversationSessionProgress, ConversationSessionResult,
 };
@@ -115,12 +117,16 @@ fn write_conversation_log(
 }
 
 fn render_model_event(event: &ConversationEvent, verbosity: Verbosity) -> io::Result<()> {
-    let message = match event {
-        ConversationEvent::AssistantResponse(response) => Some(response.content().to_owned()),
-        ConversationEvent::ModelSpecificEvent(event) if verbosity.shows_auxiliary_messages() => {
+    let message = match event.content() {
+        ConversationEventContent::AssistantResponse(response) => {
+            Some(response.content().to_owned())
+        }
+        ConversationEventContent::ModelSpecificEvent(event)
+            if verbosity.shows_auxiliary_messages() =>
+        {
             event.message().map(|message| format!("### {message}"))
         }
-        ConversationEvent::ModelResponse(response) => match response.outcome() {
+        ConversationEventContent::ModelResponse(response) => match response.outcome() {
             ModelOutcome::Failed { failure } => Some(format!("### {}", failure.message())),
             ModelOutcome::Succeeded => None,
         },

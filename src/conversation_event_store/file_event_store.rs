@@ -5,10 +5,10 @@ use std::path::{Path, PathBuf};
 
 use super::log;
 use super::{
-    ConversationEventStore, ConversationStoreAppendError, ConversationStoreError,
-    ConversationStoreLoadError,
+    ConversationEventRecord, ConversationEventStore, ConversationStoreAppendError,
+    ConversationStoreError, ConversationStoreLoadError,
 };
-use crate::conversation::{ConversationEvent, ConversationEventRecord, ConversationId};
+use crate::conversation::{ConversationEvent, ConversationId};
 
 const CONVERSATIONS_DIRECTORY_NAME: &str = "conversations";
 
@@ -73,12 +73,12 @@ impl ConversationEventStore for FileEventStore {
             };
             if latest_event
                 .as_ref()
-                .is_none_or(|current| last_event.timestamp > current.timestamp)
+                .is_none_or(|current| last_event.event.timestamp() > current.event.timestamp())
             {
                 latest_event = Some(last_event);
             }
         }
-        Ok(latest_event.map(|event| event.conversation_id))
+        Ok(latest_event.map(|event| event.event.conversation_id()))
     }
 
     fn append(
@@ -97,7 +97,7 @@ impl ConversationEventStore for FileEventStore {
             .map(|log| log.events.as_slice())
             .unwrap_or_default();
         let previous_position = validate_existing_events(conversation_id, existing_events)?;
-        let batch = build_event_batch(conversation_id, previous_position, events)?;
+        let batch = build_event_batch(previous_position, events)?;
         commit_batch(&conversation_directory, existing_log, &batch)?;
         Ok(batch)
     }
@@ -136,7 +136,7 @@ fn ensure_records_belong_to(
     events: &[ConversationEventRecord],
 ) -> Result<(), ConversationStoreError> {
     for event in events {
-        if event.conversation_id != conversation_id {
+        if event.event.conversation_id() != conversation_id {
             return Err(ConversationStoreError::CorruptData);
         }
     }
@@ -144,7 +144,6 @@ fn ensure_records_belong_to(
 }
 
 fn build_event_batch(
-    conversation_id: ConversationId,
     previous_position: Option<u64>,
     events: Vec<ConversationEvent>,
 ) -> io::Result<Vec<ConversationEventRecord>> {
@@ -156,11 +155,7 @@ fn build_event_batch(
             let position = first_position
                 .checked_add(u64::try_from(offset).map_err(io::Error::other)?)
                 .ok_or_else(|| io::Error::other("event position overflow"))?;
-            Ok(ConversationEventRecord::new(
-                conversation_id,
-                position,
-                event,
-            ))
+            Ok(ConversationEventRecord::new(position, event))
         })
         .collect()
 }

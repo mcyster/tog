@@ -4,19 +4,19 @@ mod error;
 mod event;
 mod failure;
 mod model;
-mod record;
 #[cfg(test)]
 mod tests;
 mod tool_response;
+mod toolset;
 mod turn_end;
 mod turn_start;
 mod user;
 
 use serde::{Deserialize, Serialize};
+use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::conversation::ConversationId;
-use crate::toolset::Toolset;
 
 pub(crate) use automation::{Automation, InvalidAutomation};
 pub(crate) use context::{Context, InvalidContext};
@@ -27,6 +27,7 @@ pub(crate) use model::{
     ModelRequest, ModelResponse, ModelSource, ModelSpecificEvent, ProviderId, ToolRequest, Usage,
 };
 pub(crate) use tool_response::{InvalidToolOutcome, ToolOutcome, ToolResponse};
+pub(crate) use toolset::ToolsetDeclared;
 pub(crate) use turn_end::{InvalidTurnOutcome, TurnEnd, TurnOutcome};
 pub(crate) use turn_start::TurnStart;
 pub(crate) use user::{InvalidUser, User, UserContent};
@@ -36,8 +37,18 @@ pub(crate) use user::{InvalidUser, User, UserContent};
 pub(crate) struct ConversationEventId(Uuid);
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub(crate) struct ConversationEvent {
+    id: ConversationEventId,
+    conversation_id: ConversationId,
+    #[serde(with = "time::serde::rfc3339")]
+    timestamp: OffsetDateTime,
+    #[serde(flatten)]
+    content: ConversationEventContent,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub(crate) enum ConversationEvent {
+pub(crate) enum ConversationEventContent {
     User(User),
     TurnStart(TurnStart),
     TurnEnd(TurnEnd),
@@ -49,19 +60,7 @@ pub(crate) enum ConversationEvent {
     ModelSpecificEvent(ModelSpecificEvent),
     Automation(Automation),
     Context(Context),
-    Toolset(Toolset),
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub(crate) struct ConversationEventRecord {
-    pub(crate) conversation_id: ConversationId,
-    pub(crate) position: u64,
-    pub(crate) id: ConversationEventId,
-    #[serde(with = "time::serde::rfc3339")]
-    pub(crate) timestamp: time::OffsetDateTime,
-    pub(crate) schema_version: u32,
-    #[serde(flatten)]
-    pub(crate) event: ConversationEvent,
+    Toolset(ToolsetDeclared),
 }
 
 #[derive(Debug, Eq, PartialEq)]

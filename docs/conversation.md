@@ -212,6 +212,13 @@ such as `model_request_id`, `tool_request_id`, and `turn_id` state what a
 reference points to. A `ConversationId` remains distinct because it identifies
 the conversation.
 
+A complete `ConversationEvent` owns its ID, conversation ID, timestamp, and
+content. Event construction assigns the ID and timestamp and receives the
+conversation ID; the store preserves them, assigns the record position, and
+restores the original identity and timestamp on load. The storage record holds
+only a position, a schema version, and the complete event, and lives with the
+event-store contract.
+
 Each conversation event also has a monotonically increasing stream position. Identity, order, and semantic relationships serve different purposes:
 
 - the conversation ID identifies the conversation to which the event belongs

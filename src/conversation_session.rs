@@ -5,9 +5,10 @@ use std::fmt::{Display, Formatter};
 use futures_util::StreamExt;
 
 use crate::conversation::{
-    Conversation, ConversationEvent, ConversationEventId, ConversationHistory, ConversationId,
-    FailureCategory, ModelOutcome, ModelRequest, ModelResponse, OperationFailure, ToolResponse,
-    TurnEnd, TurnOutcome, TurnStart, User, latest_toolset,
+    Conversation, ConversationEvent, ConversationEventContent, ConversationEventId,
+    ConversationHistory, ConversationId, FailureCategory, ModelOutcome, ModelRequest,
+    ModelResponse, OperationFailure, ToolResponse, ToolsetDeclared, TurnEnd, TurnOutcome,
+    TurnStart, User, UserContent, latest_toolset,
 };
 use crate::conversation_event_store::ConversationEventStore;
 use crate::model_driver::{ModelDriver, ModelDriverError, ModelDriverOutput, TurnInput};
@@ -65,13 +66,14 @@ impl<Store: ConversationEventStore> ConversationSession<Store> {
 
     pub(crate) fn add_user_request(
         &self,
-        content: Vec<crate::conversation::UserContent>,
+        content: Vec<UserContent>,
     ) -> ConversationSessionResult<ConversationEventId> {
         let user = User::new(content).map_err(Box::new)?;
-        let records = self
-            .event_store
-            .append(self.conversation_id, vec![ConversationEvent::User(user)])?;
-        Ok(records[0].id)
+        let records = self.event_store.append(
+            self.conversation_id,
+            vec![self.complete_event(ConversationEventContent::User(user))],
+        )?;
+        Ok(records[0].event().id())
     }
 
     pub(crate) async fn invoke(
@@ -83,12 +85,14 @@ impl<Store: ConversationEventStore> ConversationSession<Store> {
         let input_through = last_position(&conversation);
         let turn_records = self.event_store.append(
             self.conversation_id,
-            vec![ConversationEvent::TurnStart(TurnStart::new(
-                trigger_user_id,
-                input_through,
-            ))],
+            vec![
+                self.complete_event(ConversationEventContent::TurnStart(TurnStart::new(
+                    trigger_user_id,
+                    input_through,
+                ))),
+            ],
         )?;
-        let turn_id = turn_records[0].id;
+        let turn_id = turn_records[0].event().id();
 
         let mut depends_on = Vec::new();
         let mut completed_tool_rounds = 0_u32;
@@ -104,7 +108,9 @@ impl<Store: ConversationEventStore> ConversationSession<Store> {
             if should_emit_toolset {
                 self.event_store.append(
                     self.conversation_id,
-                    vec![ConversationEvent::Toolset(desired_toolset)],
+                    vec![self.complete_event(ConversationEventContent::Toolset(
+                        ToolsetDeclared::new(desired_toolset),
+                    ))],
                 )?;
             }
             let conversation = self.load()?;
@@ -112,19 +118,21 @@ impl<Store: ConversationEventStore> ConversationSession<Store> {
             let source = self.model_driver.source().clone();
             let request_records = self.event_store.append(
                 self.conversation_id,
-                vec![ConversationEvent::ModelRequest(
-                    ModelRequest::new(
-                        turn_id,
-                        source.clone(),
-                        input_through,
-                        std::mem::take(&mut depends_on),
-                        None,
-                        None,
-                    )
-                    .map_err(Box::new)?,
-                )],
+                vec![
+                    self.complete_event(ConversationEventContent::ModelRequest(
+                        ModelRequest::new(
+                            turn_id,
+                            source.clone(),
+                            input_through,
+                            std::mem::take(&mut depends_on),
+                            None,
+                            None,
+                        )
+                        .map_err(Box::new)?,
+                    )),
+                ],
             )?;
-            let model_request_id = request_records[0].id;
+            let model_request_id = request_records[0].event().id();
             let turn_input = TurnInput::new(&conversation, model_request_id, input_through);
             report_progress(ConversationSessionProgress::InvocationStarted {
                 model: source.model().as_str().to_owned(),
@@ -161,12 +169,14 @@ impl<Store: ConversationEventStore> ConversationSession<Store> {
                         driver_response.usage().cloned(),
                     )
                     .map_err(Box::new)?;
-                    self.event_store.append(
+                    let records = self.event_store.append(
                         self.conversation_id,
-                        vec![ConversationEvent::ModelResponse(response.clone())],
+                        vec![self.complete_event(ConversationEventContent::ModelResponse(
+                            response.clone(),
+                        ))],
                     )?;
                     report_progress(ConversationSessionProgress::EventCompleted {
-                        event: ConversationEvent::ModelResponse(response.clone()),
+                        event: records[0].event().clone(),
                     })?;
                     terminal_response = Some(response);
                     continue;
@@ -177,40 +187,46 @@ impl<Store: ConversationEventStore> ConversationSession<Store> {
                     match output {
                         ModelDriverOutput::AssistantResponse(response) => {
                             self.ensure_request_reference(&response, model_request_id)?;
-                            events.push(ConversationEvent::AssistantResponse(response));
+                            events.push(ConversationEventContent::AssistantResponse(response));
                         }
                         ModelDriverOutput::ToolRequest(request) => {
                             self.ensure_request_reference(&request, model_request_id)?;
-                            events.push(ConversationEvent::ToolRequest(request));
+                            events.push(ConversationEventContent::ToolRequest(request));
                         }
                         ModelDriverOutput::ModelSpecificEvent(event) => {
                             self.ensure_request_reference(&event, model_request_id)?;
-                            events.push(ConversationEvent::ModelSpecificEvent(event));
+                            events.push(ConversationEventContent::ModelSpecificEvent(event));
                         }
                         ModelDriverOutput::ModelResponse(_) => {
                             unreachable!("terminal responses are handled as the sole batch output")
                         }
                     }
                 }
-                let records = self.event_store.append(self.conversation_id, events)?;
+                let records = self.event_store.append(
+                    self.conversation_id,
+                    events
+                        .into_iter()
+                        .map(|content| self.complete_event(content))
+                        .collect(),
+                )?;
                 for record in &records {
-                    match &record.event {
-                        ConversationEvent::AssistantResponse(_) => {
-                            outputs_for_request.push(record.id);
+                    match record.event().content() {
+                        ConversationEventContent::AssistantResponse(_) => {
+                            outputs_for_request.push(record.event().id());
                             report_progress(ConversationSessionProgress::EventCompleted {
-                                event: record.event.clone(),
+                                event: record.event().clone(),
                             })?;
                         }
-                        ConversationEvent::ToolRequest(request) => {
-                            outputs_for_request.push(record.id);
-                            tool_requests.push((record.id, request.clone()));
+                        ConversationEventContent::ToolRequest(request) => {
+                            outputs_for_request.push(record.event().id());
+                            tool_requests.push((record.event().id(), request.clone()));
                             report_progress(ConversationSessionProgress::EventCompleted {
-                                event: record.event.clone(),
+                                event: record.event().clone(),
                             })?;
                         }
-                        ConversationEvent::ModelSpecificEvent(_) => {
+                        ConversationEventContent::ModelSpecificEvent(_) => {
                             report_progress(ConversationSessionProgress::EventCompleted {
-                                event: record.event.clone(),
+                                event: record.event().clone(),
                             })?;
                         }
                         _ => {}
@@ -235,12 +251,14 @@ impl<Store: ConversationEventStore> ConversationSession<Store> {
                         None,
                     )
                     .map_err(Box::new)?;
-                    self.event_store.append(
+                    let records = self.event_store.append(
                         self.conversation_id,
-                        vec![ConversationEvent::ModelResponse(response.clone())],
+                        vec![self.complete_event(ConversationEventContent::ModelResponse(
+                            response.clone(),
+                        ))],
                     )?;
                     report_progress(ConversationSessionProgress::EventCompleted {
-                        event: ConversationEvent::ModelResponse(response.clone()),
+                        event: records[0].event().clone(),
                     })?;
                     response
                 }
@@ -262,9 +280,9 @@ impl<Store: ConversationEventStore> ConversationSession<Store> {
                 };
                 self.event_store.append(
                     self.conversation_id,
-                    vec![ConversationEvent::TurnEnd(
+                    vec![self.complete_event(ConversationEventContent::TurnEnd(
                         TurnEnd::new(turn_id, outcome.clone()).map_err(Box::new)?,
-                    )],
+                    ))],
                 )?;
                 return Ok(outcome);
             }
@@ -273,9 +291,8 @@ impl<Store: ConversationEventStore> ConversationSession<Store> {
                 let outcome = self.tool_registry.execute(request).await;
                 self.event_store.append(
                     self.conversation_id,
-                    vec![ConversationEvent::ToolResponse(ToolResponse::new(
-                        *tool_request_id,
-                        outcome,
+                    vec![self.complete_event(ConversationEventContent::ToolResponse(
+                        ToolResponse::new(*tool_request_id, outcome),
                     ))],
                 )?;
             }
@@ -293,9 +310,9 @@ impl<Store: ConversationEventStore> ConversationSession<Store> {
                 let outcome = TurnOutcome::Failed { failure };
                 self.event_store.append(
                     self.conversation_id,
-                    vec![ConversationEvent::TurnEnd(
+                    vec![self.complete_event(ConversationEventContent::TurnEnd(
                         TurnEnd::new(turn_id, outcome.clone()).map_err(Box::new)?,
-                    )],
+                    ))],
                 )?;
                 return Err(Box::new(
                     ConversationSessionError::ToolContinuationLimitReached {
@@ -310,6 +327,10 @@ impl<Store: ConversationEventStore> ConversationSession<Store> {
         Ok(ConversationHistory::from_events(
             self.event_store.load(self.conversation_id)?,
         )?)
+    }
+
+    fn complete_event(&self, content: ConversationEventContent) -> ConversationEvent {
+        ConversationEvent::new(self.conversation_id, content)
     }
 
     fn ensure_request_reference<T: crate::conversation::ModelEvent>(
@@ -333,7 +354,7 @@ impl<Store: ConversationEventStore> ConversationSession<Store> {
 fn pending_user_id(conversation: &ConversationHistory) -> Option<ConversationEventId> {
     let mut referenced_user_ids = HashSet::new();
     for event in conversation.events() {
-        if let ConversationEvent::TurnStart(turn_start) = &event.event
+        if let ConversationEventContent::TurnStart(turn_start) = event.event.content()
             && let Some(user_id) = turn_start.user_id()
         {
             referenced_user_ids.insert(user_id);
@@ -342,9 +363,11 @@ fn pending_user_id(conversation: &ConversationHistory) -> Option<ConversationEve
     conversation
         .events()
         .iter()
-        .find_map(|event| match &event.event {
-            ConversationEvent::User(_) if !referenced_user_ids.contains(&event.id) => {
-                Some(event.id)
+        .find_map(|event| match event.event.content() {
+            ConversationEventContent::User(_)
+                if !referenced_user_ids.contains(&event.event.id()) =>
+            {
+                Some(event.event.id())
             }
             _ => None,
         })
@@ -375,7 +398,6 @@ impl Display for ConversationSessionError {
 }
 
 impl Error for ConversationSessionError {}
-
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
@@ -392,11 +414,13 @@ mod tests {
 
     use super::{ConversationSession, MAXIMUM_TOOL_CONTINUATION_ROUNDS};
     use crate::conversation::{
-        AssistantResponse, ConversationEvent, ConversationEventId, ConversationEventRecord,
-        FailureCategory, ModelId, ModelOutcome, ModelResponse, ModelSource, ModelSpecificEvent,
-        OperationFailure, ProviderId, ToolOutcome, ToolRequest, TurnOutcome, UserContent,
+        AssistantResponse, ConversationEventContent, ConversationEventId, FailureCategory, ModelId,
+        ModelOutcome, ModelResponse, ModelSource, ModelSpecificEvent, OperationFailure, ProviderId,
+        ToolOutcome, ToolRequest, TurnOutcome, UserContent,
     };
-    use crate::conversation_event_store::{ConversationEventStore, FileEventStore};
+    use crate::conversation_event_store::{
+        ConversationEventRecord, ConversationEventStore, FileEventStore,
+    };
     use crate::model_driver::{
         ModelDriver, ModelDriverError, ModelDriverOutput, ModelDriverOutputBatch,
         ModelOutputStream, TurnInput,
@@ -577,8 +601,10 @@ mod tests {
             let tool_responses = input
                 .events()
                 .iter()
-                .filter_map(|event| match &event.event {
-                    ConversationEvent::ToolResponse(response) => Some(response.outcome().clone()),
+                .filter_map(|event| match event.event.content() {
+                    ConversationEventContent::ToolResponse(response) => {
+                        Some(response.outcome().clone())
+                    }
                     _ => None,
                 })
                 .collect();
@@ -680,20 +706,20 @@ mod tests {
             .expect("the conversation should load")
     }
 
-    fn event_type(event: &ConversationEvent) -> &'static str {
+    fn event_type(event: &ConversationEventContent) -> &'static str {
         match event {
-            ConversationEvent::User(_) => "user",
-            ConversationEvent::TurnStart(_) => "turn_start",
-            ConversationEvent::TurnEnd(_) => "turn_end",
-            ConversationEvent::AssistantResponse(_) => "assistant_response",
-            ConversationEvent::ToolRequest(_) => "tool_request",
-            ConversationEvent::ToolResponse(_) => "tool_response",
-            ConversationEvent::ModelRequest(_) => "model_request",
-            ConversationEvent::ModelResponse(_) => "model_response",
-            ConversationEvent::ModelSpecificEvent(_) => "model_specific_event",
-            ConversationEvent::Automation(_) => "automation",
-            ConversationEvent::Context(_) => "context",
-            ConversationEvent::Toolset(_) => "toolset",
+            ConversationEventContent::User(_) => "user",
+            ConversationEventContent::TurnStart(_) => "turn_start",
+            ConversationEventContent::TurnEnd(_) => "turn_end",
+            ConversationEventContent::AssistantResponse(_) => "assistant_response",
+            ConversationEventContent::ToolRequest(_) => "tool_request",
+            ConversationEventContent::ToolResponse(_) => "tool_response",
+            ConversationEventContent::ModelRequest(_) => "model_request",
+            ConversationEventContent::ModelResponse(_) => "model_response",
+            ConversationEventContent::ModelSpecificEvent(_) => "model_specific_event",
+            ConversationEventContent::Automation(_) => "automation",
+            ConversationEventContent::Context(_) => "context",
+            ConversationEventContent::Toolset(_) => "toolset",
         }
     }
 
@@ -733,7 +759,7 @@ mod tests {
         );
         let event_types = loaded_events(&directory, conversation_id)
             .iter()
-            .map(|event| event_type(&event.event))
+            .map(|event| event_type(event.event.content()))
             .collect::<Vec<_>>();
         assert!(matches!(
             event_types.as_slice(),
@@ -773,8 +799,8 @@ mod tests {
         let events = loaded_events(&directory, conversation_id);
         let toolset = events
             .iter()
-            .find_map(|event| match &event.event {
-                ConversationEvent::Toolset(toolset) => Some(toolset),
+            .find_map(|event| match event.event.content() {
+                ConversationEventContent::Toolset(declared) => Some(declared.toolset()),
                 _ => None,
             })
             .expect("the toolset should be persisted");
@@ -834,15 +860,20 @@ mod tests {
         let events = loaded_events(&directory, conversation_id);
         let model_responses = events
             .iter()
-            .filter(|event| matches!(&event.event, ConversationEvent::ModelResponse(_)))
+            .filter(|event| {
+                matches!(
+                    event.event.content(),
+                    ConversationEventContent::ModelResponse(_)
+                )
+            })
             .count();
         assert_eq!(
             model_responses, 1,
             "the engine records one terminal response"
         );
         assert!(matches!(
-            events.last().map(|event| &event.event),
-            Some(ConversationEvent::TurnEnd(turn_end))
+            events.last().map(|event| event.event.content()),
+            Some(ConversationEventContent::TurnEnd(turn_end))
                 if matches!(turn_end.outcome(), TurnOutcome::Failed { .. })
         ));
     }
@@ -910,8 +941,8 @@ mod tests {
         drop(invocations);
         let events = loaded_events(&directory, conversation_id);
         assert!(events.iter().any(|event| matches!(
-            &event.event,
-            ConversationEvent::ToolResponse(response)
+            event.event.content(),
+            ConversationEventContent::ToolResponse(response)
                 if matches!(response.outcome(), ToolOutcome::Succeeded { value } if value["stdout"] == "hello")
         )));
     }
@@ -1010,7 +1041,9 @@ mod tests {
         assert_eq!(
             events
                 .iter()
-                .filter(|event| matches!(&event.event, ConversationEvent::TurnEnd(_)))
+                .filter(|event| {
+                    matches!(event.event.content(), ConversationEventContent::TurnEnd(_))
+                })
                 .count(),
             1,
             "the turn must complete exactly once"
@@ -1060,15 +1093,17 @@ mod tests {
         let events = loaded_events(&directory, conversation_id);
         let tool_request = events
             .iter()
-            .find_map(|event| match &event.event {
-                ConversationEvent::ToolRequest(request) => Some((event.id, request.clone())),
+            .find_map(|event| match event.event.content() {
+                ConversationEventContent::ToolRequest(request) => {
+                    Some((event.event.id(), request.clone()))
+                }
                 _ => None,
             })
             .expect("the tool request should be persisted");
         let tool_response = events
             .iter()
-            .find_map(|event| match &event.event {
-                ConversationEvent::ToolResponse(response) => Some(response.clone()),
+            .find_map(|event| match event.event.content() {
+                ConversationEventContent::ToolResponse(response) => Some(response.clone()),
                 _ => None,
             })
             .expect("the tool response should be persisted");
@@ -1112,8 +1147,8 @@ mod tests {
         );
         let events = loaded_events(&directory, conversation_id);
         assert!(matches!(
-            events.last().map(|event| &event.event),
-            Some(ConversationEvent::TurnEnd(turn_end))
+            events.last().map(|event| event.event.content()),
+            Some(ConversationEventContent::TurnEnd(turn_end))
                 if matches!(turn_end.outcome(), TurnOutcome::Failed { .. })
         ));
     }
@@ -1148,7 +1183,7 @@ mod tests {
         ]]));
         let reopened = ConversationSession::open(
             conversation_id,
-            FileEventStore::new(directory).expect("the store should reopen"),
+            FileEventStore::new(directory.clone()).expect("the store should reopen"),
             Box::new(SharedScriptedDriver(Arc::clone(&second_driver))),
             ToolRegistry::default(),
         )
@@ -1161,7 +1196,6 @@ mod tests {
                 .expect("an invocation without new input should complete"),
             TurnOutcome::Succeeded
         );
-
         assert_eq!(
             second_driver
                 .invocations
@@ -1169,22 +1203,41 @@ mod tests {
                 .expect("the invocation list should lock")[0]
                 .events
                 .iter()
-                .filter(|event| matches!(&event.event, ConversationEvent::User(_)))
+                .filter(|event| {
+                    matches!(event.event.content(), ConversationEventContent::User(_))
+                })
                 .count(),
             1,
             "the reopened session replays the committed user event"
         );
+        let recorded = loaded_events(&directory.clone(), conversation_id);
+        let first_invocation = first_driver
+            .invocations
+            .lock()
+            .expect("the invocation list should lock");
+        let first_user = first_invocation[0]
+            .events
+            .iter()
+            .find(|event| matches!(event.event.content(), ConversationEventContent::User(_)))
+            .expect("the first session invoked with the user event");
+        let second_invocation = second_driver
+            .invocations
+            .lock()
+            .expect("the invocation list should lock");
+        let replayed_user = second_invocation[0]
+            .events
+            .iter()
+            .find(|event| matches!(event.event.content(), ConversationEventContent::User(_)))
+            .expect("the reopened session replayed the user event");
         assert_eq!(
-            first_driver
-                .invocations
-                .lock()
-                .expect("the invocation list should lock")[0]
-                .events
+            replayed_user.event.id(),
+            first_user.event.id(),
+            "the replayed event keeps its original identity"
+        );
+        assert!(
+            recorded
                 .iter()
-                .filter(|event| matches!(&event.event, ConversationEvent::User(_)))
-                .count(),
-            1,
-            "the first session invoked with the committed user event"
+                .any(|event| event.event.id() == first_user.event.id())
         );
     }
 
@@ -1217,15 +1270,15 @@ mod tests {
         let events = loaded_events(&directory, conversation_id);
         let tool_request_id = events
             .iter()
-            .find_map(|event| match &event.event {
-                ConversationEvent::ToolRequest(_) => Some(event.id),
+            .find_map(|event| match event.event.content() {
+                ConversationEventContent::ToolRequest(_) => Some(event.event.id()),
                 _ => None,
             })
             .expect("the tool request should be recorded");
         let second_model_request = events
             .iter()
-            .filter_map(|event| match &event.event {
-                ConversationEvent::ModelRequest(request) => Some(request.clone()),
+            .filter_map(|event| match event.event.content() {
+                ConversationEventContent::ModelRequest(request) => Some(request.clone()),
                 _ => None,
             })
             .next_back()

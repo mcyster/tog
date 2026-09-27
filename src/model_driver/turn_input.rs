@@ -1,6 +1,5 @@
-use crate::conversation::{
-    Conversation, ConversationEventId, ConversationEventRecord, ConversationView, latest_toolset,
-};
+use crate::conversation::{Conversation, ConversationEventId, ConversationView, latest_toolset};
+use crate::conversation_event_store::ConversationEventRecord;
 use crate::toolset::Toolset;
 
 pub(crate) struct TurnInput<'conversation> {
