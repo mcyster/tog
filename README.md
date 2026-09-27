@@ -105,13 +105,30 @@ Outside the development environment, place the binary in a directory on your `PA
 
 ## Data
 
-Semantic conversation events are stored in the first available location:
+Conversation events and assets are stored in the first available location:
 
 1. `$TOG_DATA_DIR`
 2. `$XDG_DATA_HOME/tog`
 3. `$HOME/.local/share/tog`
 
+Conversation logs live under `conversations/` and immutable assets under
+`assets/`.
+
 The current semantic event schema is a clean break from the earlier agent-run-based prototype. Existing prototype conversations are not migrated.
+
+## Assets
+
+Store a file as an immutable asset and list stored assets:
+
+```console
+tog :asset add ~/example/screenshot.jpg
+tog :asset list
+```
+
+`:asset add` defaults the name to the source file's basename and infers the
+MIME type from content, falling back to `application/octet-stream`; override
+either with `--name` and `--mime-type`. Standard output carries the added
+asset or a JSON Lines listing. See [Assets](docs/assets.md).
 
 ## Development
 
