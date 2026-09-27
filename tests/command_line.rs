@@ -907,3 +907,200 @@ fn log_without_conversations_reports_a_failure() {
         String::from_utf8(command_output.stderr).expect("standard error should be UTF-8");
     assert!(standard_error.contains("no conversations found"));
 }
+
+fn temporary_source_file(file_name: &str, bytes: &[u8]) -> PathBuf {
+    let directory = temporary_data_directory().join("sources");
+    std::fs::create_dir_all(&directory).expect("the source directory should be created");
+    let path = directory.join(file_name);
+    std::fs::write(&path, bytes).expect("the source file should be written");
+    path
+}
+
+fn source_path_text(source_path: &Path) -> String {
+    source_path.to_string_lossy().into_owned()
+}
+
+fn added_asset_line(stdout: &[u8]) -> Value {
+    let standard_output =
+        String::from_utf8(stdout.to_vec()).expect("standard output should be UTF-8");
+    serde_json::from_str(standard_output.trim()).expect("the added asset line should be JSON")
+}
+
+fn listed_assets(stdout: &[u8]) -> Vec<Value> {
+    String::from_utf8(stdout.to_vec())
+        .expect("standard output should be UTF-8")
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("each asset line should be JSON"))
+        .collect()
+}
+
+#[test]
+fn asset_add_stores_a_file_with_defaults() {
+    let data_directory = temporary_data_directory();
+    let source_path = temporary_source_file(
+        "screenshot.png",
+        &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A],
+    );
+    let source_bytes = std::fs::read(&source_path).expect("the source file should be readable");
+
+    let command_output = tog_command()
+        .env("TOG_DATA_DIR", &data_directory)
+        .args([":asset", "add", &source_path_text(&source_path)])
+        .output()
+        .expect("the asset add command should run");
+
+    assert!(command_output.status.success());
+    let asset_line = added_asset_line(&command_output.stdout);
+    let asset_id = asset_line["id"]
+        .as_str()
+        .expect("the asset id should be reported")
+        .to_owned();
+
+    assert!(asset_id.starts_with("asset_"));
+    assert_eq!(asset_line["name"], "screenshot.png");
+    assert_eq!(asset_line["mime_type"], "image/png");
+    assert_eq!(asset_line["byte_size"], source_bytes.len() as u64);
+    assert!(
+        data_directory
+            .join("assets")
+            .join(asset_id.trim_start_matches("asset_"))
+            .join("content")
+            .exists()
+    );
+}
+
+#[test]
+fn asset_add_accepts_name_and_mime_type_overrides() {
+    let data_directory = temporary_data_directory();
+    let source_path = temporary_source_file("mystery.bin", b"some bytes");
+
+    let command_output = tog_command()
+        .env("TOG_DATA_DIR", &data_directory)
+        .args([
+            ":asset",
+            "add",
+            "--name",
+            "custom-name.bin",
+            "--mime-type",
+            "application/x-custom",
+            &source_path_text(&source_path),
+        ])
+        .output()
+        .expect("the asset add command should run");
+
+    assert!(command_output.status.success());
+    let asset_line = added_asset_line(&command_output.stdout);
+    assert_eq!(asset_line["name"], "custom-name.bin");
+    assert_eq!(asset_line["mime_type"], "application/x-custom");
+    assert_eq!(asset_line["byte_size"], b"some bytes".len() as u64);
+}
+
+#[test]
+fn asset_add_falls_back_to_octet_stream_for_unknown_content() {
+    let data_directory = temporary_data_directory();
+    let source_path = temporary_source_file("notes.txt", b"plain text");
+
+    let command_output = tog_command()
+        .env("TOG_DATA_DIR", &data_directory)
+        .args([":asset", "add", &source_path_text(&source_path)])
+        .output()
+        .expect("the asset add command should run");
+
+    assert!(command_output.status.success());
+    assert_eq!(
+        added_asset_line(&command_output.stdout)["mime_type"],
+        "application/octet-stream"
+    );
+}
+
+#[test]
+fn asset_list_reports_added_assets_as_json_lines() {
+    let data_directory = temporary_data_directory();
+    let first_source = temporary_source_file("first.txt", b"first");
+    let second_source = temporary_source_file("second.txt", b"second");
+
+    tog_command()
+        .env("TOG_DATA_DIR", &data_directory)
+        .args([":asset", "add", &source_path_text(&first_source)])
+        .output()
+        .expect("the first asset should be added");
+    tog_command()
+        .env("TOG_DATA_DIR", &data_directory)
+        .args([":asset", "add", &source_path_text(&second_source)])
+        .output()
+        .expect("the second asset should be added");
+
+    let list_output = tog_command()
+        .env("TOG_DATA_DIR", &data_directory)
+        .args([":asset", "list"])
+        .output()
+        .expect("the asset list command should run");
+
+    assert!(list_output.status.success());
+    let assets = listed_assets(&list_output.stdout);
+    assert_eq!(assets.len(), 2);
+    let mut names = assets
+        .iter()
+        .map(|asset| {
+            asset["name"]
+                .as_str()
+                .expect("each asset name should be a string")
+        })
+        .collect::<Vec<_>>();
+    names.sort_unstable();
+    assert_eq!(names, ["first.txt", "second.txt"]);
+}
+
+#[test]
+fn stored_assets_remain_available_when_the_source_changes_or_disappears() {
+    let data_directory = temporary_data_directory();
+    let source_path = temporary_source_file("mutable.txt", b"original");
+
+    tog_command()
+        .env("TOG_DATA_DIR", &data_directory)
+        .args([":asset", "add", &source_path_text(&source_path)])
+        .output()
+        .expect("the asset should be added");
+    std::fs::remove_file(&source_path).expect("the source file should be removed");
+
+    let list_output = tog_command()
+        .env("TOG_DATA_DIR", &data_directory)
+        .args([":asset", "list"])
+        .output()
+        .expect("the asset list command should run");
+
+    assert!(list_output.status.success());
+    let assets = listed_assets(&list_output.stdout);
+    assert_eq!(assets.len(), 1);
+    assert_eq!(assets[0]["name"], "mutable.txt");
+    assert_eq!(assets[0]["byte_size"], b"original".len() as u64);
+    let asset_id = assets[0]["id"]
+        .as_str()
+        .expect("the asset id should be reported")
+        .to_owned();
+    let stored_content = std::fs::read(
+        data_directory
+            .join("assets")
+            .join(asset_id.trim_start_matches("asset_"))
+            .join("content"),
+    )
+    .expect("the stored content should still exist");
+    assert_eq!(stored_content, b"original");
+}
+
+#[test]
+fn asset_add_reports_a_missing_source_file() {
+    let data_directory = temporary_data_directory();
+    let missing_path = temporary_data_directory().join("missing.txt");
+
+    let command_output = tog_command()
+        .env("TOG_DATA_DIR", &data_directory)
+        .args([":asset", "add", &source_path_text(&missing_path)])
+        .output()
+        .expect("the asset add command should run");
+
+    assert!(!command_output.status.success());
+    let standard_error =
+        String::from_utf8(command_output.stderr).expect("standard error should be UTF-8");
+    assert!(standard_error.contains("Error:"));
+}

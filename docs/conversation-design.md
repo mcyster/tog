@@ -3,16 +3,21 @@
 **Status:** Phase 1 asynchronous streaming text and bounded tool-calling slice implemented
 **Purpose:** Define a simple, durable conversation model and a narrow `ModelDriver` boundary that can be implemented against the OpenAI Responses API now and can support switching models/providers within a conversation.
 
-> Vocabulary update: the conversation event vocabulary and driver boundary were
-> refreshed by [Conversation Events And ModelDriver Boundary](notes/2026-09-26-conversation-events-and-model-driver.md).
-> `ConversationEvent` is now a flat vocabulary (`User`, `TurnStart`, `TurnEnd`,
+> This design is a Phase 1 record of the earlier implementation and is
+> intentionally incomplete. The accepted [conversation model](conversation.md)
+> and [durable execution plan](plans/execute-commands-durably.md) supersede the
+> Phase 1 API and lifecycle examples below, including driver-owned invocation
+> identity, assistant-based completion, and automatic turn failure on any
+> problem. They also clarify portable continuation versus provider replay.
+> The refreshed vocabulary is in
+> [Conversation Events And ModelDriver Boundary](notes/2026-09-26-conversation-events-and-model-driver.md):
+> `ConversationEvent` is a flat vocabulary (`User`, `TurnStart`, `TurnEnd`,
 > `AssistantResponse`, `ToolRequest`, `ToolResponse`, `ModelRequest`,
-> `ModelResponse`, `ModelSpecificEvent`, `Automation`, `Context`, `Data`) with one
-> `ConversationEventId` for identity and references. The sections below that
-> describe the earlier `Kind`/`Message`/`Problem`/`Communication`/
-> `ModelInvocationId` structure are superseded by that note and by
-> [conversation.md](conversation.md); the remaining architecture (immutable logged
-> input, cross-provider replay, small driver contract) still applies.
+> `ModelResponse`, `ModelSpecificEvent`, `Automation`, `Context`, `Tools`) with one
+> `ConversationEventId` for identity and references. The `Kind`/`Message`/
+> `Problem`/`Communication`/`ModelInvocationId` sections below are superseded;
+> the remaining architecture (immutable logged input, cross-provider replay,
+> small driver contract) still applies.
 
 This design is intentionally incomplete.
 

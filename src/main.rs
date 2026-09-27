@@ -1,7 +1,9 @@
+mod asset_store;
 mod command_line;
 mod conversation;
 mod conversation_event_store;
 mod conversation_session;
+mod data_directory;
 mod model_driver;
 mod openai;
 mod tools;
@@ -17,7 +19,9 @@ async fn main() -> ExitCode {
     let command_line = CommandLine::parse_with_default_command();
     match command_line.execute().await {
         Ok(CommandOutcome::Turn(TurnOutcome::Succeeded))
-        | Ok(CommandOutcome::ConversationLogged) => ExitCode::SUCCESS,
+        | Ok(CommandOutcome::ConversationLogged)
+        | Ok(CommandOutcome::AssetAdded)
+        | Ok(CommandOutcome::AssetsListed) => ExitCode::SUCCESS,
         Ok(CommandOutcome::Turn(TurnOutcome::Failed { .. })) => ExitCode::FAILURE,
         Err(error) => {
             eprintln!("Error: {error}");
