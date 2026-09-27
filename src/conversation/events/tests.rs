@@ -3,21 +3,21 @@ use std::str::FromStr;
 use serde_json::json;
 
 use super::{
-    AssistantResponse, Automation, Context, ConversationEventContent, ConversationEventId,
-    FailureCategory, InvalidUser, ModelData, ModelId, ModelOutcome, ModelRequest, ModelResponse,
-    ModelSource, ModelSpecificEvent, OperationFailure, ProviderId, ToolOutcome, ToolRequest,
-    ToolResponse, ToolsetDeclared, TurnEnd, TurnOutcome, TurnStart, User, UserContent,
+    AssistantResponse, Automation, Context, ConversationEventId, FailureCategory, InvalidUser,
+    ModelData, ModelId, ModelOutcome, ModelRequest, ModelResponse, ModelSource, ModelSpecificEvent,
+    OperationFailure, ProviderId, Tool, ToolAvailability, ToolOutcome, ToolRequest, ToolResponse,
+    Tools, TurnEnd, TurnOutcome, TurnStart, User, UserContent,
 };
-use crate::conversation::{ConversationEvent, ConversationId};
+use crate::conversation::{ConversationEvent, ConversationEventPayload, ConversationId};
 use crate::conversation_event_store::ConversationEventRecord;
-use crate::toolset::{ToolAvailability, ToolDefinition, ToolName, Toolset, ToolsetEntry};
+use crate::toolset::Toolset;
 
 fn record(
     conversation_id: ConversationId,
     position: u64,
-    content: ConversationEventContent,
+    payload: ConversationEventPayload,
 ) -> ConversationEventRecord {
-    ConversationEventRecord::new(position, ConversationEvent::new(conversation_id, content))
+    ConversationEventRecord::new(position, ConversationEvent::new(conversation_id, payload))
 }
 
 fn source() -> ModelSource {
@@ -27,9 +27,10 @@ fn source() -> ModelSource {
     )
 }
 
-fn tool_definition(name: &str) -> ToolDefinition {
-    ToolDefinition::try_new(
-        ToolName::try_new(name.to_owned()).expect("the tool name should be valid"),
+fn tool_definition(name: &str) -> crate::conversation::ToolDefinition {
+    crate::conversation::ToolDefinition::try_new(
+        crate::conversation::ToolName::try_new(name.to_owned())
+            .expect("the tool name should be valid"),
         "Run a command.".to_owned(),
         schemars::json_schema!({ "type": "object" }),
         schemars::json_schema!({ "type": "object" }),
@@ -43,7 +44,7 @@ fn event_records_serialize_with_a_flat_type_discriminator() {
     let user = record(
         conversation_id,
         0,
-        ConversationEventContent::User(
+        ConversationEventPayload::User(
             User::new(vec![UserContent::Text("Hello".to_owned())])
                 .expect("the user event should be valid"),
         ),
@@ -63,7 +64,7 @@ fn event_records_serialize_with_a_flat_type_discriminator() {
     assert!(value.get("class").is_none());
     assert!(value.get("kind").is_none());
     assert!(value.get("event").is_none());
-    assert!(value.get("content_class").is_none());
+    assert!(value.get("payload").is_none());
     let restored: ConversationEventRecord =
         serde_json::from_value(value).expect("the record should deserialize");
     assert_eq!(restored, user);
@@ -73,45 +74,45 @@ fn event_records_serialize_with_a_flat_type_discriminator() {
 fn every_event_kind_keeps_its_stable_discriminator() {
     let conversation_id = ConversationId::new();
     let id = ConversationEventId::new();
-    let toolset =
-        Toolset::immediate(vec![tool_definition("shell")]).expect("the toolset should be valid");
+    let tools = Toolset::immediate(vec![tool_definition("shell")]).into_tools();
     let events = [
         (
-            ConversationEventContent::TurnStart(TurnStart::new(None, 0)),
+            ConversationEventPayload::TurnStart(TurnStart::new(None, 0)),
             "turn_start",
         ),
         (
-            ConversationEventContent::TurnEnd(
+            ConversationEventPayload::TurnEnd(
                 TurnEnd::new(id, TurnOutcome::Succeeded).expect("the turn end should be valid"),
             ),
             "turn_end",
         ),
         (
-            ConversationEventContent::ModelRequest(
+            ConversationEventPayload::ModelRequest(
                 ModelRequest::new(id, source(), 0, Vec::new(), None, None)
                     .expect("the model request should be valid"),
             ),
             "model_request",
         ),
         (
-            ConversationEventContent::ModelResponse(
+            ConversationEventPayload::ModelResponse(
                 ModelResponse::new(id, Vec::new(), ModelOutcome::Succeeded, None)
                     .expect("the model response should be valid"),
             ),
             "model_response",
         ),
         (
-            ConversationEventContent::AssistantResponse(
+            ConversationEventPayload::AssistantResponse(
                 AssistantResponse::new(id, "Hello.".to_owned())
                     .expect("the assistant response should be valid"),
             ),
             "assistant_response",
         ),
         (
-            ConversationEventContent::ToolRequest(
+            ConversationEventPayload::ToolRequest(
                 ToolRequest::try_new(
                     id,
-                    ToolName::from_str("shell").expect("the tool name should be valid"),
+                    crate::conversation::ToolName::from_str("shell")
+                        .expect("the tool name should be valid"),
                     json!({ "command": "pwd" }),
                     None,
                 )
@@ -120,14 +121,14 @@ fn every_event_kind_keeps_its_stable_discriminator() {
             "tool_request",
         ),
         (
-            ConversationEventContent::ToolResponse(ToolResponse::new(
+            ConversationEventPayload::ToolResponse(ToolResponse::new(
                 id,
                 ToolOutcome::succeeded(json!({ "ok": true })),
             )),
             "tool_response",
         ),
         (
-            ConversationEventContent::ModelSpecificEvent(
+            ConversationEventPayload::ModelSpecificEvent(
                 ModelSpecificEvent::new(
                     id,
                     "reasoning".to_owned(),
@@ -140,13 +141,13 @@ fn every_event_kind_keeps_its_stable_discriminator() {
             "model_specific_event",
         ),
         (
-            ConversationEventContent::Automation(
+            ConversationEventPayload::Automation(
                 Automation::new("auto".to_owned()).expect("the automation should be valid"),
             ),
             "automation",
         ),
         (
-            ConversationEventContent::Context(
+            ConversationEventPayload::Context(
                 Context::try_new(
                     "workspace".to_owned(),
                     "tog.workspace".to_owned(),
@@ -156,14 +157,11 @@ fn every_event_kind_keeps_its_stable_discriminator() {
             ),
             "context",
         ),
-        (
-            ConversationEventContent::Toolset(ToolsetDeclared::new(toolset)),
-            "toolset",
-        ),
+        (ConversationEventPayload::Tools(tools), "tools"),
     ];
 
-    for (content, expected_type) in events {
-        let value = serde_json::to_value(record(conversation_id, 0, content))
+    for (payload, expected_type) in events {
+        let value = serde_json::to_value(record(conversation_id, 0, payload))
             .expect("the record should serialize");
         assert_eq!(
             value["type"], expected_type,
@@ -177,7 +175,7 @@ fn a_complete_event_keeps_its_identity_across_serialization() {
     let conversation_id = ConversationId::new();
     let event = ConversationEvent::new(
         conversation_id,
-        ConversationEventContent::Context(
+        ConversationEventPayload::Context(
             Context::try_new(
                 "workspace".to_owned(),
                 "tog.workspace".to_owned(),
@@ -193,7 +191,7 @@ fn a_complete_event_keeps_its_identity_across_serialization() {
     assert_eq!(restored.id(), event.id());
     assert_eq!(restored.conversation_id(), conversation_id);
     assert_eq!(restored.timestamp(), event.timestamp());
-    assert_eq!(restored.content(), event.content());
+    assert_eq!(restored.payload(), event.payload());
 }
 
 #[test]
@@ -238,30 +236,29 @@ fn context_explicit_names_distinguish_repeated_types() {
 }
 
 #[test]
-fn a_toolset_persists_full_definitions_with_availability() {
+fn a_tools_event_persists_full_definitions_with_availability() {
     let conversation_id = ConversationId::new();
-    let toolset = Toolset::new(vec![
-        ToolsetEntry::new(tool_definition("shell"), ToolAvailability::Immediate),
-        ToolsetEntry::new(tool_definition("search"), ToolAvailability::Discoverable),
-    ])
-    .expect("the toolset should be valid");
+    let tools = Tools::new(vec![
+        Tool::new(tool_definition("shell"), ToolAvailability::Immediate),
+        Tool::new(tool_definition("search"), ToolAvailability::Discoverable),
+    ]);
     let event = record(
         conversation_id,
         0,
-        ConversationEventContent::Toolset(ToolsetDeclared::new(toolset.clone())),
+        ConversationEventPayload::Tools(tools.clone()),
     );
 
-    let value = serde_json::to_value(&event).expect("the toolset should serialize");
-    assert_eq!(value["type"], "toolset");
-    assert_eq!(value["entries"][0]["availability"], "immediate");
-    assert_eq!(value["entries"][1]["availability"], "discoverable");
-    assert_eq!(value["entries"][0]["definition"]["name"], "shell");
+    let value = serde_json::to_value(&event).expect("the tools event should serialize");
+    assert_eq!(value["type"], "tools");
+    assert_eq!(value["tools"][0]["availability"], "immediate");
+    assert_eq!(value["tools"][1]["availability"], "discoverable");
+    assert_eq!(value["tools"][0]["definition"]["name"], "shell");
     let restored: ConversationEventRecord =
-        serde_json::from_value(value).expect("the toolset should deserialize");
+        serde_json::from_value(value).expect("the tools event should deserialize");
     assert_eq!(restored, event);
     assert!(matches!(
-        restored.event.content(),
-        ConversationEventContent::Toolset(declared) if declared.toolset() == &toolset
+        restored.event.payload(),
+        ConversationEventPayload::Tools(restored_tools) if restored_tools == &tools
     ));
 }
 
@@ -324,7 +321,7 @@ fn an_operation_failure_round_trips_and_exposes_its_retry_guidance() {
 fn a_tool_request_keeps_its_provider_call_identifier_as_opaque_data() {
     let request = ToolRequest::try_new(
         ConversationEventId::new(),
-        ToolName::from_str("shell").expect("the tool name should be valid"),
+        crate::conversation::ToolName::from_str("shell").expect("the tool name should be valid"),
         json!({ "command": "pwd" }),
         Some(
             ModelData::new(

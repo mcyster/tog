@@ -61,7 +61,7 @@ ModelResponse
 ModelSpecificEvent
 Automation
 Context
-Toolset
+Tools
 ```
 
 `User` is the durable record of submitted input: it is both the request to
@@ -168,18 +168,20 @@ A workspace can be recorded as `Context(name: "workspace", type:
 separate work. If workspace and toolset change as one logical operation, their
 events are appended atomically.
 
-### Toolset
+### Tools
 
-Tool availability is a shared concept understood by model drivers. A `Toolset`
-event supplies the complete replacement toolset with its full tool definitions:
-each entry pairs a tool definition with an availability policy (`immediate` for
-direct model exposure, `discoverable` for discovery). An empty toolset clears
-available tools, and a new event is emitted when the effective toolset changes.
-The effective toolset is derived from the latest declaration within an
-invocation's history boundary, preserving definition order and provider-visible
-content. Model drivers translate the toolset into their provider representation;
+Tool availability is a shared concept understood by model drivers. A `Tools`
+event supplies the complete replacement list with its full tool definitions:
+each tool pairs a definition with an availability policy (`immediate` for direct
+model exposure, `discoverable` for discovery). An empty list clears available
+tools, and a new event is emitted when the effective list changes. The effective
+tools are derived from the latest declaration within an invocation's history
+boundary, preserving definition order and provider-visible content. Model
+drivers translate the effective tools into their provider representation;
 executable implementations remain the application's responsibility. The
-discovery mechanism is unsettled and is not part of this model.
+toolset — however the application assembles tools — supplies this event's data
+but is not part of the conversation model. The discovery mechanism is unsettled
+and is not part of this model.
 
 ### ToolRequest And ToolResponse
 

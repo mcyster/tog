@@ -6,16 +6,16 @@ mod tests;
 mod view;
 
 pub(crate) use events::{
-    AssistantResponse, Context, ConversationEvent, ConversationEventContent, ConversationEventId,
+    AssistantResponse, Context, ConversationEvent, ConversationEventId, ConversationEventPayload,
     FailureCategory, InvalidAssistantResponse, InvalidConversationEvent, InvalidModelResponse,
     InvalidModelSpecificEvent, InvalidToolRequest, ModelData, ModelEvent, ModelId, ModelOutcome,
     ModelRequest, ModelResponse, ModelSource, ModelSpecificEvent, OperationFailure, ProviderId,
-    ToolOutcome, ToolRequest, ToolResponse, ToolsetDeclared, TurnEnd, TurnOutcome, TurnStart,
-    Usage, User, UserContent,
+    Tool, ToolAvailability, ToolDefinition, ToolName, ToolOutcome, ToolRequest, ToolResponse,
+    Tools, TurnEnd, TurnOutcome, TurnStart, Usage, User, UserContent,
 };
 pub(crate) use history::ConversationHistory;
 pub(crate) use id::ConversationId;
-pub(crate) use view::{ConversationView, latest_toolset};
+pub(crate) use view::{ConversationView, latest_tools};
 
 use crate::conversation_event_store::ConversationEventRecord;
 

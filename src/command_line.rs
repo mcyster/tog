@@ -6,7 +6,7 @@ use std::io::{self, Write};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use crate::conversation::{
-    ConversationEvent, ConversationEventContent, ConversationId, ModelId, ModelOutcome,
+    ConversationEvent, ConversationEventPayload, ConversationId, ModelId, ModelOutcome,
     TurnOutcome, UserContent,
 };
 use crate::conversation_event_store::{
@@ -117,16 +117,16 @@ fn write_conversation_log(
 }
 
 fn render_model_event(event: &ConversationEvent, verbosity: Verbosity) -> io::Result<()> {
-    let message = match event.content() {
-        ConversationEventContent::AssistantResponse(response) => {
+    let message = match event.payload() {
+        ConversationEventPayload::AssistantResponse(response) => {
             Some(response.content().to_owned())
         }
-        ConversationEventContent::ModelSpecificEvent(event)
+        ConversationEventPayload::ModelSpecificEvent(event)
             if verbosity.shows_auxiliary_messages() =>
         {
             event.message().map(|message| format!("### {message}"))
         }
-        ConversationEventContent::ModelResponse(response) => match response.outcome() {
+        ConversationEventPayload::ModelResponse(response) => match response.outcome() {
             ModelOutcome::Failed { failure } => Some(format!("### {}", failure.message())),
             ModelOutcome::Succeeded => None,
         },

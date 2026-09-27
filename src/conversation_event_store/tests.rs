@@ -9,11 +9,11 @@ use super::{
     ConversationStoreLoadError, FileEventStore, log,
 };
 use crate::conversation::{
-    Conversation, ConversationEvent, ConversationEventContent, ConversationEventId,
-    ConversationHistory, ConversationId, ConversationView, ModelData, ToolOutcome, ToolRequest,
-    ToolResponse, ToolsetDeclared, User, UserContent,
+    Conversation, ConversationEvent, ConversationEventId, ConversationEventPayload,
+    ConversationHistory, ConversationId, ConversationView, ModelData, ToolDefinition, ToolName,
+    ToolOutcome, ToolRequest, ToolResponse, User, UserContent,
 };
-use crate::toolset::{ToolDefinition, ToolName, Toolset};
+use crate::toolset::Toolset;
 
 fn temporary_store() -> FileEventStore {
     let directory = std::env::temp_dir().join(format!("tog-test-{}", uuid::Uuid::now_v7()));
@@ -27,7 +27,7 @@ fn conversation_event_log_path(store: &FileEventStore, conversation_id: Conversa
 fn user_event(conversation_id: ConversationId, content: &str) -> ConversationEvent {
     ConversationEvent::new(
         conversation_id,
-        ConversationEventContent::User(
+        ConversationEventPayload::User(
             User::new(vec![UserContent::Text(content.to_owned())])
                 .expect("the user event should be valid"),
         ),
@@ -55,8 +55,8 @@ fn tool_definition(name: &str) -> ToolDefinition {
 fn tool_request_event(
     model_request_id: ConversationEventId,
     arguments: &str,
-) -> ConversationEventContent {
-    ConversationEventContent::ToolRequest(
+) -> ConversationEventPayload {
+    ConversationEventPayload::ToolRequest(
         ToolRequest::try_new(
             model_request_id,
             ToolName::try_new("shell".to_owned()).expect("the tool name should be valid"),
@@ -316,7 +316,7 @@ fn event_store_round_trips_tool_definitions_requests_and_responses() {
             conversation_id,
             vec![ConversationEvent::new(
                 conversation_id,
-                ConversationEventContent::TurnStart(TurnStart::new(
+                ConversationEventPayload::TurnStart(TurnStart::new(
                     Some(user_records[0].event.id()),
                     0,
                 )),
@@ -329,7 +329,7 @@ fn event_store_round_trips_tool_definitions_requests_and_responses() {
             conversation_id,
             vec![ConversationEvent::new(
                 conversation_id,
-                ConversationEventContent::ModelRequest(
+                ConversationEventPayload::ModelRequest(
                     ModelRequest::new(
                         turn_id,
                         ModelSource::new(
@@ -354,10 +354,9 @@ fn event_store_round_trips_tool_definitions_requests_and_responses() {
             vec![
                 ConversationEvent::new(
                     conversation_id,
-                    ConversationEventContent::Toolset(ToolsetDeclared::new(
-                        Toolset::immediate(vec![tool_definition.clone()])
-                            .expect("the toolset should be valid"),
-                    )),
+                    ConversationEventPayload::Tools(
+                        Toolset::immediate(vec![tool_definition.clone()]).into_tools(),
+                    ),
                 ),
                 ConversationEvent::new(conversation_id, tool_request_event.clone()),
             ],
@@ -370,14 +369,14 @@ fn event_store_round_trips_tool_definitions_requests_and_responses() {
             vec![
                 ConversationEvent::new(
                     conversation_id,
-                    ConversationEventContent::ToolResponse(ToolResponse::new(
+                    ConversationEventPayload::ToolResponse(ToolResponse::new(
                         tool_request_id,
                         ToolOutcome::succeeded(json!({ "stdout": "/tmp\n" })),
                     )),
                 ),
                 ConversationEvent::new(
                     conversation_id,
-                    ConversationEventContent::ModelResponse(
+                    ConversationEventPayload::ModelResponse(
                         ModelResponse::new(
                             model_request_id,
                             vec![tool_request_id],
@@ -389,7 +388,7 @@ fn event_store_round_trips_tool_definitions_requests_and_responses() {
                 ),
                 ConversationEvent::new(
                     conversation_id,
-                    ConversationEventContent::TurnEnd(
+                    ConversationEventPayload::TurnEnd(
                         TurnEnd::new(turn_id, TurnOutcome::Succeeded)
                             .expect("the turn end should be valid"),
                     ),
@@ -405,24 +404,24 @@ fn event_store_round_trips_tool_definitions_requests_and_responses() {
         ConversationHistory::from_events(events).expect("the stored events should reconstruct");
 
     let view = ConversationView::new(&conversation);
-    let toolset = view.toolset().expect("the toolset should be declared");
-    assert_eq!(toolset.entries().len(), 1);
-    assert_eq!(toolset.entries()[0].definition().clone(), tool_definition);
-    let recorded_tool_request = conversation.events()[4].event.content();
+    let tools = view.tools().expect("the tools should be declared");
+    assert_eq!(tools.tools().len(), 1);
+    assert_eq!(tools.tools()[0].definition().clone(), tool_definition);
+    let recorded_tool_request = conversation.events()[4].event.payload();
     assert!(matches!(
         recorded_tool_request,
-        ConversationEventContent::ToolRequest(request) if request == &tool_request_payload(&tool_request_event)
+        ConversationEventPayload::ToolRequest(request) if request == &tool_request_payload(&tool_request_event)
     ));
-    let tool_response = conversation.events()[5].event.content();
+    let tool_response = conversation.events()[5].event.payload();
     assert!(matches!(
         tool_response,
-        ConversationEventContent::ToolResponse(response)
+        ConversationEventPayload::ToolResponse(response)
             if response.tool_request_id() == tool_request_id
     ));
 }
 
-fn tool_request_payload(content: &ConversationEventContent) -> crate::conversation::ToolRequest {
-    let ConversationEventContent::ToolRequest(request) = content else {
+fn tool_request_payload(content: &ConversationEventPayload) -> crate::conversation::ToolRequest {
+    let ConversationEventPayload::ToolRequest(request) = content else {
         panic!("the content should be a tool request");
     };
     request.clone()
@@ -433,7 +432,7 @@ fn timestamp(event: ConversationEvent, day: u64) -> ConversationEvent {
         event.conversation_id(),
         event.id(),
         time::OffsetDateTime::UNIX_EPOCH + time::Duration::days(day as i64),
-        event.content().clone(),
+        event.payload().clone(),
     )
 }
 

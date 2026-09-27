@@ -1,10 +1,9 @@
 use std::collections::HashMap;
 
 use super::Conversation;
-use crate::conversation::Context;
-use crate::conversation::events::ConversationEventContent;
+use crate::conversation::events::ConversationEventPayload;
+use crate::conversation::{Context, Tools};
 use crate::conversation_event_store::ConversationEventRecord;
-use crate::toolset::Toolset;
 
 pub(crate) struct ConversationView<'conversation> {
     conversation: &'conversation dyn Conversation,
@@ -29,8 +28,8 @@ impl<'conversation> ConversationView<'conversation> {
     }
 
     #[allow(dead_code)]
-    pub(crate) fn toolset(&self) -> Option<&Toolset> {
-        latest_toolset(self.events())
+    pub(crate) fn tools(&self) -> Option<&Tools> {
+        latest_tools(self.events())
     }
 
     #[allow(dead_code)]
@@ -39,7 +38,7 @@ impl<'conversation> ConversationView<'conversation> {
     ) -> HashMap<&'conversation str, &'conversation Context> {
         let mut effective = HashMap::new();
         for event in self.events() {
-            if let ConversationEventContent::Context(context) = event.event.content() {
+            if let ConversationEventPayload::Context(context) = event.event.payload() {
                 effective.insert(context.name(), context);
             }
         }
@@ -47,12 +46,12 @@ impl<'conversation> ConversationView<'conversation> {
     }
 }
 
-pub(crate) fn latest_toolset(events: &[ConversationEventRecord]) -> Option<&Toolset> {
+pub(crate) fn latest_tools(events: &[ConversationEventRecord]) -> Option<&Tools> {
     events
         .iter()
         .rev()
-        .find_map(|event| match event.event.content() {
-            ConversationEventContent::Toolset(toolset) => Some(toolset.toolset()),
+        .find_map(|event| match event.event.payload() {
+            ConversationEventPayload::Tools(tools) => Some(tools),
             _ => None,
         })
 }

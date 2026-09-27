@@ -6,13 +6,13 @@ use serde_json::json;
 use super::history::InvalidConversation;
 use super::{Conversation, ConversationHistory, ConversationId, ConversationView};
 use crate::conversation::{
-    AssistantResponse, Context, ConversationEvent, ConversationEventContent, ConversationEventId,
+    AssistantResponse, Context, ConversationEvent, ConversationEventId, ConversationEventPayload,
     FailureCategory, ModelId, ModelOutcome, ModelRequest, ModelResponse, ModelSource,
-    ModelSpecificEvent, OperationFailure, ProviderId, ToolOutcome, ToolRequest, ToolResponse,
-    ToolsetDeclared, TurnEnd, TurnOutcome, TurnStart, User, UserContent,
+    ModelSpecificEvent, OperationFailure, ProviderId, ToolDefinition, ToolName, ToolOutcome,
+    ToolRequest, ToolResponse, TurnEnd, TurnOutcome, TurnStart, User, UserContent,
 };
 use crate::conversation_event_store::ConversationEventRecord;
-use crate::toolset::{ToolDefinition, ToolName, Toolset};
+use crate::toolset::Toolset;
 
 fn tool_definition(name: &str) -> ToolDefinition {
     ToolDefinition::try_new(
@@ -27,7 +27,7 @@ fn tool_definition(name: &str) -> ToolDefinition {
 fn record(
     conversation_id: ConversationId,
     position: u64,
-    content: ConversationEventContent,
+    content: ConversationEventPayload,
 ) -> ConversationEventRecord {
     ConversationEventRecord::new(position, ConversationEvent::new(conversation_id, content))
 }
@@ -36,7 +36,7 @@ fn user_event(conversation_id: ConversationId, position: u64) -> ConversationEve
     record(
         conversation_id,
         position,
-        ConversationEventContent::User(
+        ConversationEventPayload::User(
             User::new(vec![UserContent::Text(format!("event {position}"))])
                 .expect("the user event should be valid"),
         ),
@@ -51,9 +51,7 @@ fn toolset_event(
     record(
         conversation_id,
         position,
-        ConversationEventContent::Toolset(ToolsetDeclared::new(
-            Toolset::immediate(tools).expect("the toolset should be valid"),
-        )),
+        ConversationEventPayload::Tools(Toolset::immediate(tools).into_tools()),
     )
 }
 
@@ -66,7 +64,7 @@ fn source() -> ModelSource {
 
 fn complete(
     conversation_id: ConversationId,
-    content: ConversationEventContent,
+    content: ConversationEventPayload,
 ) -> ConversationEvent {
     ConversationEvent::new(conversation_id, content)
 }
@@ -74,11 +72,11 @@ fn complete(
 fn turn_then_request(conversation_id: ConversationId) -> (ConversationEvent, ConversationEvent) {
     let turn_start = complete(
         conversation_id,
-        ConversationEventContent::TurnStart(TurnStart::new(None, 0)),
+        ConversationEventPayload::TurnStart(TurnStart::new(None, 0)),
     );
     let request = complete(
         conversation_id,
-        ConversationEventContent::ModelRequest(
+        ConversationEventPayload::ModelRequest(
             ModelRequest::new(turn_start.id(), source(), 0, Vec::new(), None, None)
                 .expect("the model request should be valid"),
         ),
@@ -157,7 +155,7 @@ fn conversation_rejects_an_event_from_another_conversation() {
         record(
             other_conversation_id,
             1,
-            ConversationEventContent::User(
+            ConversationEventPayload::User(
                 User::new(vec![UserContent::Text("other".to_owned())])
                     .expect("the user event should be valid"),
             ),
@@ -186,9 +184,9 @@ fn available_tools_uses_the_latest_declaration() {
     .expect("the conversation should be valid");
 
     let view = ConversationView::new(&conversation);
-    let toolset = view.toolset().expect("the toolset should be declared");
-    assert_eq!(toolset.entries().len(), 1);
-    assert_eq!(toolset.entries()[0].definition().name().as_str(), "second");
+    let tools = view.tools().expect("the tools should be declared");
+    assert_eq!(tools.tools().len(), 1);
+    assert_eq!(tools.tools()[0].definition().name().as_str(), "second");
 }
 
 #[test]
@@ -202,10 +200,10 @@ fn an_empty_toolset_declaration_removes_all_tools() {
     .expect("the conversation should be valid");
 
     let view = ConversationView::new(&conversation);
-    let toolset = view
-        .toolset()
-        .expect("the empty toolset should be declared");
-    assert!(toolset.entries().is_empty());
+    let tools = view
+        .tools()
+        .expect("the empty tools declaration should exist");
+    assert!(tools.tools().is_empty());
 }
 
 #[test]
@@ -215,7 +213,7 @@ fn a_conversation_without_a_toolset_declaration_has_no_tools() {
     let conversation = ConversationHistory::from_events(vec![user_event(conversation_id, 0)])
         .expect("the conversation should be valid");
 
-    assert!(ConversationView::new(&conversation).toolset().is_none());
+    assert!(ConversationView::new(&conversation).tools().is_none());
 }
 
 #[test]
@@ -235,11 +233,11 @@ fn effective_context_takes_the_latest_value_per_name() {
     .expect("the second context should be valid");
 
     let conversation = ConversationHistory::from_events(vec![
-        record(conversation_id, 0, ConversationEventContent::Context(first)),
+        record(conversation_id, 0, ConversationEventPayload::Context(first)),
         record(
             conversation_id,
             1,
-            ConversationEventContent::Context(second),
+            ConversationEventPayload::Context(second),
         ),
     ])
     .expect("the conversation should be valid");
@@ -259,8 +257,8 @@ fn conversation_rejects_invalid_deserialized_tool_definitions() {
         "id": ConversationEventId::new(),
         "timestamp": "2026-08-22T18:42:31.482Z",
         "schema_version": 13,
-        "type": "toolset",
-        "entries": [{
+        "type": "tools",
+        "tools": [{
             "definition": {
                 "name": "shell",
                 "description": "   ",
@@ -310,7 +308,7 @@ fn conversation_rejects_a_model_event_without_its_model_request() {
     let assistant = record(
         conversation_id,
         0,
-        ConversationEventContent::AssistantResponse(
+        ConversationEventPayload::AssistantResponse(
             AssistantResponse::new(ConversationEventId::new(), "Hello.".to_owned())
                 .expect("the assistant response should be valid"),
         ),
@@ -329,7 +327,7 @@ fn conversation_accepts_references_within_a_turn() {
     let conversation_id = ConversationId::new();
     let user_event = ConversationEvent::new(
         conversation_id,
-        ConversationEventContent::User(
+        ConversationEventPayload::User(
             User::new(vec![UserContent::Text("Hello".to_owned())])
                 .expect("the user event should be valid"),
         ),
@@ -337,12 +335,12 @@ fn conversation_accepts_references_within_a_turn() {
     let user_id = user_event.id();
     let turn_start_event = ConversationEvent::new(
         conversation_id,
-        ConversationEventContent::TurnStart(TurnStart::new(Some(user_id), 0)),
+        ConversationEventPayload::TurnStart(TurnStart::new(Some(user_id), 0)),
     );
     let turn_id = turn_start_event.id();
     let request_event = ConversationEvent::new(
         conversation_id,
-        ConversationEventContent::ModelRequest(
+        ConversationEventPayload::ModelRequest(
             ModelRequest::new(turn_id, source(), 1, Vec::new(), None, None)
                 .expect("the model request should be valid"),
         ),
@@ -350,7 +348,7 @@ fn conversation_accepts_references_within_a_turn() {
     let request_id = request_event.id();
     let tool_request_event = ConversationEvent::new(
         conversation_id,
-        ConversationEventContent::ToolRequest(
+        ConversationEventPayload::ToolRequest(
             ToolRequest::try_new(
                 request_id,
                 ToolName::try_new("shell".to_owned()).expect("the tool name should be valid"),
@@ -370,7 +368,7 @@ fn conversation_accepts_references_within_a_turn() {
             4,
             ConversationEvent::new(
                 conversation_id,
-                ConversationEventContent::ToolResponse(ToolResponse::new(
+                ConversationEventPayload::ToolResponse(ToolResponse::new(
                     tool_request_id,
                     ToolOutcome::succeeded(json!({ "stdout": "/tmp" })),
                 )),
@@ -380,7 +378,7 @@ fn conversation_accepts_references_within_a_turn() {
             5,
             ConversationEvent::new(
                 conversation_id,
-                ConversationEventContent::ModelResponse(
+                ConversationEventPayload::ModelResponse(
                     ModelResponse::new(
                         request_id,
                         vec![tool_request_id],
@@ -395,7 +393,7 @@ fn conversation_accepts_references_within_a_turn() {
             6,
             ConversationEvent::new(
                 conversation_id,
-                ConversationEventContent::TurnEnd(
+                ConversationEventPayload::TurnEnd(
                     TurnEnd::new(turn_id, TurnOutcome::Succeeded)
                         .expect("the turn end should be valid"),
                 ),
@@ -419,7 +417,7 @@ fn conversation_rejects_a_missing_turn_start() {
         record(
             conversation_id,
             1,
-            ConversationEventContent::ModelRequest(
+            ConversationEventPayload::ModelRequest(
                 ModelRequest::new(
                     ConversationEventId::new(),
                     source(),
@@ -452,7 +450,7 @@ fn conversation_rejects_a_wrong_tool_response_target() {
             2,
             complete(
                 conversation_id,
-                ConversationEventContent::ToolResponse(ToolResponse::new(
+                ConversationEventPayload::ToolResponse(ToolResponse::new(
                     ConversationEventId::new(),
                     ToolOutcome::succeeded(json!({ "ok": true })),
                 )),
@@ -480,7 +478,7 @@ fn conversation_rejects_two_terminal_model_responses() {
             2,
             complete(
                 conversation_id,
-                ConversationEventContent::ModelResponse(
+                ConversationEventPayload::ModelResponse(
                     ModelResponse::new(request_id, Vec::new(), ModelOutcome::Succeeded, None)
                         .expect("the model response should be valid"),
                 ),
@@ -490,7 +488,7 @@ fn conversation_rejects_two_terminal_model_responses() {
             3,
             complete(
                 conversation_id,
-                ConversationEventContent::ModelResponse(
+                ConversationEventPayload::ModelResponse(
                     ModelResponse::new(request_id, Vec::new(), ModelOutcome::Succeeded, None)
                         .expect("the second model response should be valid"),
                 ),
@@ -513,7 +511,7 @@ fn conversation_rejects_overlapping_model_response_outputs() {
     let first_request_id = first_request.id();
     let assistant = complete(
         conversation_id,
-        ConversationEventContent::AssistantResponse(
+        ConversationEventPayload::AssistantResponse(
             AssistantResponse::new(first_request_id, "First.".to_owned())
                 .expect("the assistant response should be valid"),
         ),
@@ -521,7 +519,7 @@ fn conversation_rejects_overlapping_model_response_outputs() {
     let assistant_id = assistant.id();
     let second_request = complete(
         conversation_id,
-        ConversationEventContent::ModelRequest(
+        ConversationEventPayload::ModelRequest(
             ModelRequest::new(turn_start.id(), source(), 2, Vec::new(), None, None)
                 .expect("the second model request should be valid"),
         ),
@@ -536,7 +534,7 @@ fn conversation_rejects_overlapping_model_response_outputs() {
             4,
             complete(
                 conversation_id,
-                ConversationEventContent::ModelResponse(
+                ConversationEventPayload::ModelResponse(
                     ModelResponse::new(
                         second_request_id,
                         vec![assistant_id],
@@ -563,7 +561,7 @@ fn conversation_rejects_a_model_specific_event_without_a_request() {
     let event = record(
         conversation_id,
         0,
-        ConversationEventContent::ModelSpecificEvent(
+        ConversationEventPayload::ModelSpecificEvent(
             ModelSpecificEvent::new(
                 ConversationEventId::new(),
                 "reasoning".to_owned(),

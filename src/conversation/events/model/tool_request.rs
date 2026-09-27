@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::conversation::events::ConversationEventId;
-use crate::toolset::ToolName;
+use crate::conversation::events::tools::ToolName;
 
 use super::{InvalidModelData, ModelData};
 

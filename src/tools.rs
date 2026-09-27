@@ -6,8 +6,8 @@ use futures_util::FutureExt;
 use futures_util::future::BoxFuture;
 use serde_json::Value;
 
+use crate::conversation::ToolDefinition;
 use crate::conversation::{OperationFailure, ToolOutcome, ToolRequest};
-use crate::toolset::ToolDefinition;
 
 pub(crate) trait ExecutableTool: Send + Sync {
     fn definition(&self) -> &ToolDefinition;
@@ -73,7 +73,7 @@ mod tests {
     use crate::conversation::{
         ConversationEventId, FailureCategory, OperationFailure, ToolOutcome, ToolRequest,
     };
-    use crate::toolset::{ToolDefinition, ToolName};
+    use crate::conversation::{ToolDefinition, ToolName};
 
     #[derive(Deserialize, JsonSchema, Serialize)]
     struct EchoParameters {

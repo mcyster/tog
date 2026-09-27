@@ -16,7 +16,7 @@ impl Display for InvalidConversationEvent {
             Self::ModelSpecificEvent(error) => Display::fmt(error, formatter),
             Self::Automation(error) => Display::fmt(error, formatter),
             Self::Context(error) => Display::fmt(error, formatter),
-            Self::Toolset(error) => Display::fmt(error, formatter),
+            Self::Tools(error) => Display::fmt(error, formatter),
         }
     }
 }

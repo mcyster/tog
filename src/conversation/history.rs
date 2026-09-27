@@ -3,7 +3,7 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 
 use crate::conversation::events::{
-    ConversationEventContent, ConversationEventId, ModelEvent, TurnEnd,
+    ConversationEventId, ConversationEventPayload, ModelEvent, TurnEnd,
 };
 use crate::conversation::{Conversation, ConversationId};
 use crate::conversation_event_store::ConversationEventRecord;
@@ -86,26 +86,26 @@ fn validate_references(
     let mut claimed_outputs = HashSet::new();
 
     for event in events {
-        match event.event.content() {
-            ConversationEventContent::TurnStart(turn_start) => {
+        match event.event.payload() {
+            ConversationEventPayload::TurnStart(turn_start) => {
                 validate_input_through(event, turn_start.input_through(), final_position)?;
                 if let Some(user_id) = turn_start.user_id() {
                     require_kind(&by_id, event, "turn start", user_id, |candidate| {
-                        matches!(candidate, ConversationEventContent::User(_))
+                        matches!(candidate, ConversationEventPayload::User(_))
                     })?;
                 }
             }
-            ConversationEventContent::TurnEnd(turn_end) => {
+            ConversationEventPayload::TurnEnd(turn_end) => {
                 validate_turn_end(event, turn_end, &by_id, &mut closed_turns)?;
             }
-            ConversationEventContent::ModelRequest(request) => {
+            ConversationEventPayload::ModelRequest(request) => {
                 validate_input_through(event, request.input_through(), final_position)?;
                 require_kind(
                     &by_id,
                     event,
                     "model request",
                     request.turn_id(),
-                    |candidate| matches!(candidate, ConversationEventContent::TurnStart(_)),
+                    |candidate| matches!(candidate, ConversationEventPayload::TurnStart(_)),
                 )?;
                 for dependency in request.depends_on() {
                     require_kind(
@@ -113,7 +113,7 @@ fn validate_references(
                         event,
                         "model request dependency",
                         *dependency,
-                        |candidate| matches!(candidate, ConversationEventContent::ToolRequest(_)),
+                        |candidate| matches!(candidate, ConversationEventPayload::ToolRequest(_)),
                     )?;
                 }
                 if let Some(retry_of) = request.retry_of() {
@@ -122,10 +122,10 @@ fn validate_references(
                         event,
                         "model request retry",
                         retry_of,
-                        |candidate| matches!(candidate, ConversationEventContent::ModelRequest(_)),
+                        |candidate| matches!(candidate, ConversationEventPayload::ModelRequest(_)),
                     )?;
-                    let ConversationEventContent::ModelRequest(retried_request) =
-                        retried.event.content()
+                    let ConversationEventPayload::ModelRequest(retried_request) =
+                        retried.event.payload()
                     else {
                         unreachable!("the referenced event kind was just checked");
                     };
@@ -138,25 +138,25 @@ fn validate_references(
                     }
                 }
             }
-            ConversationEventContent::AssistantResponse(response) => {
+            ConversationEventPayload::AssistantResponse(response) => {
                 validate_model_request_reference(&by_id, event, response)?;
             }
-            ConversationEventContent::ToolRequest(request) => {
+            ConversationEventPayload::ToolRequest(request) => {
                 validate_model_request_reference(&by_id, event, request)?;
             }
-            ConversationEventContent::ModelSpecificEvent(model_specific_event) => {
+            ConversationEventPayload::ModelSpecificEvent(model_specific_event) => {
                 validate_model_request_reference(&by_id, event, model_specific_event)?;
             }
-            ConversationEventContent::ToolResponse(response) => {
+            ConversationEventPayload::ToolResponse(response) => {
                 require_kind(
                     &by_id,
                     event,
                     "tool response",
                     response.tool_request_id(),
-                    |candidate| matches!(candidate, ConversationEventContent::ToolRequest(_)),
+                    |candidate| matches!(candidate, ConversationEventPayload::ToolRequest(_)),
                 )?;
             }
-            ConversationEventContent::ModelResponse(response) => {
+            ConversationEventPayload::ModelResponse(response) => {
                 validate_model_request_reference(&by_id, event, response)?;
                 let response_model_request_id = response.model_request_id();
                 if !resolved_model_responses.insert(response_model_request_id) {
@@ -176,10 +176,10 @@ fn validate_references(
                     )?;
                 }
             }
-            ConversationEventContent::User(_)
-            | ConversationEventContent::Automation(_)
-            | ConversationEventContent::Context(_)
-            | ConversationEventContent::Toolset(_) => {}
+            ConversationEventPayload::User(_)
+            | ConversationEventPayload::Automation(_)
+            | ConversationEventPayload::Context(_)
+            | ConversationEventPayload::Tools(_) => {}
         }
     }
     Ok(())
@@ -210,7 +210,7 @@ fn validate_turn_end(
     closed_turns: &mut HashSet<ConversationEventId>,
 ) -> Result<(), InvalidConversation> {
     require_kind(by_id, event, "turn end", turn_end.turn_id(), |candidate| {
-        matches!(candidate, ConversationEventContent::TurnStart(_))
+        matches!(candidate, ConversationEventPayload::TurnStart(_))
     })?;
     if !closed_turns.insert(turn_end.turn_id()) {
         return Err(InvalidConversation::InvalidReference {
@@ -231,7 +231,7 @@ fn validate_model_request_reference(
         event,
         "model event",
         model_event.model_request_id(),
-        |candidate| matches!(candidate, ConversationEventContent::ModelRequest(_)),
+        |candidate| matches!(candidate, ConversationEventPayload::ModelRequest(_)),
     )?;
     Ok(())
 }
@@ -252,9 +252,9 @@ fn validate_model_response_output(
                     "model response references missing output conversation event {output_event_id}"
                 ),
             })?;
-    let output_model_request_id = match output.event.content() {
-        ConversationEventContent::AssistantResponse(response) => Some(response.model_request_id()),
-        ConversationEventContent::ToolRequest(request) => Some(request.model_request_id()),
+    let output_model_request_id = match output.event.payload() {
+        ConversationEventPayload::AssistantResponse(response) => Some(response.model_request_id()),
+        ConversationEventPayload::ToolRequest(request) => Some(request.model_request_id()),
         _ => None,
     };
     let Some(output_model_request_id) = output_model_request_id else {
@@ -295,7 +295,7 @@ fn require_kind<'events>(
     event: &ConversationEventRecord,
     description: &str,
     referenced_id: ConversationEventId,
-    is_expected_kind: impl Fn(&ConversationEventContent) -> bool,
+    is_expected_kind: impl Fn(&ConversationEventPayload) -> bool,
 ) -> Result<&'events ConversationEventRecord, InvalidConversation> {
     let candidate =
         by_id
@@ -306,7 +306,7 @@ fn require_kind<'events>(
                     "{description} references missing conversation event {referenced_id}"
                 ),
             })?;
-    if !is_expected_kind(candidate.event.content()) {
+    if !is_expected_kind(candidate.event.payload()) {
         return Err(InvalidConversation::InvalidReference {
             position: event.position,
             reason: format!("{description} references unexpected event {referenced_id}"),

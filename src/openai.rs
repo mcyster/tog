@@ -12,17 +12,17 @@ use schemars::Schema;
 use serde_json::{Map, Value, json};
 
 use crate::conversation::{
-    AssistantResponse, ConversationEventContent, ConversationEventId, FailureCategory,
+    AssistantResponse, ConversationEventId, ConversationEventPayload, FailureCategory,
     InvalidAssistantResponse, InvalidModelResponse, InvalidModelSpecificEvent, InvalidToolRequest,
     ModelData, ModelId, ModelOutcome, ModelResponse, ModelSource, ModelSpecificEvent,
     OperationFailure, ProviderId, ToolRequest, Usage, UserContent,
 };
+use crate::conversation::{ToolAvailability, ToolName};
 use crate::conversation_event_store::ConversationEventRecord;
 use crate::model_driver::{
     ModelDriver, ModelDriverError, ModelDriverOutput, ModelDriverOutputBatch, ModelOutputStream,
     TurnInput,
 };
-use crate::toolset::{ToolAvailability, ToolName};
 
 type ResponseByteStream = BoxStream<'static, Result<Vec<u8>, OpenAiError>>;
 type ProviderOutputStream = BoxStream<'static, Result<ModelDriverEvent, OpenAiError>>;
@@ -134,13 +134,13 @@ impl ModelDriver for OpenAiModelDriver {
         );
         request_body.insert("input".to_owned(), semantic_input(events));
         let immediate_tools = input
-            .toolset()
-            .map(|toolset| {
-                toolset
-                    .entries()
+            .tools()
+            .map(|tools| {
+                tools
+                    .tools()
                     .iter()
-                    .filter(|entry| entry.availability() == ToolAvailability::Immediate)
-                    .map(|entry| provider_tool(entry.definition()))
+                    .filter(|tool| tool.availability() == ToolAvailability::Immediate)
+                    .map(|tool| provider_tool(tool.definition()))
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
@@ -224,8 +224,8 @@ fn semantic_input(events: &[ConversationEventRecord]) -> Value {
     let input = events
         .iter()
         .filter_map(
-            |conversation_event| match conversation_event.event.content() {
-                ConversationEventContent::User(user) => {
+            |conversation_event| match conversation_event.event.payload() {
+                ConversationEventPayload::User(user) => {
                     let text = user
                         .content()
                         .iter()
@@ -236,30 +236,30 @@ fn semantic_input(events: &[ConversationEventRecord]) -> Value {
                         .join("\n");
                     Some(json!({ "role": "user", "content": text }))
                 }
-                ConversationEventContent::AssistantResponse(response) => {
+                ConversationEventPayload::AssistantResponse(response) => {
                     Some(json!({ "role": "assistant", "content": response.content() }))
                 }
-                ConversationEventContent::ToolRequest(request) => Some(
+                ConversationEventPayload::ToolRequest(request) => Some(
                     provider_tool_request_input(conversation_event, request, &provider_call_ids),
                 ),
-                ConversationEventContent::ToolResponse(response) => {
+                ConversationEventPayload::ToolResponse(response) => {
                     Some(provider_tool_response_input(response, &provider_call_ids))
                 }
-                ConversationEventContent::TurnStart(_)
-                | ConversationEventContent::TurnEnd(_)
-                | ConversationEventContent::ModelRequest(_)
-                | ConversationEventContent::ModelResponse(_)
-                | ConversationEventContent::ModelSpecificEvent(_)
-                | ConversationEventContent::Automation(_)
-                | ConversationEventContent::Context(_)
-                | ConversationEventContent::Toolset(_) => None,
+                ConversationEventPayload::TurnStart(_)
+                | ConversationEventPayload::TurnEnd(_)
+                | ConversationEventPayload::ModelRequest(_)
+                | ConversationEventPayload::ModelResponse(_)
+                | ConversationEventPayload::ModelSpecificEvent(_)
+                | ConversationEventPayload::Automation(_)
+                | ConversationEventPayload::Context(_)
+                | ConversationEventPayload::Tools(_) => None,
             },
         )
         .collect::<Vec<_>>();
     Value::Array(input)
 }
 
-fn provider_tool(definition: &crate::toolset::ToolDefinition) -> Value {
+fn provider_tool(definition: &crate::conversation::ToolDefinition) -> Value {
     json!({
         "type": "function",
         "name": definition.name().as_str(),
@@ -282,8 +282,8 @@ fn provider_tool_call_ids(
     events
         .iter()
         .filter_map(
-            |conversation_event| match conversation_event.event.content() {
-                ConversationEventContent::ToolRequest(request) => Some((
+            |conversation_event| match conversation_event.event.payload() {
+                ConversationEventPayload::ToolRequest(request) => Some((
                     conversation_event.event.id(),
                     provider_tool_call_id(request),
                 )),
@@ -1595,14 +1595,14 @@ mod tests {
     use serde_json::{Map, Value, json};
 
     use crate::conversation::{
-        AssistantResponse, Conversation, ConversationEvent, ConversationEventContent,
-        ConversationEventId, ConversationHistory, ConversationId, FailureCategory, ModelData,
+        AssistantResponse, Conversation, ConversationEvent, ConversationEventId,
+        ConversationEventPayload, ConversationHistory, ConversationId, FailureCategory, ModelData,
         ModelId, ModelOutcome, ModelRequest, ModelSource, ModelSpecificEvent, ProviderId,
         ToolOutcome, ToolRequest, ToolResponse, TurnStart, User, UserContent,
     };
+    use crate::conversation::{ToolDefinition, ToolName};
     use crate::conversation_event_store::ConversationEventRecord;
     use crate::model_driver::{ModelDriver, ModelDriverOutput, ModelOutputStream, TurnInput};
-    use crate::toolset::{ToolDefinition, ToolName};
 
     use super::{
         ModelDriverEvent, OpenAiError, OpenAiModelDriver, ResponseByteStream, TerminalModelOutcome,
@@ -1612,7 +1612,7 @@ mod tests {
     fn conversation_event(
         conversation_id: ConversationId,
         position: u64,
-        content: ConversationEventContent,
+        content: ConversationEventPayload,
     ) -> ConversationEventRecord {
         ConversationEventRecord::new(position, ConversationEvent::new(conversation_id, content))
     }
@@ -1625,7 +1625,7 @@ mod tests {
         conversation_event(
             conversation_id,
             position,
-            ConversationEventContent::User(
+            ConversationEventPayload::User(
                 User::new(vec![UserContent::Text(text.to_owned())])
                     .expect("the user event should be valid"),
             ),
@@ -1638,12 +1638,12 @@ mod tests {
         let turn_start = conversation_event(
             conversation_id,
             1,
-            ConversationEventContent::TurnStart(TurnStart::new(None, 0)),
+            ConversationEventPayload::TurnStart(TurnStart::new(None, 0)),
         );
         let model_request = conversation_event(
             conversation_id,
             2,
-            ConversationEventContent::ModelRequest(
+            ConversationEventPayload::ModelRequest(
                 ModelRequest::new(turn_start.event.id(), source(), 1, Vec::new(), None, None)
                     .expect("the model request should be valid"),
             ),
@@ -1673,12 +1673,12 @@ mod tests {
             conversation_event(
                 conversation_id,
                 3,
-                ConversationEventContent::ModelSpecificEvent(reasoning),
+                ConversationEventPayload::ModelSpecificEvent(reasoning),
             ),
             conversation_event(
                 conversation_id,
                 4,
-                ConversationEventContent::AssistantResponse(assistant),
+                ConversationEventPayload::AssistantResponse(assistant),
             ),
         ])
         .expect("the conversation should be valid");
@@ -1748,13 +1748,13 @@ mod tests {
         let tool_request_record = conversation_event(
             conversation_id,
             3,
-            ConversationEventContent::ToolRequest(request),
+            ConversationEventPayload::ToolRequest(request),
         );
         let tool_request_id = tool_request_record.event.id();
         let response_record = conversation_event(
             conversation_id,
             4,
-            ConversationEventContent::ToolResponse(ToolResponse::new(
+            ConversationEventPayload::ToolResponse(ToolResponse::new(
                 tool_request_id,
                 ToolOutcome::succeeded(json!({ "stdout": "/tmp\n" })),
             )),

@@ -1,48 +1,20 @@
-mod definition;
-mod set;
-#[cfg(test)]
-mod tests;
+use crate::conversation::{Tool, ToolAvailability, ToolDefinition, Tools};
 
-use schemars::Schema;
-use serde::{Deserialize, Serialize};
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum ToolAvailability {
-    Immediate,
-    Discoverable,
-}
-
-#[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize)]
-#[serde(transparent)]
-pub(crate) struct ToolName(String);
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub(crate) struct ToolDefinition {
-    name: ToolName,
-    description: String,
-    parameters: Schema,
-    result: Schema,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub(crate) struct ToolsetEntry {
-    definition: ToolDefinition,
-    availability: ToolAvailability,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub(crate) struct Toolset {
-    entries: Vec<ToolsetEntry>,
+    tools: Vec<Tool>,
 }
 
-#[derive(Debug, Eq, PartialEq)]
-pub(crate) enum InvalidToolDefinition {
-    EmptyToolName,
-    EmptyDescription,
-}
+impl Toolset {
+    pub(crate) fn immediate(definitions: Vec<ToolDefinition>) -> Self {
+        Self {
+            tools: definitions
+                .into_iter()
+                .map(|definition| Tool::new(definition, ToolAvailability::Immediate))
+                .collect(),
+        }
+    }
 
-#[derive(Debug, Eq, PartialEq)]
-pub(crate) enum InvalidToolset {
-    Definition(InvalidToolDefinition),
+    pub(crate) fn into_tools(self) -> Tools {
+        Tools::new(self.tools)
+    }
 }

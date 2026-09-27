@@ -3,7 +3,7 @@ use std::fmt::{Display, Formatter};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use crate::conversation::{ConversationEvent, ConversationEventContent, ConversationId};
+use crate::conversation::{ConversationEvent, ConversationEventPayload, ConversationId};
 
 use super::{ConversationEventId, InvalidConversationEvent};
 
@@ -20,12 +20,12 @@ impl Display for ConversationEventId {
 }
 
 impl ConversationEvent {
-    pub(crate) fn new(conversation_id: ConversationId, content: ConversationEventContent) -> Self {
+    pub(crate) fn new(conversation_id: ConversationId, payload: ConversationEventPayload) -> Self {
         Self {
             id: ConversationEventId::new(),
             conversation_id,
             timestamp: OffsetDateTime::now_utc(),
-            content,
+            payload,
         }
     }
 
@@ -34,13 +34,13 @@ impl ConversationEvent {
         conversation_id: ConversationId,
         id: ConversationEventId,
         timestamp: OffsetDateTime,
-        content: ConversationEventContent,
+        payload: ConversationEventPayload,
     ) -> Self {
         Self {
             id,
             conversation_id,
             timestamp,
-            content,
+            payload,
         }
     }
 
@@ -56,16 +56,16 @@ impl ConversationEvent {
         self.timestamp
     }
 
-    pub(crate) fn content(&self) -> &ConversationEventContent {
-        &self.content
+    pub(crate) fn payload(&self) -> &ConversationEventPayload {
+        &self.payload
     }
 
     pub(crate) fn ensure_valid(&self) -> Result<(), InvalidConversationEvent> {
-        self.content.ensure_valid()
+        self.payload.ensure_valid()
     }
 }
 
-impl ConversationEventContent {
+impl ConversationEventPayload {
     pub(crate) fn ensure_valid(&self) -> Result<(), InvalidConversationEvent> {
         match self {
             Self::User(event) => event.ensure_valid().map_err(InvalidConversationEvent::User),
@@ -97,9 +97,9 @@ impl ConversationEventContent {
             Self::Context(event) => event
                 .ensure_valid()
                 .map_err(InvalidConversationEvent::Context),
-            Self::Toolset(toolset) => toolset
+            Self::Tools(tools) => tools
                 .ensure_valid()
-                .map_err(InvalidConversationEvent::Toolset),
+                .map_err(InvalidConversationEvent::Tools),
         }
     }
 }

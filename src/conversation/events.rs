@@ -7,7 +7,7 @@ mod model;
 #[cfg(test)]
 mod tests;
 mod tool_response;
-mod toolset;
+mod tools;
 mod turn_end;
 mod turn_start;
 mod user;
@@ -27,7 +27,7 @@ pub(crate) use model::{
     ModelRequest, ModelResponse, ModelSource, ModelSpecificEvent, ProviderId, ToolRequest, Usage,
 };
 pub(crate) use tool_response::{InvalidToolOutcome, ToolOutcome, ToolResponse};
-pub(crate) use toolset::ToolsetDeclared;
+pub(crate) use tools::{InvalidTools, Tool, ToolAvailability, ToolDefinition, ToolName, Tools};
 pub(crate) use turn_end::{InvalidTurnOutcome, TurnEnd, TurnOutcome};
 pub(crate) use turn_start::TurnStart;
 pub(crate) use user::{InvalidUser, User, UserContent};
@@ -43,12 +43,12 @@ pub(crate) struct ConversationEvent {
     #[serde(with = "time::serde::rfc3339")]
     timestamp: OffsetDateTime,
     #[serde(flatten)]
-    content: ConversationEventContent,
+    payload: ConversationEventPayload,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub(crate) enum ConversationEventContent {
+pub(crate) enum ConversationEventPayload {
     User(User),
     TurnStart(TurnStart),
     TurnEnd(TurnEnd),
@@ -60,7 +60,7 @@ pub(crate) enum ConversationEventContent {
     ModelSpecificEvent(ModelSpecificEvent),
     Automation(Automation),
     Context(Context),
-    Toolset(ToolsetDeclared),
+    Tools(Tools),
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -75,5 +75,5 @@ pub(crate) enum InvalidConversationEvent {
     ModelSpecificEvent(InvalidModelSpecificEvent),
     Automation(InvalidAutomation),
     Context(InvalidContext),
-    Toolset(crate::toolset::InvalidToolset),
+    Tools(InvalidTools),
 }

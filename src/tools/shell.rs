@@ -14,7 +14,7 @@ use tokio::task::JoinHandle;
 
 use super::ExecutableTool;
 use crate::conversation::{FailureCategory, OperationFailure};
-use crate::toolset::{ToolDefinition, ToolName};
+use crate::conversation::{ToolDefinition, ToolName};
 
 pub(crate) const DEFAULT_TIMEOUT_SECONDS: u64 = 30;
 pub(crate) const MAXIMUM_RETAINED_OUTPUT_BYTES: usize = 64 * 1024;

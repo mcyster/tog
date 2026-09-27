@@ -21,7 +21,7 @@ ModelResponse
 ModelSpecificEvent
 Automation
 Context
-Toolset
+Tools
 ```
 
 `Command`, `Fact`, `Message`, and `Lifecycle` no longer exist as structural
@@ -38,7 +38,8 @@ descriptive fields: `model_request_id`, `tool_request_id`, `turn_id`.
 `ConversationId` remains distinct.
 
 A complete `ConversationEvent` owns its `ConversationEventId`, `ConversationId`,
-timestamp, and `ConversationEventContent` (the payload vocabulary above). Event
+timestamp, and its `ConversationEventPayload` (the payload vocabulary above).
+Event
 construction assigns the ID and timestamp and receives the conversation ID;
 storage preserves these values and assigns only the record position. Cross-event
 references use the complete event's ID.
@@ -97,16 +98,18 @@ for native replay; other drivers ignore them.
   `User` its `TurnStart` references; `TurnStart.user_id` records that trigger.
   `TurnStart` records actual start and never substitutes for the queued intent.
   Delivery to a model is bounded by each `ModelRequest.input_through`.
-- **Toolset.** Tool availability is a shared concept; a `Toolset` event
-  (`ConversationEventContent::Toolset(ToolsetDeclared)`) is a complete
-  replacement toolset persisted with its full tool definitions. Each entry pairs
-  a definition with an availability policy (`immediate` or `discoverable`). An
-  empty toolset clears tools, and the effective toolset is derived from the
-  latest declaration within an invocation's history boundary. The session emits
-  a toolset only when the effective toolset would change. The `Toolset` domain
-  type stays independent in `src/toolset.rs`; `ToolsetDeclared` declares the
-  effective toolset inside a conversation. Discovery and fallback for drivers
-  without discovery remain unsettled and are not implemented.
+- **Toolset and Tools.** Tool availability is a shared concept. A `Tools` event
+  (`ConversationEventPayload::Tools(Tools)`) is a complete replacement list
+  persisted with its full tool definitions and availability policies
+  (`immediate` or `discoverable`). An empty list clears tools, and the effective
+  tools are derived from the latest declaration within an invocation's history
+  boundary. The session emits a `Tools` event only when the effective list would
+  change. `Tools`, `Tool`, `ToolAvailability`, `ToolDefinition`, and `ToolName`
+  are conversation vocabulary under `conversation/events/tools.rs`. `Toolset`
+  stays at `src/toolset.rs` as the separate concept that obtains or assembles
+  tools and builds the values carried by the `Tools` event; it does not appear in
+  the event model. Discovery and fallback for drivers without discovery remain
+  unsettled and are not implemented.
 - **Context.** Other conversation-associated values use typed context: a
   `Context` holds a resolved type identifier, a name (defaulting to the type),
   and a JSON value. The latest context event under a name replaces the effective
@@ -134,8 +137,10 @@ for native replay; other drivers ignore them.
 Event types live under `src/conversation/events/`; the reading path is
 conversation → events → model → concrete event. `Automation`, `Context`, `User`,
 `TurnStart`, `TurnEnd`, `OperationFailure`, and `ToolResponse` sit beside the
-model tree. `Toolset` and its availability policy and tool definitions live at
-`src/toolset.rs`, which both conversations and model drivers depend on directly.
+model tree, and the tool vocabulary (`Tools`, `Tool`, `ToolDefinition`,
+`ToolAvailability`) lives under `conversation/events/tools/`. `Toolset` at
+`src/toolset.rs` assembles tools and supplies the `Tools` event data; it depends
+on the conversation's tool definitions and is not part of the event model.
 Entry files declare relationships; payload implementations live in the concrete
 child modules.
 
