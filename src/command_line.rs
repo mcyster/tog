@@ -7,7 +7,7 @@ use std::str::FromStr;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
-use crate::asset_store::{AssetMetadata, AssetName, AssetStore, FileAssetStore, MimeType};
+use crate::asset_store::{AssetMetadata, AssetStore, FileAssetStore, MimeType};
 use crate::conversation::ConversationId;
 use crate::conversation_event::{
     ConversationEventRecord, ConversationFact, ConversationMessage, ConversationProblem,
@@ -158,7 +158,7 @@ fn write_conversation_log(
 fn write_asset_metadata(metadata: &AssetMetadata, output: &mut impl Write) -> io::Result<()> {
     let value = serde_json::json!({
         "id": metadata.id().to_string(),
-        "name": metadata.name().as_str(),
+        "name": metadata.name(),
         "mime_type": metadata.mime_type().as_str(),
         "byte_size": metadata.byte_size(),
     });
@@ -167,14 +167,14 @@ fn write_asset_metadata(metadata: &AssetMetadata, output: &mut impl Write) -> io
     output.flush()
 }
 
-fn default_asset_name(source_path: &Path) -> io::Result<AssetName> {
+fn default_asset_name(source_path: &Path) -> io::Result<String> {
     let Some(file_name) = source_path.file_name() else {
         return Err(io::Error::other("the source path has no file name"));
     };
     let Some(file_name_text) = file_name.to_str() else {
         return Err(io::Error::other("the source file name is not valid UTF-8"));
     };
-    AssetName::from_str(file_name_text).map_err(io::Error::other)
+    Ok(file_name_text.to_owned())
 }
 
 fn inferred_mime_type(source_path: &Path) -> io::Result<MimeType> {
@@ -260,7 +260,7 @@ struct AssetAddArguments {
 
     /// Name to store the asset under; defaults to the source file name.
     #[arg(long, value_name = "NAME")]
-    name: Option<AssetName>,
+    name: Option<String>,
 
     /// MIME type of the asset; inferred from content when omitted.
     #[arg(long, value_name = "MIME_TYPE")]

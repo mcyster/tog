@@ -3,7 +3,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-use super::asset::{AssetId, AssetName, MimeType};
+use super::asset::{AssetId, MimeType};
 use super::{AssetStore, AssetStoreLoadError, FileAssetStore};
 
 fn temporary_store() -> FileAssetStore {
@@ -23,8 +23,8 @@ fn content_reader(source_path: &Path) -> Box<dyn Read> {
     Box::new(file) as Box<dyn Read>
 }
 
-fn asset_name(name: &str) -> AssetName {
-    AssetName::from_str(name).expect("the asset name should be valid")
+fn asset_name(name: &str) -> String {
+    name.to_owned()
 }
 
 fn mime_type(mime_type: &str) -> MimeType {
@@ -60,7 +60,7 @@ fn adding_an_asset_round_trips_its_metadata_and_content() {
         .metadata(asset_id)
         .expect("the asset metadata should load");
     assert_eq!(metadata.id(), asset_id);
-    assert_eq!(metadata.name().as_str(), "hello.txt");
+    assert_eq!(metadata.name(), "hello.txt");
     assert_eq!(metadata.mime_type().as_str(), "text/plain");
     assert_eq!(metadata.byte_size(), b"hello asset".len() as u64);
     assert_eq!(
@@ -86,7 +86,7 @@ fn asset_store_preserves_assets_across_reopen() {
     let metadata = reopened
         .metadata(asset_id)
         .expect("the asset metadata should load after reopen");
-    assert_eq!(metadata.name().as_str(), "notes.txt");
+    assert_eq!(metadata.name(), "notes.txt");
     assert_eq!(metadata.mime_type().as_str(), "text/plain");
     assert_eq!(metadata.byte_size(), b"persisted bytes".len() as u64);
     assert_eq!(
@@ -145,7 +145,7 @@ fn asset_store_allows_duplicate_names() {
     assert_eq!(
         metadatas
             .iter()
-            .filter(|metadata| metadata.name().as_str() == "same.txt")
+            .filter(|metadata| metadata.name() == "same.txt")
             .count(),
         2
     );

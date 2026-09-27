@@ -5,7 +5,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-use super::asset::{AssetId, AssetMetadata, AssetName, MimeType};
+use super::asset::{AssetId, AssetMetadata, MimeType};
 use super::{AssetStore, AssetStoreError, AssetStoreLoadError};
 use crate::data_directory;
 
@@ -38,7 +38,7 @@ impl FileAssetStore {
 impl AssetStore for FileAssetStore {
     fn add(
         &self,
-        name: AssetName,
+        name: String,
         mime_type: MimeType,
         content: Box<dyn Read>,
     ) -> Result<AssetId, AssetStoreError> {
@@ -103,7 +103,7 @@ impl AssetStore for FileAssetStore {
 fn write_staged_asset(
     staging_directory: &Path,
     asset_id: AssetId,
-    name: AssetName,
+    name: String,
     mime_type: MimeType,
     content: Box<dyn Read>,
 ) -> Result<(), AssetStoreError> {

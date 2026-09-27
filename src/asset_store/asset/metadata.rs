@@ -9,50 +9,6 @@ use super::AssetId;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(transparent)]
-pub(crate) struct AssetName(String);
-
-impl AssetName {
-    pub(crate) fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl FromStr for AssetName {
-    type Err = InvalidAssetName;
-
-    fn from_str(unvalidated_value: &str) -> Result<Self, Self::Err> {
-        if unvalidated_value.trim().is_empty() {
-            return Err(InvalidAssetName);
-        }
-        Ok(Self(unvalidated_value.to_owned()))
-    }
-}
-
-impl<'de> Deserialize<'de> for AssetName {
-    fn deserialize<DeserializerType>(
-        deserializer: DeserializerType,
-    ) -> Result<Self, DeserializerType::Error>
-    where
-        DeserializerType: Deserializer<'de>,
-    {
-        let unvalidated_value = String::deserialize(deserializer)?;
-        Self::from_str(&unvalidated_value).map_err(DeserializerType::Error::custom)
-    }
-}
-
-#[derive(Debug, Eq, PartialEq)]
-pub(crate) struct InvalidAssetName;
-
-impl Display for InvalidAssetName {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "asset name must not be empty")
-    }
-}
-
-impl Error for InvalidAssetName {}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-#[serde(transparent)]
 pub(crate) struct MimeType(String);
 
 impl MimeType {
@@ -99,13 +55,13 @@ impl Error for InvalidMimeType {}
 #[serde(rename_all = "snake_case")]
 pub(crate) struct AssetMetadata {
     id: AssetId,
-    name: AssetName,
+    name: String,
     mime_type: MimeType,
     byte_size: u64,
 }
 
 impl AssetMetadata {
-    pub(crate) fn new(id: AssetId, name: AssetName, mime_type: MimeType, byte_size: u64) -> Self {
+    pub(crate) fn new(id: AssetId, name: String, mime_type: MimeType, byte_size: u64) -> Self {
         Self {
             id,
             name,
@@ -118,7 +74,7 @@ impl AssetMetadata {
         self.id
     }
 
-    pub(crate) fn name(&self) -> &AssetName {
+    pub(crate) fn name(&self) -> &str {
         &self.name
     }
 
@@ -135,14 +91,14 @@ impl AssetMetadata {
 mod tests {
     use std::str::FromStr;
 
-    use super::{AssetId, AssetMetadata, AssetName, MimeType};
+    use super::{AssetId, AssetMetadata, MimeType};
 
     #[test]
     fn asset_metadata_serializes_with_snake_case_fields() {
         let asset_id = AssetId::new();
         let metadata = AssetMetadata::new(
             asset_id,
-            AssetName::from_str("screenshot.png").expect("the asset name should be valid"),
+            "screenshot.png".to_owned(),
             MimeType::from_str("image/png").expect("the mime type should be valid"),
             1234,
         );
@@ -159,7 +115,7 @@ mod tests {
         let asset_id = AssetId::new();
         let metadata = AssetMetadata::new(
             asset_id,
-            AssetName::from_str("screenshot.png").expect("the asset name should be valid"),
+            "screenshot.png".to_owned(),
             MimeType::from_str("image/png").expect("the mime type should be valid"),
             1234,
         );
@@ -170,16 +126,14 @@ mod tests {
 
         assert_eq!(deserialized, metadata);
         assert_eq!(deserialized.id(), asset_id);
-        assert_eq!(deserialized.name().as_str(), "screenshot.png");
+        assert_eq!(deserialized.name(), "screenshot.png");
         assert_eq!(deserialized.mime_type().as_str(), "image/png");
         assert_eq!(deserialized.byte_size(), 1234);
     }
 
     #[test]
-    fn asset_metadata_rejects_empty_name_and_mime_type_everywhere() {
-        assert_eq!(AssetName::from_str(" "), Err(super::InvalidAssetName));
+    fn mime_type_rejects_empty_values() {
         assert_eq!(MimeType::from_str("\t"), Err(super::InvalidMimeType));
-        assert!(serde_json::from_str::<AssetName>("\" \"").is_err());
         assert!(serde_json::from_str::<MimeType>("\" \"").is_err());
     }
 
@@ -187,7 +141,7 @@ mod tests {
     fn asset_metadata_serializes_an_octet_stream_fallback() {
         let metadata = AssetMetadata::new(
             AssetId::new(),
-            AssetName::from_str("notes.txt").expect("the asset name should be valid"),
+            "notes.txt".to_owned(),
             MimeType::from_str("application/octet-stream").expect("the mime type should be valid"),
             0,
         );

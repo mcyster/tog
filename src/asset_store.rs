@@ -6,13 +6,13 @@ mod tests;
 
 use std::io::{self, Read};
 
-pub(crate) use asset::{AssetId, AssetMetadata, AssetName, MimeType};
+pub(crate) use asset::{AssetId, AssetMetadata, MimeType};
 pub(crate) use file_asset_store::FileAssetStore;
 
 pub(crate) trait AssetStore {
     fn add(
         &self,
-        name: AssetName,
+        name: String,
         mime_type: MimeType,
         content: Box<dyn Read>,
     ) -> Result<AssetId, AssetStoreError>;

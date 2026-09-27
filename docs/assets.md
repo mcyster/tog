@@ -11,7 +11,7 @@ An asset has:
 - an immutable `AssetId`, distinct from conversation, event, and tool
   identifiers. The identifier is serialized as `asset_<uuid>` and its
   underlying representation is encapsulated.
-- a human-readable `AssetName`. Names are descriptive metadata, not
+- a human-readable name (`String`). Names are descriptive metadata, not
   identifiers: duplicate names are allowed, and references always use the
   `AssetId`.
 - a `MimeType`.
