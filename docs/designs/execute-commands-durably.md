@@ -18,6 +18,66 @@ Durable dispatch, recovery, automatic retries, and interleaved tool execution
 remain direction. The example tables and policies below describe that future
 behavior, not a claim about the current sequential execution loop.
 
+## Turn management and execution
+
+The responsibility split accepted on 2026-10-03 lives inside `tog-engine`.
+Earlier references below to the engine or runtime cover both responsibilities;
+they do not require a separate worker process.
+
+Turn management owns stable turn identity, lifecycle events, scheduling,
+suspension/resumption, and retry policy. Turn execution, also called the worker,
+owns the model/tool loop: it commits model requests, invokes the driver, commits
+driver output, executes tool requests, and records responses. The driver handles
+one provider invocation and never executes application tools or owns turn
+lifecycle.
+
+Execution reports one of three conditions:
+
+| Report | Meaning |
+| --- | --- |
+| Done | Execution has completed the turn's work |
+| Waiting | Work remains outstanding, optionally with a time to wake |
+| Failed | Execution failed; turn management applies retry policy |
+
+Turn management acts on these reports rather than reading tool messages to
+reconstruct execution decisions. Execution reevaluates committed history on wake.
+An unanswered tool request is not ready model input.
+
+The logical turn ID survives retries and suspension. Each model attempt gets a
+new model-request ID. Retrying a model request, retrying tool execution, and
+resuming a turn have different preconditions; policies must name their scope.
+A turn retry does not imply re-executing all its model or tool requests.
+
+The exact event representation of suspension and execution attempts remains to
+be specified. Do not adopt a new logical turn ID merely because execution
+restarts, or treat a waiting report as successful completion.
+
+## Tool deadlines and results
+
+Execution stamps a tool request's response deadline as it commits the request,
+before dispatching it. The driver requests the operation; it does not set the
+recovery deadline. This deadline must survive restart in recorded history.
+
+Distinguish that durable deadline from a tool's execution timeout. A live timeout
+bounds running or waiting. An expired response deadline with no recorded answer
+means that later execution must resolve an unanswered request, even when no
+original worker remains.
+
+Record that resolution as a `ToolResponse` for the original request with outcome
+`unknown`. This is uncertainty about the operation's effect, not a claim of
+failure or permission to retry. A local timeout or cancellation also cannot
+prove that an external operation had no effect.
+
+Before recovery is enabled, specify atomic acceptance of competing real and
+deadline responses and treatment of late results. Only one accepted resolution
+may satisfy the dependency or release continuation; preserve useful late
+evidence without silently replacing the accepted outcome.
+
+Reuse committed results on resumption. Pending calls within their deadline
+remain outstanding rather than being blindly redispatched. Unknown effects
+require idempotency, reconciliation, or explicit recovery before unsafe retries.
+Tool-attempt identity and retry correlation remain implementation design work.
+
 ## Commit intent before execution
 
 The storage contract must commit a set of events as one transaction within a
@@ -55,11 +115,14 @@ identifies one attempt; a retry is another request in the same turn.
 | Event | Tog-owned meaning | Optional driver data |
 | --- | --- | --- |
 | ModelRequest | Turn association, model/driver identity, fixed `inputThrough` position, dependencies, retry relationship | Provider options, continuation state, provider-specific input metadata |
-| ModelResponse | Request reference, observed outcome, ordered `outputEventIds`, known usage and its completeness | Provider request ID, raw finish reason, additional usage details |
+| ModelResponse | Request reference, observed outcome, ordered `outputEventIds`, independently optional usage attributes | Provider request ID, raw finish reason, additional usage details |
 
 Tog owns these event types and their lifecycle. Drivers interpret providers and
 supply output and metadata; the engine records requests and terminal responses,
-including when a driver fails or times out. A driver cannot redefine completion,
+including when a driver fails or times out. The
+[usage plan](../plans/record-model-usage.md) defines the portable counters and
+cost; missing information remains unknown without a stored completeness field.
+A driver cannot redefine completion,
 failure, retry eligibility, or dependency satisfaction through an opaque payload.
 Scheduling-relevant meaning must have a common typed representation.
 
@@ -300,6 +363,10 @@ Verify these observable boundaries when implementing:
 - Optional driver data round-trips without loading its driver; common lifecycle
   handling does not require interpreting that data. Supported native replay uses
   preserved state, and unsupported required state is reported explicitly.
+- Turn identity survives suspension and retries while model attempts retain distinct IDs.
+- A tool request and its deadline commit before dispatch; restart recovers the deadline.
+- An unanswered request past its deadline receives an unknown outcome without rerunning it.
+- Real-result/deadline races release continuation only once under the selected acceptance rule.
 - Cancellation, restart during backoff, and late results obey the selected policy.
 
 Ordinary replay reconstructs state without executing requests. Recovery then
