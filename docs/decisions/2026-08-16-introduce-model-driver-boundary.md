@@ -6,7 +6,7 @@
 
 The first provider integration established concrete OpenAI Responses transport and replay concerns. Allowing those concepts to remain in turn orchestration would make provider-native history a requirement for conversation continuation and would prevent model or provider switching from semantic history alone.
 
-This is the concrete requirement anticipated by [Begin with a Single Binary Package](2026-08-08-begin-with-single-binary-package.md), which rejected speculative provider abstractions.
+This is the concrete requirement the initial architecture deferred until a provider existed, as recorded in the [crate workspace decision](2026-10-03-organize-into-a-crate-workspace.md).
 
 ## Decision
 
