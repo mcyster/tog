@@ -1,14 +1,20 @@
 ---
-name: find-the-essence
-description: Find the intent and underlying principles that make a subject understandable. Apply as the primary skill for reasoning, design, and reader-facing writing in tog, including interpreting conversations and revising work after feedback.
+name: think
+description: Work through intent and underlying principles so human collaborators can understand, assess, and build on the result. Apply as the primary skill for reasoning, design, and reader-facing writing in tog, including interpreting conversations and revising work after feedback.
 ---
 
-# Find the essence
+# Think
 
 Do the work needed to understand the subject well enough to explain what matters
 and why. Find the underlying principles from which the important choices follow.
 Let that understanding shape both the work and its explanation. Aim for a reader
 who can reason about the next case, not merely repeat the current answer.
+
+Treat human understanding as a critical part of the work. Spend the reasoning
+effort and tokens needed to find the essence, question the first plausible answer,
+and revise the explanation. Do not save your own effort by leaving collaborators
+to discover the connections, resolve ambiguities, or reconstruct the argument.
+A clear result may take substantial thinking and several drafts.
 
 ## Understand the intent
 
@@ -52,10 +58,12 @@ For example, "keep an identifier beside its concept" points to organizing by
 responsibility. Moving every identifier into a new shared directory misses the
 principle even if it makes the original file shorter.
 
-Spend effort where uncertainty could change the answer. Follow contradictions and
-missing causal links until the conclusion is supported, or make the unresolved
-point explicit. Match the depth to the task; a straightforward correction can
-remain straightforward. Stop when further investigation would not change the work.
+Spend effort on both getting the answer right and making it understandable. Follow
+contradictions and missing causal links until the conclusion is supported, or make
+the unresolved point explicit. Once the conclusion is sound, keep working if its
+explanation still makes the reader do avoidable work. Match the depth to the task;
+a straightforward correction can remain straightforward. Stop when further work
+would not materially improve correctness or a collaborator's understanding.
 
 ## Write from that understanding
 
@@ -71,5 +79,7 @@ their source; apply this method to the explanation around them.
 Revise for understanding rather than word count. A shorter text can still hide the
 idea; a longer explanation can earn its space. Before finishing, check whether the
 reader can see the intent, the principles that matter, and what follows from them
-without reconstructing the conversation. Use the appropriate specialist skill for
+without reconstructing the conversation. Check whether they can assess the tradeoffs
+and take the next step. Show the conclusions and supporting reasons they need;
+keep exploratory thinking out of their way. Use the appropriate specialist skill for
 the artifact's format and conventions.

@@ -2,11 +2,13 @@
 
 ## Primary Skill
 
-Read and apply [`find-the-essence`](.agents/skills/find-the-essence/SKILL.md)
+Read and apply [`think`](.agents/skills/think/SKILL.md)
 as the primary skill for reasoning, design, and reader-facing writing in this
 repository. Use it to understand the intent and underlying principles before
 choosing an approach or explaining it, including when revising work after feedback.
-Apply specialist skills alongside it for their domain and artifact conventions.
+Spend the reasoning effort and tokens needed to make the result easy for human
+collaborators to understand, assess, and build on. Apply specialist skills
+alongside it for their domain and artifact conventions.
 
 ## Priorities
 
