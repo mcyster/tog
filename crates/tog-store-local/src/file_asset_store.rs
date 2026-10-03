@@ -8,7 +8,6 @@ use std::str::FromStr;
 use tog::asset_store::{
     AssetId, AssetMetadata, AssetStore, AssetStoreError, AssetStoreLoadError, MimeType,
 };
-use tog_context::environment::data_directory;
 
 use crate::private_directory;
 
@@ -25,10 +24,6 @@ impl FileAssetStore {
         private_directory::create(&root_directory)?;
         private_directory::create(&root_directory.join(ASSETS_DIRECTORY_NAME))?;
         Ok(Self { root_directory })
-    }
-
-    pub fn from_environment() -> io::Result<Self> {
-        Self::new(data_directory()?)
     }
 
     pub(super) fn asset_directory(&self, asset_id: AssetId) -> PathBuf {

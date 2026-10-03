@@ -14,6 +14,7 @@ use tog::conversation::{
     TurnOutcome, UserContent,
 };
 use tog::conversation_event_store::{ConversationEventRecord, ConversationEventStore};
+use tog_context::environment::Environment;
 use tog_context::toolset::ToolRegistry;
 use tog_driver_openai::OpenAiModelDriver;
 use tog_engine::{ConversationSession, ConversationSessionProgress, ConversationSessionResult};
@@ -48,11 +49,12 @@ impl CommandLine {
     }
 
     pub(crate) async fn execute(self) -> ConversationSessionResult<CommandOutcome> {
+        let environment = Environment::try_from_process()?;
         match self.command {
             Command::Turn(arguments) => {
                 let user_prompt: UserPrompt = arguments.user_prompt_words.join(" ").parse()?;
                 let verbosity = arguments.verbosity;
-                let event_store = FileEventStore::from_environment()?;
+                let event_store = FileEventStore::new(environment.data_directory().to_path_buf())?;
                 let model_driver = Box::new(OpenAiModelDriver::from_environment(arguments.model)?);
                 let mut tool_registry = ToolRegistry::default();
                 tool_registry.register(ShellTool::new());
@@ -84,7 +86,7 @@ impl CommandLine {
                 Ok(CommandOutcome::Turn(outcome))
             }
             Command::Log(arguments) => {
-                let event_store = FileEventStore::from_environment()?;
+                let event_store = FileEventStore::new(environment.data_directory().to_path_buf())?;
                 let conversation_id = match arguments.conversation_id {
                     Some(conversation_id) => conversation_id,
                     None => event_store.latest_id()?.ok_or_else(|| {
@@ -98,7 +100,7 @@ impl CommandLine {
                 Ok(CommandOutcome::ConversationLogged)
             }
             Command::Asset(arguments) => {
-                let asset_store = FileAssetStore::from_environment()?;
+                let asset_store = FileAssetStore::new(environment.data_directory().to_path_buf())?;
                 match arguments.command {
                     AssetCommand::Add(add_arguments) => {
                         let name = match add_arguments.name {
