@@ -10,16 +10,22 @@ Spend the reasoning effort and tokens needed to make the result easy for human
 collaborators to understand, assess, and build on. Apply specialist skills
 alongside it for their domain and artifact conventions.
 
+## Project Direction
+
+Before choosing an approach to repository work, read
+[`docs/principles.md`](docs/principles.md) and
+[`docs/architecture.md`](docs/architecture.md), and apply
+[`project-documentation`](.agents/skills/project-documentation/SKILL.md).
+Consult the plans and architecture topics relevant to the effort, following detail
+links when a decision depends on them. Surface conflicts between requested work,
+documented direction, and implemented behavior; update affected documentation
+when the work changes its meaning.
+
 ## Priorities
 
-Apply these priorities in order:
-
-1. Readability and understandability
-2. Correctness through strong types
-3. Simplicity
-4. Performance supported by evidence
-
-The complete development standards are in [`docs/development-standards.md`](docs/development-standards.md). Follow them for every change.
+Follow the ordered priorities and tradeoff guidance in
+[`docs/principles.md`](docs/principles.md). Concrete development standards are in
+[`docs/development-standards.md`](docs/development-standards.md).
 
 ## Rust Source
 
@@ -54,8 +60,12 @@ The complete development standards are in [`docs/development-standards.md`](docs
 - Keep identifiers and supporting types alongside their concept. Group implementation blocks by cohesive responsibility; do not create a file per implementation or group unrelated items by technical form. Prefer clarity over indirection.
 - Keep the project as one binary package until a concrete requirement justifies a library target or workspace.
 - Keep durable documentation in `docs/`.
-- Record consequential decisions in `docs/decisions/`.
-- Keep unaccepted proposals in `docs/ideas.md`.
+- Record only significant choices explicitly accepted by the project owner in
+  `docs/decisions/`; follow its [recording rules](docs/decisions/README.md).
+  Routine implementation choices belong in the PR. Do not infer acceptance from
+  an agent-authored document or a PR merge alone.
+- Keep undeveloped possibilities in `docs/ideas.md`; use `docs/plans/` for shaped
+  directions and make their acceptance and implementation state clear.
 
 ## Change Discipline
 

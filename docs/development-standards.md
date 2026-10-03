@@ -2,12 +2,8 @@
 
 The root [`AGENTS.md`](../AGENTS.md) translates these standards into concise instructions for coding agents.
 
-## Priorities
-
-1. Readability and understandability
-2. Correctness through strong types
-3. Simplicity
-4. Performance supported by evidence
+The ordered priorities and reasons behind these conventions live in
+[principles](principles.md). Use them when a tradeoff is not settled by a rule below.
 
 ## Source Code
 
@@ -55,8 +51,9 @@ The root [`AGENTS.md`](../AGENTS.md) translates these standards into concise ins
 - Organize code by feature or responsibility rather than by technical layer.
 - Keep the executable entry point thin.
 - Keep durable documentation in `docs/`.
-- Record consequential architectural decisions in `docs/decisions/`.
-- Keep unfinished proposals in `docs/ideas.md` until they are accepted or removed.
+- Record only significant choices explicitly accepted by the project owner in `docs/decisions/`, following its [recording rules](decisions/README.md). Routine implementation choices belong in the PR.
+- Keep undeveloped possibilities in `docs/ideas.md`. Use `docs/plans/` for shaped directions, making proposal, acceptance, and implementation state clear.
+- Before choosing an approach, consult the principles, architecture overview, and relevant plans and topic documents. Follow detail links as needed, surface conflicts, and update documents whose meaning changes.
 - Introduce a Cargo workspace only when the project has multiple independently useful packages.
 
 ## Readable Contracts
