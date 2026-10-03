@@ -52,7 +52,7 @@ The complete development standards are in [`docs/development-standards.md`](docs
 - Organize modules by feature or responsibility, not by generic technical layers.
 - Keep module entry points focused on contracts: trait signatures and important type, identifier, and error declarations. Put constructors, validation, conversions, formatting, and other implementation bodies in private child modules.
 - Keep identifiers and supporting types alongside their concept. Group implementation blocks by cohesive responsibility; do not create a file per implementation or group unrelated items by technical form. Prefer clarity over indirection.
-- Keep the project as one binary package until a concrete requirement justifies a library target or workspace.
+- Keep the project as a Cargo workspace of focused crates; add a crate only when a concrete requirement justifies a separate package and boundary.
 - Keep durable documentation in `docs/`.
 - Record consequential decisions in `docs/decisions/`.
 - Keep unaccepted proposals in `docs/ideas.md`.

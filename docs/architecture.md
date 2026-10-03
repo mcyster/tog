@@ -1,6 +1,10 @@
 # Architecture
 
-`tog` is a single Cargo package containing one executable.
+`tog` is a Cargo workspace of focused crates. The `tog` crate holds the portable
+conversation, events, and model-driver boundary; `tog-context` defines the
+environment and toolset; `tog-engine` executes conversations; concrete providers,
+tools, and filesystem stores live in `tog-drivers`, `tog-tools`, and
+`tog-store-local`; and `tog-cli` composes the `tog` executable.
 
 ## One Ordered Log
 

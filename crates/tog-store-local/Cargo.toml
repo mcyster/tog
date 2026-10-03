@@ -1,0 +1,20 @@
+[package]
+name = "tog-store-local"
+description = "Local filesystem implementations of storage contracts"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tog = { path = "../tog" }
+tog-context = { path = "../tog-context" }
+uuid = { version = "1.18", features = ["serde", "v7"] }
+
+[dev-dependencies]
+schemars = { version = "1.2", features = ["derive"] }
+time = { version = "0.3", features = ["serde", "serde-well-known"] }
+
+[lints]
+workspace = true

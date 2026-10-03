@@ -57,7 +57,7 @@ The root [`AGENTS.md`](../AGENTS.md) translates these standards into concise ins
 - Keep durable documentation in `docs/`.
 - Record consequential architectural decisions in `docs/decisions/`.
 - Keep unfinished proposals in `docs/ideas.md` until they are accepted or removed.
-- Introduce a Cargo workspace only when the project has multiple independently useful packages.
+- Keep the project as a Cargo workspace of focused crates; add a crate only when a concrete requirement justifies a separate package and boundary.
 
 ## Readable Contracts
 
