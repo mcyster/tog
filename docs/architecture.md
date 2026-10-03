@@ -5,6 +5,9 @@ what was requested and what happened; model drivers interpret it for providers,
 and execution coordinates the work. Keeping these responsibilities separate lets
 the same conversation outlive a particular model, interface, or process.
 
+The [project principles](principles.md) explain the priorities guiding these
+boundaries and future changes.
+
 ## The important boundaries
 
 | Concept | Responsibility |
