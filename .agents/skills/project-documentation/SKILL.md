@@ -1,6 +1,6 @@
 ---
 name: project-documentation
-description: Write or revise concise project documentation under docs/, including plans, notes, and decisions. Use when preserving project intent, investigations, architectural reasoning, or intended work; do not use for end-user manuals or generated API reference.
+description: Consult project direction before choosing an approach to repository work, and maintain concise architecture, plans, designs, notes, and decisions under docs/. Use when starting or revising an effort or changing project documentation; not for end-user manuals or generated API reference.
 ---
 
 # Project Documentation
@@ -9,22 +9,42 @@ Write documentation for people working on the project, including people returnin
 after the original context has been forgotten. A document is not successful merely
 because an LLM can summarize it.
 
+## Consult direction before choosing an approach
+
+Read `docs/architecture.md` for the shared model. Inspect the plan and architecture
+topic names and read those relevant to the effort, including boundaries it affects.
+Follow links to designs, references, decisions, or code when a concrete choice
+needs that detail. Do not read every document by default or skip applicable intent
+because the code already suggests an implementation.
+
+Distinguish established principles, proposed changes, historical exploration, and
+implemented behavior. A merged plan is not evidence of implementation. Check
+claims about current behavior against the code. When sources conflict, explain
+which difference affects the work; do not silently promote a proposal or replace
+intent with accidental behavior. Seek a decision when the conflict changes scope
+or an important contract and the user's instructions do not resolve it.
+
+In the work's approach or PR description, briefly identify the direction that
+materially shaped it. Avoid a reading log. Update the relevant documents in the
+same change when the work changes their meaning.
+
 ## Documentation structure
 
-- `docs/` contains concise documentation of the project: its purpose, important
-  concepts, constraints, and intent.
-- `docs/plans/` contains intended work. A plan describes what should change and the
-  important choices involved; it is not evidence that the work has been completed.
-- `docs/notes/` contains developing thoughts, brainstorming, discussions,
-  investigations, experiments, and useful conclusions from AI conversations. Notes
-  are working history: they may be incomplete, superseded, or wrong, and are not
-  authoritative.
-- `docs/decisions/` contains the small current set of significant decisions and why
-  they were made. Decisions should be shorter and easier to scan than notes.
+- `docs/architecture.md` gives the short shared mental model and system boundaries.
+- `docs/architecture/` explains established architecture by topic, including known
+  gaps between its intent and implementation.
+- `docs/plans/` describes intended changes, reasons, constraints, and important
+  open choices. Make proposal, acceptance, and implementation state clear in prose.
+- `docs/designs/` holds detailed approaches linked from plans. A design can describe
+  proposed behavior; identify earlier or superseded material explicitly.
+- `docs/notes/` holds dated investigations and developing thoughts. Notes may be
+  incomplete, superseded, or wrong; they are not authoritative.
+- `docs/decisions/` holds the small current set of significant decisions and why
+  they were made.
 
-Add more specific areas such as `docs/designs/` or `docs/architecture/` only when
-the project has enough durable material to justify them. Do not create empty
-taxonomies in anticipation of future documents.
+Keep existing topic references directly under `docs/` until moving them improves
+navigation. Keep undeveloped possibilities in `docs/ideas.md`. Do not create a
+companion design or a new directory merely to fill out this structure.
 
 ## File names
 
@@ -95,16 +115,27 @@ or extend the conflicting implementation as though it were authoritative.
 When changing architecture, make the code express the new architecture wherever
 practical and update the small amount of documentation that carries intent.
 
-## Keep plans and designs focused
+## Reveal detail progressively
 
-A plan or design should help someone make and review the change, not display the
-author's reasoning process. Center it on the goal, constraints, boundaries,
-important choices, non-goals, and observable completion. Include ordered
-implementation detail only where order, risk, or coordination matters. Leave routine
-steps to the implementer and the codebase.
+Make a plan understandable and assessable without following its links. Explain the
+outcome, why it matters, governing principles, scope, important unresolved choices,
+and what completion means. Use only the headings the subject needs. Keep any
+constraint or tradeoff that could reverse agreement with the direction in the plan.
 
-If a critical choice is unresolved, state it directly. Do not bury uncertainty in a
-long stream of possible implementation details.
+Keep exact APIs, field inventories, lengthy examples, migration sequences, and
+validation cases in a detail section at the end when modest, or in a linked design
+when they develop their own complexity. Say what question each link answers.
+A link supplies depth; it must not hide a material caveat.
+
+Keep architecture focused on concepts, responsibilities, relationships, and
+invariants. Explain why a boundary exists and enough of the code map to locate it;
+leave exhaustive declarations and mechanics to references and code.
+
+When a plan is implemented, integrate its lasting principles into architecture.
+Remove the completed plan if it no longer serves a purpose, or retain a brief
+account that clearly distinguishes completed direction from remaining work. Do
+not leave old open questions looking like requirements. Preserve useful rationale
+through links without maintaining competing current explanations.
 
 ## Maintain the documentation
 

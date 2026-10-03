@@ -56,7 +56,8 @@ The root [`AGENTS.md`](../AGENTS.md) translates these standards into concise ins
 - Keep the executable entry point thin.
 - Keep durable documentation in `docs/`.
 - Record consequential architectural decisions in `docs/decisions/`.
-- Keep unfinished proposals in `docs/ideas.md` until they are accepted or removed.
+- Keep undeveloped possibilities in `docs/ideas.md`. Use `docs/plans/` for shaped directions, making proposal, acceptance, and implementation state clear.
+- Before choosing an approach, consult the architecture overview and relevant plans and topic documents. Follow detail links as needed, surface conflicts, and update documents whose meaning changes.
 - Introduce a Cargo workspace only when the project has multiple independently useful packages.
 
 ## Readable Contracts

@@ -10,6 +10,16 @@ Spend the reasoning effort and tokens needed to make the result easy for human
 collaborators to understand, assess, and build on. Apply specialist skills
 alongside it for their domain and artifact conventions.
 
+## Project Direction
+
+Before choosing an approach to repository work, read
+[`docs/architecture.md`](docs/architecture.md) and apply
+[`project-documentation`](.agents/skills/project-documentation/SKILL.md).
+Consult the plans and architecture topics relevant to the effort, following detail
+links when a decision depends on them. Surface conflicts between requested work,
+documented direction, and implemented behavior; update affected documentation
+when the work changes its meaning.
+
 ## Priorities
 
 Apply these priorities in order:
@@ -55,7 +65,8 @@ The complete development standards are in [`docs/development-standards.md`](docs
 - Keep the project as one binary package until a concrete requirement justifies a library target or workspace.
 - Keep durable documentation in `docs/`.
 - Record consequential decisions in `docs/decisions/`.
-- Keep unaccepted proposals in `docs/ideas.md`.
+- Keep undeveloped possibilities in `docs/ideas.md`; use `docs/plans/` for shaped
+  directions and make their acceptance and implementation state clear.
 
 ## Change Discipline
 

@@ -2,15 +2,20 @@
 
 The Conversation Log is `tog`'s ordered append-only record stream. It records requested work and semantic facts without exposing provider transport protocol.
 
-This document describes the intended conversation model. The [durable execution plan](plans/execute-commands-durably.md) develops its model-call lifecycle and recovery rules. The [Conversation and ModelDriver Architecture](conversation-design.md) describes the earlier Phase 1 implementation; where its invocation ownership or completion rules differ, the intent here takes precedence.
+This document describes semantic intent, including guarantees beyond the current
+executor. For implemented event ownership and execution behavior, start with the
+[conversation boundary](architecture/conversation.md). The
+[durable-execution plan](plans/execute-commands-durably.md) covers future recovery,
+retry, and scheduling behavior. The [earlier Phase 1 design](conversation-design.md)
+is historical and must not be used as the current API.
 
-The current implementation still has driver-created invocation records and uses assistant output or problems to determine turn completion. The common model-call lifecycle below is accepted direction, not a claim that it is implemented.
-
-The proposed [event hierarchy and driver API](plans/conversation-design.md) flattens the vocabulary described here, removes structural command/fact and kind wrappers, and replaces `Communication` with `ModelSpecificEvent`. That plan records the remaining type and migration choices before implementation.
+The flat event vocabulary and common model-call lifecycle are implemented.
+Automatic recovery, retries, and concurrent dispatch are not implied by their
+presence in this model.
 
 ## Conversation
 
-A conversation begins with its first accepted semantic event. `Conversation` is an immutable projection reconstructed from non-command records carrying one `ConversationId`:
+A conversation begins with its first accepted semantic event. `Conversation` is an immutable projection reconstructed from ordered event records carrying one `ConversationId`:
 
 ```text
 Conversation
@@ -23,7 +28,7 @@ Conversation Log
     ...
 ```
 
-There is no independently persisted conversation record and no empty persisted conversation. Construction rejects an empty event sequence, mixed conversation IDs, and invalid event order. Commands and lifecycle records may create gaps in projected positions.
+There is no independently persisted conversation record and no empty persisted conversation. Construction rejects an empty event sequence, mixed conversation IDs, and invalid event order. Provider input projections may omit events while preserving their recorded positions.
 
 The semantic Conversation projection answers:
 
@@ -82,7 +87,7 @@ The vocabulary should grow only when a repeated semantic or lifecycle need justi
 ## Model Calls And Turns
 
 A model call is one attempt within a turn. The engine selects a committed input
-boundary and its history from one snapshot, then commits a `ModelCallRequest`
+boundary and its history from one snapshot, then commits a `ModelRequest`
 containing the model selection, input boundary, and turn association before
 invoking the driver. If the request cannot be committed, the driver must not run.
 Recording intent after starting an HTTP request leaves a crash window in which
@@ -94,7 +99,7 @@ pending user requests on the engine's behalf. Provider request IDs remain
 optional metadata.
 
 The engine commits output associated with the request and one terminal
-`ModelCallResponse`. The response records the observed outcome, ordered output
+`ModelResponse`. The response records the observed outcome, ordered output
 references, and known usage with its completeness. The driver supplies provider
 observations; the engine also records failures it observes outside the driver,
 such as a timeout. Stream exhaustion without a terminal response is not success,
@@ -103,7 +108,7 @@ even if assistant text was already committed.
 An assistant message is content, not turn completion. It may precede tool
 requests, accompany them, or be absent from a successful call. A turn succeeds
 when its terminal model call succeeds and no tool work or continuation remains
-outstanding. The engine records that decision as `TurnCompleted`; a final
+outstanding. The engine records that decision as `TurnEnd`; a final
 assistant message is not required. Closing a call that requested tools does not
 close its turn. A failed call may be retried within a turn that ultimately
 succeeds.
@@ -319,8 +324,8 @@ stream ends without a terminal response, the engine records a failed
 `ModelResponse` instead. Unknown usage stays unknown rather than being counted
 as zero.
 
-The append boundary assigns record identity, timestamp, and position. The
-session records the terminal turn outcome as `TurnEnd`: a successful terminal
+Event construction assigns identity and timestamp; the append boundary preserves
+them and assigns position. The session records the terminal turn outcome as `TurnEnd`: a successful terminal
 model response with no outstanding tool work succeeds the turn, a failed
 response fails it, and a stream ending without a terminal response is failed by
 the engine. Completed semantic events already yielded remain valid conversation
