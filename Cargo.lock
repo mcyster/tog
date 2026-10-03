@@ -1423,7 +1423,7 @@ dependencies = [
  "serde_json",
  "tog",
  "tog-context",
- "tog-drivers",
+ "tog-driver-openai",
  "tog-engine",
  "tog-store-local",
  "tog-tools",
@@ -1444,7 +1444,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "tog-drivers"
+name = "tog-driver-openai"
 version = "0.1.0"
 dependencies = [
  "futures-util",

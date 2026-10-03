@@ -15,7 +15,7 @@ use tog::conversation::{
 };
 use tog::conversation_event_store::{ConversationEventRecord, ConversationEventStore};
 use tog_context::toolset::ToolRegistry;
-use tog_drivers::OpenAiModelDriver;
+use tog_driver_openai::OpenAiModelDriver;
 use tog_engine::{ConversationSession, ConversationSessionProgress, ConversationSessionResult};
 use tog_store_local::{FileAssetStore, FileEventStore};
 use tog_tools::ShellTool;

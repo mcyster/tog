@@ -14,10 +14,10 @@ is not a request to reimplement the earlier proposal.
 ## Direction
 
 Keep conversations, events, model-driver and storage contracts, and asset
-concepts in a foundational `tog` library. Put provider implementations in
-`tog-drivers`. Separate context definition and resolution (`tog-context`) from
-execution (`tog-engine`), with concrete tools and local storage outside both.
-Applications choose implementations and compose them.
+concepts in a foundational `tog` library. Give each model-driver provider its own
+crate, starting with `tog-driver-openai`. Separate context definition and
+resolution (`tog-context`) from execution (`tog-engine`), with concrete tools and
+local storage outside both. Applications choose implementations and compose them.
 
 Dependencies point toward contracts. The foundational library must not depend
 on the engine, CLI, or concrete integrations. Storage contracts stay with the
@@ -40,8 +40,7 @@ conversations and a model driver without the engine or CLI, and the CLI uses the
 engine with explicitly supplied implementations.
 
 Settle the minimal executable-tool interface while establishing its ownership.
-Keep provider implementations together until dependency isolation or distribution
-justifies separate crates. Publishing packages is a separate choice.
+Publishing packages is a separate choice.
 
 For the crate responsibility table, dependency rules, and context relationships,
 read the [detailed boundary design](../designs/organize-crate-boundaries.md).

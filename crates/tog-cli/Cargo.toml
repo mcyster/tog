@@ -15,7 +15,7 @@ infer = "0.22"
 serde_json = "1.0"
 tog = { path = "../tog" }
 tog-context = { path = "../tog-context" }
-tog-drivers = { path = "../tog-drivers" }
+tog-driver-openai = { path = "../tog-driver-openai" }
 tog-engine = { path = "../tog-engine" }
 tog-store-local = { path = "../tog-store-local" }
 tog-tools = { path = "../tog-tools" }

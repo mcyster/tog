@@ -16,7 +16,7 @@ Use a Cargo workspace of focused crates under `crates/`:
 | `tog` | Conversations and events, the model-driver interface, asset definitions, and conversation/asset storage interfaces |
 | `tog-context` | Environment and toolset, resolving the capabilities available for work |
 | `tog-engine` | Executing conversations: invoking models, dispatching tools, and recording results |
-| `tog-drivers` | Concrete model-driver providers |
+| `tog-driver-openai` | The OpenAI model-driver provider; one driver crate per integration |
 | `tog-tools` | Concrete tool implementations |
 | `tog-store-local` | Filesystem implementations of storage interfaces |
 | `tog-cli` | Command-line interaction and application composition; exposes the `tog` executable |
@@ -25,7 +25,8 @@ Dependencies flow toward `tog`: context depends on `tog`, engine depends on
 `tog` and `tog-context`, and integrations depend on the contracts they implement.
 The CLI selects implementations and wires them together; async runtime ownership
 stays at the application boundary. The tool execution interface lives alongside
-the toolset in `tog-context`.
+the toolset in `tog-context`. Each model-driver provider lives in its own crate
+so an integration adds or changes a provider without touching the others.
 
 ## Consequences
 
