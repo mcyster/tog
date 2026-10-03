@@ -1561,7 +1561,7 @@ Keep it small.
 
 Let future implementations change it.
 
-The [single binary decision](decisions/2026-08-08-begin-with-single-binary-package.md) or related architecture notes should explicitly record this rationale so the exception is deliberate rather than accidental.
+The [crate workspace decision](decisions/2026-10-03-organize-into-a-crate-workspace.md) records this rationale so the exception is deliberate rather than accidental and is now the project structure.
 
 ---
 

@@ -7,19 +7,17 @@ Make the important concepts easy to find and enforce their dependencies with a
 Cargo workspace. Developers should be able to use conversations and model drivers
 without adopting tog's execution engine, CLI, or server.
 
-This is the intended structure, not an implemented workspace. The project
-currently has one binary package. Reusable libraries and enforced boundaries
-provide the concrete reason to move beyond the
-[initial single-package decision](../decisions/2026-08-08-begin-with-single-binary-package.md).
-Update that decision and the corresponding repository guidance when implementing
-the split.
+This workspace is now implemented under `crates/`, and the CLI runs through the
+extracted engine with explicitly supplied implementations. See the
+[crate-workspace decision](../decisions/2026-10-03-organize-into-a-crate-workspace.md)
+and the current [architecture overview](../architecture.md).
 
 ## Crate responsibilities
 
 | Crate | Owns |
 | --- | --- |
 | `tog` | Conversations and events, the model-driver interface, asset definitions, and conversation/asset storage interfaces |
-| `tog-drivers` | Concrete provider implementations of the model-driver interface |
+| `tog-driver-openai` | The OpenAI model-driver provider; one driver crate per integration |
 | `tog-context` | Environment, session, workspace, and toolset; resolving the context and capabilities available for work |
 | `tog-engine` | Executing conversations: invoking models, dispatching tools, recording results, and coordinating lifecycle, cancellation, and retries |
 | `tog-tools` | Concrete tool implementations |
@@ -103,10 +101,11 @@ then separate context, execution, concrete tools, and local storage as their
 existing responsibilities are moved. Keep the CLI as the composition point.
 Do not create empty crates for future applications or capabilities.
 
-Treat `tog` plus `tog-drivers` as the reusable library offering. Keep provider
-implementations together initially; individual provider crates can follow when
-dependency isolation or independent distribution justifies them. Publishing
-packages is separate from establishing the workspace.
+Treat `tog` plus its driver crates as the reusable library offering. Use one
+crate per provider integration — `tog-driver-openai` is the first — so an
+integration adds, updates, or removes a provider without touching the others and
+each provider's dependencies stay contained. Publishing packages is separate
+from establishing the workspace.
 
 The split is complete when Cargo dependencies enforce the stated boundaries,
 a consumer can use conversations and a model driver without the engine or CLI,

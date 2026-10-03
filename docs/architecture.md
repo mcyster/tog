@@ -29,14 +29,21 @@ Portable conversation meaning must not depend on another provider's protocol.
 
 ## Where the implementation stands
 
-Tog currently has one binary Cargo package. `conversation` defines the event model,
-`model_driver` its provider boundary, and `openai` the concrete integration.
+Tog is a Cargo workspace of focused crates under `crates/`. The `tog` crate holds
+the portable conversation and event model, the model-driver interface, asset
+definitions, and the storage contracts. `tog-context` supplies the environment and
+toolset; `tog-engine` executes conversations; `tog-tools` and `tog-store-local`
+hold concrete tool and filesystem-store implementations; and `tog-cli` composes
+the `tog` executable. Each model-driver provider lives in its own crate, starting
+with `tog-driver-openai`.
+
+Within the workspace, `Conversation` defines the event model, `ModelDriver` its
+provider boundary, and `OpenAiModelDriver` the concrete integration.
 `ConversationSession` coordinates a bounded loop with sequential tool execution.
 The CLI selects local storage and concrete tools. Assets are immutable files
 managed through `AssetStore`.
 
-These are responsibilities within the current package, not yet separate crates.
-The future context/session model must not be inferred from the existing
+The context/session model must not be inferred from the existing
 `ConversationSession` name. Daemon scheduling, automatic recovery and retries,
 and concurrent tool dispatch remain planned work.
 
@@ -46,8 +53,8 @@ and concurrent tool dispatch remain planned work.
   [conversation boundary](architecture/conversation.md).
 - For asset identity and persistence, read [assets](assets.md).
 - For executable tools and shell behavior, read [tools](tools.md).
-- For the intended library, context, engine, and application split, read the
-  [crate-boundary plan](plans/organize-crate-boundaries.md).
+- For the crate responsibilities and dependency rules, read the
+  [crate-boundary design](designs/organize-crate-boundaries.md).
 - For future scheduling, recovery, and side-effect constraints, read the
   [durable-execution plan](plans/execute-commands-durably.md).
 

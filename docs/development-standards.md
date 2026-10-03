@@ -54,7 +54,7 @@ The ordered priorities and reasons behind these conventions live in
 - Record only significant choices explicitly accepted by the project owner in `docs/decisions/`, following its [recording rules](decisions/README.md). Routine implementation choices belong in the PR.
 - Keep undeveloped possibilities in `docs/ideas.md`. Use `docs/plans/` for shaped directions, making proposal, acceptance, and implementation state clear.
 - Before choosing an approach, consult the principles, architecture overview, and relevant plans and topic documents. Follow detail links as needed, surface conflicts, and update documents whose meaning changes.
-- Introduce a Cargo workspace only when the project has multiple independently useful packages.
+- Keep the project as a Cargo workspace of focused crates; add a crate only when a concrete requirement justifies a separate package and boundary.
 
 ## Readable Contracts
 

@@ -1406,17 +1406,94 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 name = "tog"
 version = "0.1.0"
 dependencies = [
- "clap",
  "futures-util",
- "infer",
- "nix",
- "reqwest",
  "schemars",
  "serde",
  "serde_json",
  "time",
+ "uuid",
+]
+
+[[package]]
+name = "tog-cli"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "infer",
+ "serde_json",
+ "tog",
+ "tog-context",
+ "tog-driver-openai",
+ "tog-engine",
+ "tog-store-local",
+ "tog-tools",
  "tokio",
  "uuid",
+]
+
+[[package]]
+name = "tog-context"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "schemars",
+ "serde",
+ "serde_json",
+ "tog",
+ "tokio",
+]
+
+[[package]]
+name = "tog-driver-openai"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "reqwest",
+ "schemars",
+ "serde_json",
+ "tog",
+ "tokio",
+]
+
+[[package]]
+name = "tog-engine"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "schemars",
+ "serde_json",
+ "tog",
+ "tog-context",
+ "tog-store-local",
+ "tog-tools",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "tog-store-local"
+version = "0.1.0"
+dependencies = [
+ "schemars",
+ "serde",
+ "serde_json",
+ "time",
+ "tog",
+ "uuid",
+]
+
+[[package]]
+name = "tog-tools"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "nix",
+ "schemars",
+ "serde",
+ "serde_json",
+ "tog",
+ "tog-context",
+ "tokio",
 ]
 
 [[package]]
