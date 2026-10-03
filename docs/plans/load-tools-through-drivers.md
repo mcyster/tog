@@ -86,10 +86,11 @@ interpreted on a later invocation. Keep that distinction when finalizing the eve
 API.
 
 The current driver decides whether another driver's recorded loading state is
-applicable. Before implementation, settle how the record identifies its writer
-and how compatibility is determined, alongside the driver-description design.
-Do not assume that a snapshot or opaque provider state can be reused after every
-driver change. A driver must also define how it recognizes the discovery results
+applicable. The [driver-description plan](describe-model-drivers.md) supplies the
+writer's driver, provider, model, and attributes, independently of configuration
+names. Compatibility belongs to the reading driver. Settle direct versus
+request-linked description placement when implementing that plan; do not assume
+that a snapshot or opaque provider state can be reused after every driver change. A driver must also define how it recognizes the discovery results
 it supports; no universal search-result format is prescribed here.
 
 ## Implementation and completion
