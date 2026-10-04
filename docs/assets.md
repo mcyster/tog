@@ -9,7 +9,7 @@ mutated only by storing a new asset.
 An asset has:
 
 - an immutable `AssetId`, distinct from conversation, event, and tool
-  identifiers. The identifier is serialized as `asset_<uuid>` and its
+  identifiers. The identifier is serialized as `ast_<uuid>` and its
   underlying representation is encapsulated.
 - a human-readable name (`String`). Names are descriptive metadata, not
   identifiers: duplicate names are allowed, and references always use the
@@ -45,8 +45,9 @@ Assets live under the resolved data directory alongside `conversations/`:
 
 `<data>` is resolved from `$TOG_DATA_DIR`, else `$XDG_DATA_HOME/tog`, else
 `$HOME/.local/share/tog`, matching the event store. The storage key is the
-`AssetId`'s internal uuid; the `asset_<uuid>` form is used for display,
-serialization, and references. An asset directory appears only after both files
+`ast_<uuid>` form used for display, serialization, and references. Directories
+created before identifiers carried the prefix use the bare uuid as the storage
+key and remain loadable. An asset directory appears only after both files
 are fully written and synced, so a torn write stays in a hidden staging
 directory that listings ignore. Adding an asset returns its `AssetId` only
 after the commit succeeds, and an existing asset is never overwritten or
@@ -68,7 +69,7 @@ output carries a single JSON object for the added asset and JSON Lines for
 `:asset list`, with `id`, `name`, `mime_type`, and `byte_size` fields:
 
 ```json
-{"id":"asset_01a0df...","name":"shot.png","mime_type":"image/png","byte_size":8}
+{"id":"ast_01a0df...","name":"shot.png","mime_type":"image/png","byte_size":8}
 ```
 
 Stored assets remain available after the source file changes or disappears.

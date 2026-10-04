@@ -1,7 +1,7 @@
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
-use super::InvalidConversationEvent;
+use super::{InvalidConversationEvent, InvalidConversationEventId};
 
 impl Display for InvalidConversationEvent {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
@@ -22,3 +22,15 @@ impl Display for InvalidConversationEvent {
 }
 
 impl Error for InvalidConversationEvent {}
+
+impl Display for InvalidConversationEventId {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "invalid conversation event identifier: {}",
+            self.0
+        )
+    }
+}
+
+impl Error for InvalidConversationEventId {}

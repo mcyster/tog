@@ -262,7 +262,7 @@ fn conversation_rejects_invalid_deserialized_tool_definitions() {
         "position": 0,
         "id": ConversationEventId::new(),
         "timestamp": "2026-08-22T18:42:31.482Z",
-        "schema_version": 13,
+        "schema_version": 14,
         "type": "tools",
         "tools": [{
             "definition": {
@@ -293,7 +293,7 @@ fn conversation_rejects_an_empty_user_event() {
         "position": 0,
         "id": ConversationEventId::new(),
         "timestamp": "2026-08-22T18:42:31.482Z",
-        "schema_version": 13,
+        "schema_version": 14,
         "type": "user",
         "content": []
     }))
