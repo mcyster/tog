@@ -11,7 +11,6 @@ use crate::conversation::{ConversationEvent, ConversationEventPayload, Conversat
 use super::{ConversationEventId, InvalidConversationEvent, InvalidConversationEventId};
 
 const PREFIX: &str = "evt_";
-const LEGACY_PREFIX: &str = "conversation_event_";
 
 impl ConversationEventId {
     pub fn new() -> Self {
@@ -35,10 +34,7 @@ impl FromStr for ConversationEventId {
     type Err = InvalidConversationEventId;
 
     fn from_str(text: &str) -> Result<Self, Self::Err> {
-        let uuid_text = text
-            .strip_prefix(PREFIX)
-            .or_else(|| text.strip_prefix(LEGACY_PREFIX))
-            .unwrap_or(text);
+        let uuid_text = text.strip_prefix(PREFIX).unwrap_or(text);
         Uuid::parse_str(uuid_text)
             .map(Self)
             .map_err(InvalidConversationEventId)

@@ -32,36 +32,12 @@ fn conversation_event_identifier_round_trips_through_its_display_and_serialized_
 
 #[test]
 fn conversation_event_identifier_accepts_an_unprefixed_uuid() {
-    let event_id = ConversationEventId::new();
+    let uuid_text = uuid::Uuid::now_v7().simple().to_string();
 
-    let serialized = event_id.to_string();
-    let unprefixed = serialized
-        .strip_prefix("evt_")
-        .expect("the prefix should be present");
-    let reparsed = ConversationEventId::from_str(unprefixed)
-        .expect("the unprefixed identifier should parse back");
+    let reparsed = ConversationEventId::from_str(&uuid_text)
+        .expect("an unprefixed uuid should parse as an event identifier");
 
-    assert_eq!(reparsed, event_id);
-}
-
-#[test]
-fn event_records_with_legacy_unprefixed_identifiers_still_deserialize() {
-    let conversation_id = ConversationId::new();
-    let event = record(
-        conversation_id,
-        0,
-        ConversationEventPayload::User(
-            User::new(vec![UserContent::Text("Hello".to_owned())])
-                .expect("the user event should be valid"),
-        ),
-    );
-    let mut value = serde_json::to_value(&event).expect("the record should serialize");
-    value["id"] = json!(event.event().id().to_string().strip_prefix("evt_").unwrap());
-    value["conversation_id"] = json!(conversation_id.to_string().strip_prefix("cnv_").unwrap());
-
-    let restored: ConversationEventRecord =
-        serde_json::from_value(value).expect("legacy identifiers should deserialize");
-    assert_eq!(restored, event);
+    assert_eq!(reparsed.to_string(), format!("evt_{uuid_text}"));
 }
 
 fn source() -> ModelSource {

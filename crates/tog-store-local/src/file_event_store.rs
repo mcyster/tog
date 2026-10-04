@@ -30,21 +30,6 @@ impl FileEventStore {
             .join(CONVERSATIONS_DIRECTORY_NAME)
             .join(conversation_id.storage_key())
     }
-
-    fn legacy_conversation_directory(&self, conversation_id: ConversationId) -> PathBuf {
-        self.root_directory
-            .join(CONVERSATIONS_DIRECTORY_NAME)
-            .join(conversation_id.legacy_storage_key())
-    }
-
-    fn existing_conversation_directory(&self, conversation_id: ConversationId) -> Option<PathBuf> {
-        [
-            self.conversation_directory(conversation_id),
-            self.legacy_conversation_directory(conversation_id),
-        ]
-        .into_iter()
-        .find(|directory| log::log_path(directory).exists())
-    }
 }
 
 impl ConversationEventStore for FileEventStore {
@@ -52,9 +37,7 @@ impl ConversationEventStore for FileEventStore {
         &self,
         conversation_id: ConversationId,
     ) -> Result<Vec<ConversationEventRecord>, ConversationStoreLoadError> {
-        let conversation_directory = self
-            .existing_conversation_directory(conversation_id)
-            .unwrap_or_else(|| self.conversation_directory(conversation_id));
+        let conversation_directory = self.conversation_directory(conversation_id);
         let Some(log) = log::read(&conversation_directory)? else {
             return Err(ConversationStoreLoadError::NotFound(conversation_id));
         };
@@ -91,9 +74,7 @@ impl ConversationEventStore for FileEventStore {
         if events.is_empty() {
             return Err(ConversationStoreAppendError::EmptyBatch);
         }
-        let conversation_directory = self
-            .existing_conversation_directory(conversation_id)
-            .unwrap_or_else(|| self.conversation_directory(conversation_id));
+        let conversation_directory = self.conversation_directory(conversation_id);
         private_directory::create(&conversation_directory)?;
         let existing_log = log::read(&conversation_directory)?;
         let existing_events = existing_log

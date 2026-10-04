@@ -7,7 +7,6 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use uuid::Uuid;
 
 const PREFIX: &str = "cnv_";
-const LEGACY_PREFIX: &str = "conversation_";
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct ConversationId(Uuid);
@@ -19,10 +18,6 @@ impl ConversationId {
 
     pub fn storage_key(self) -> String {
         format!("{PREFIX}{}", self.0.simple())
-    }
-
-    pub fn legacy_storage_key(self) -> String {
-        self.0.simple().to_string()
     }
 }
 
@@ -42,10 +37,7 @@ impl FromStr for ConversationId {
     type Err = InvalidConversationId;
 
     fn from_str(text: &str) -> Result<Self, Self::Err> {
-        let uuid_text = text
-            .strip_prefix(PREFIX)
-            .or_else(|| text.strip_prefix(LEGACY_PREFIX))
-            .unwrap_or(text);
+        let uuid_text = text.strip_prefix(PREFIX).unwrap_or(text);
         Uuid::parse_str(uuid_text)
             .map(Self)
             .map_err(InvalidConversationId)
@@ -104,26 +96,13 @@ mod tests {
     }
 
     #[test]
-    fn conversation_identifier_accepts_a_legacy_prefixed_form() {
-        let conversation_id = ConversationId::new();
-
-        let reparsed = ConversationId::from_str(&format!(
-            "conversation_{}",
-            conversation_id.legacy_storage_key()
-        ))
-        .expect("the legacy conversation identifier should parse back");
-
-        assert_eq!(reparsed, conversation_id);
-    }
-
-    #[test]
     fn conversation_identifier_accepts_an_unprefixed_uuid() {
-        let conversation_id = ConversationId::new();
+        let uuid_text = uuid::Uuid::now_v7().simple().to_string();
 
-        let reparsed = ConversationId::from_str(&conversation_id.legacy_storage_key())
-            .expect("the storage key should parse as a conversation identifier");
+        let reparsed = ConversationId::from_str(&uuid_text)
+            .expect("an unprefixed uuid should parse as a conversation identifier");
 
-        assert_eq!(reparsed, conversation_id);
+        assert_eq!(reparsed.to_string(), format!("cnv_{uuid_text}"));
     }
 
     #[test]

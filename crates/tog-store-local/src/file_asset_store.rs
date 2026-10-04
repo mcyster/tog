@@ -31,21 +31,6 @@ impl FileAssetStore {
             .join(ASSETS_DIRECTORY_NAME)
             .join(asset_id.storage_key())
     }
-
-    fn legacy_asset_directory(&self, asset_id: AssetId) -> PathBuf {
-        self.root_directory
-            .join(ASSETS_DIRECTORY_NAME)
-            .join(asset_id.legacy_storage_key())
-    }
-
-    fn existing_asset_directory(&self, asset_id: AssetId) -> Option<PathBuf> {
-        [
-            self.asset_directory(asset_id),
-            self.legacy_asset_directory(asset_id),
-        ]
-        .into_iter()
-        .find(|directory| directory.join(METADATA_FILE_NAME).exists())
-    }
 }
 
 impl AssetStore for FileAssetStore {
@@ -74,23 +59,15 @@ impl AssetStore for FileAssetStore {
     }
 
     fn metadata(&self, asset_id: AssetId) -> Result<AssetMetadata, AssetStoreLoadError> {
-        let Some(asset_directory) = self.existing_asset_directory(asset_id) else {
-            return Err(AssetStoreLoadError::NotFound(asset_id));
-        };
-        let Some(metadata) = read_metadata(&asset_directory, asset_id)? else {
+        let Some(metadata) = read_metadata(&self.asset_directory(asset_id), asset_id)? else {
             return Err(AssetStoreLoadError::NotFound(asset_id));
         };
         Ok(metadata)
     }
 
     fn read(&self, asset_id: AssetId) -> Result<Box<dyn Read>, AssetStoreLoadError> {
-        let Some(asset_directory) = self.existing_asset_directory(asset_id) else {
-            return Err(AssetStoreLoadError::NotFound(asset_id));
-        };
-        if read_metadata(&asset_directory, asset_id)?.is_none() {
-            return Err(AssetStoreLoadError::NotFound(asset_id));
-        }
-        let content_path = asset_directory.join(CONTENT_FILE_NAME);
+        self.metadata(asset_id)?;
+        let content_path = self.asset_directory(asset_id).join(CONTENT_FILE_NAME);
         match File::open(&content_path) {
             Ok(content) => Ok(Box::new(content) as Box<dyn Read>),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -111,7 +88,7 @@ impl AssetStore for FileAssetStore {
             let Some(asset_id) = directory_asset_id(&directory_entry.path()) else {
                 continue;
             };
-            let Some(metadata) = read_metadata(&directory_entry.path(), asset_id)? else {
+            let Some(metadata) = read_metadata(&self.asset_directory(asset_id), asset_id)? else {
                 continue;
             };
             metadatas.push(metadata);
