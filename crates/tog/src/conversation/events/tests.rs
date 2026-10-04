@@ -19,6 +19,27 @@ fn record(
     ConversationEventRecord::new(position, ConversationEvent::new(conversation_id, payload))
 }
 
+#[test]
+fn conversation_event_identifier_round_trips_through_its_display_and_serialized_forms() {
+    let event_id = ConversationEventId::new();
+
+    let serialized = serde_json::to_value(event_id).expect("the event identifier should serialize");
+    assert_eq!(serialized, serde_json::Value::String(event_id.to_string()));
+    let deserialized: ConversationEventId =
+        serde_json::from_value(serialized).expect("the event identifier should parse");
+    assert_eq!(deserialized, event_id);
+}
+
+#[test]
+fn conversation_event_identifier_accepts_an_unprefixed_uuid() {
+    let uuid_text = uuid::Uuid::now_v7().simple().to_string();
+
+    let reparsed = ConversationEventId::from_str(&uuid_text)
+        .expect("an unprefixed uuid should parse as an event identifier");
+
+    assert_eq!(reparsed.to_string(), format!("evt_{uuid_text}"));
+}
+
 fn source() -> ModelSource {
     ModelSource::new(
         ProviderId::from_str("test").expect("the provider should be valid"),

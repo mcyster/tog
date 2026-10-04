@@ -2,7 +2,7 @@ use super::ConversationEventRecord;
 use crate::conversation::ConversationEvent;
 use crate::conversation::InvalidConversationEvent;
 
-const SCHEMA_VERSION: u32 = 13;
+const SCHEMA_VERSION: u32 = 14;
 
 impl ConversationEventRecord {
     pub fn new(position: u64, event: ConversationEvent) -> Self {

@@ -37,7 +37,7 @@ cargo run -- "Explain ownership in Rust"
 The command writes progress and the conversation ID to standard error. After OpenAI completes, it writes model-event messages admitted by the selected verbosity to standard output. Continue the conversation with that ID:
 
 ```console
-cargo run -- --conversation conversation_019... "Show an example"
+cargo run -- --conversation cnv_019... "Show an example"
 ```
 
 The default model is `gpt-5.6`. Select another OpenAI model with `--model`:
@@ -65,7 +65,7 @@ most recently active conversation is dumped:
 
 ```console
 cargo run -- :log
-cargo run -- :log conversation_019...
+cargo run -- :log cnv_019...
 ```
 
 Standard output contains only the JSON Lines, so the log can be piped directly
