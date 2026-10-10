@@ -2,7 +2,9 @@
 
 ## Conversation Providers
 
-Evaluate additional providers and provider libraries after the direct OpenAI Responses implementation establishes the required streaming, replay, error, and tool semantics.
+Evaluate additional providers and provider libraries beyond the current
+OpenAI Responses and OpenRouter chat-completions drivers, following their
+established streaming, replay, error, and tool semantics.
 
 ## Command-Line Input
 

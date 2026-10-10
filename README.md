@@ -1,10 +1,13 @@
 # tog
 
-`tog` provides durable command-line conversations through OpenAI's Responses API.
+`tog` provides durable command-line conversations through OpenAI's Responses API
+or OpenRouter's OpenAI-compatible chat completions API.
 
 ## Prerequisites
 
-The supported development environment uses [Nix](https://nixos.org/) with flakes enabled. You also need an OpenAI API key.
+The supported development environment uses [Nix](https://nixos.org/) with flakes
+enabled. You also need an API key for the driver you select: an OpenAI API key for
+the `openai` driver, or an OpenRouter API key for the `openrouter` driver.
 
 Enter the environment directly:
 
@@ -21,10 +24,11 @@ direnv allow
 Set your API key in the current shell:
 
 ```console
-export OPENAI_API_KEY=...
+export OPENAI_API_KEY=...        # for the openai driver
+export OPENROUTER_API_KEY=...    # for the openrouter driver
 ```
 
-With direnv, you can instead put the export in `.env` or `$HOME/.env.tog`; both files are loaded by the repository's `.envrc`.
+With direnv, you can instead put the exports in `.env` or `$HOME/.env.tog`; both files are loaded by the repository's `.envrc`.
 
 ## Run From Source
 
@@ -34,17 +38,25 @@ Start a conversation without installing the binary:
 cargo run -- "Explain ownership in Rust"
 ```
 
-The command writes progress and the conversation ID to standard error. After OpenAI completes, it writes model-event messages admitted by the selected verbosity to standard output. Continue the conversation with that ID:
+The command writes progress and the conversation ID to standard error. After the
+model completes, it writes model-event messages admitted by the selected verbosity
+to standard output. Continue the conversation with that ID:
 
 ```console
 cargo run -- --conversation cnv_019... "Show an example"
 ```
 
-The default model is `gpt-5.6`. Select another OpenAI model with `--model`:
+The default driver is `openai` and the default model is `gpt-5.6`. Select another
+model with `--model`, and select a driver with `--driver`:
 
 ```console
 cargo run -- --model MODEL_NAME "Explain ownership in Rust"
+cargo run -- --driver openrouter --model openrouter/auto "Explain ownership in Rust"
 ```
+
+Selecting the `openrouter` driver uses the chat completions API and reads
+`OPENROUTER_API_KEY` (and an optional `TOG_OPENROUTER_BASE_URL`). The OpenRouter
+driver's default model is `openrouter/auto`.
 
 CLI verbosity defaults to `low`. Model events classify their messages as detailed, interesting, or important. Select `low`, `medium`, or `high` to print progressively more of those messages:
 

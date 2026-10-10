@@ -231,6 +231,79 @@ fn configured_command(server: &MockOpenAiServer, data_directory: &PathBuf) -> Co
     command
 }
 
+struct MockOpenRouterServer {
+    base_url: String,
+    requests: Arc<Mutex<Vec<Value>>>,
+    server_thread: JoinHandle<()>,
+}
+
+impl MockOpenRouterServer {
+    fn start(responses: Vec<&'static str>) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("the mock server should bind");
+        let address = listener
+            .local_addr()
+            .expect("the mock server address should be available");
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let thread_requests = Arc::clone(&requests);
+        let server_thread = thread::spawn(move || {
+            for response_body in responses {
+                let (mut stream, _) = listener.accept().expect("the mock server should accept");
+                let request = read_request(&stream);
+                thread_requests
+                    .lock()
+                    .expect("the request list should lock")
+                    .push(request);
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+                    response_body.len(),
+                )
+                .expect("the mock response should write");
+            }
+        });
+        Self {
+            base_url: format!("http://{address}/api/v1"),
+            requests,
+            server_thread,
+        }
+    }
+
+    fn finish(self) -> Vec<Value> {
+        self.server_thread
+            .join()
+            .expect("the mock server should stop cleanly");
+        Arc::try_unwrap(self.requests)
+            .expect("the request list should have one owner")
+            .into_inner()
+            .expect("the request list should unlock")
+    }
+}
+
+fn configured_openrouter_command(
+    server: &MockOpenRouterServer,
+    data_directory: &PathBuf,
+) -> Command {
+    let mut command = tog_command();
+    command
+        .env("OPENROUTER_API_KEY", "test-key")
+        .env("TOG_OPENROUTER_BASE_URL", &server.base_url)
+        .env("TOG_DATA_DIR", data_directory);
+    command
+}
+
+const OPENROUTER_CHAT_STREAM: &str = concat!(
+    "data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hello\"},\"finish_reason\":null}]}\n\n",
+    "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":1}}\n\n",
+    "data: [DONE]\n\n"
+);
+
+const OPENROUTER_TOOL_CALL_STREAM: &str = concat!(
+    "data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"call_pwd\",\"type\":\"function\",\"function\":{\"name\":\"shell\",\"arguments\":\"\"}}]},\"finish_reason\":null}]}\n\n",
+    "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"command\\\":\\\"pwd\\\"}\"}}]},\"finish_reason\":null}]}\n\n",
+    "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":2}}\n\n",
+    "data: [DONE]\n\n"
+);
+
 fn reported_conversation_id(standard_error: &[u8]) -> String {
     String::from_utf8(standard_error.to_vec())
         .expect("standard error should be UTF-8")
@@ -243,7 +316,7 @@ fn reported_conversation_id(standard_error: &[u8]) -> String {
 fn persisted_events(data_directory: &Path, conversation_id: &str) -> Vec<Value> {
     let log_path = data_directory
         .join("conversations")
-        .join(conversation_id.trim_start_matches("conversation_"))
+        .join(conversation_id)
         .join("events.log");
     let bytes = fs::read(&log_path).expect("the conversation log should be readable");
     committed_events(&bytes)
@@ -303,9 +376,9 @@ fn turn_persists_events_and_prints_semantic_output() {
     let standard_error =
         String::from_utf8(command_output.stderr.clone()).expect("standard error should be UTF-8");
     let conversation_id = reported_conversation_id(&command_output.stderr);
-    assert!(conversation_id.starts_with("conversation_"));
+    assert!(conversation_id.starts_with("cnv_"));
     assert!(standard_error.contains("## waiting for model gpt-5.6\n"));
-    assert!(conversation_id.trim_start_matches("conversation_").len() > 8);
+    assert!(conversation_id.trim_start_matches("cnv_").len() > 8);
     let events = persisted_events(&data_directory, &conversation_id);
     let event_types = events
         .iter()
@@ -329,13 +402,12 @@ fn turn_persists_events_and_prints_semantic_output() {
         ]
     );
     let user = &events[0];
-    assert_eq!(user["schema_version"], 13);
+    assert_eq!(user["schema_version"], 14);
     assert_eq!(
         user["conversation_id"]
             .as_str()
-            .expect("the event should carry its conversation identifier")
-            .replace('-', ""),
-        conversation_id.trim_start_matches("conversation_")
+            .expect("the event should carry its conversation identifier"),
+        conversation_id
     );
     assert_eq!(user["content"][0]["type"], "text");
     assert_eq!(user["content"][0]["value"], "say hi");
@@ -788,6 +860,95 @@ fn authentication_failure_exits_unsuccessfully() {
 }
 
 #[test]
+fn openrouter_selected_by_driver_flag_uses_chat_completions() {
+    let server = MockOpenRouterServer::start(vec![OPENROUTER_CHAT_STREAM]);
+    let data_directory = temporary_data_directory();
+
+    let command_output = configured_openrouter_command(&server, &data_directory)
+        .args(["--driver", "openrouter", "say", "hi"])
+        .output()
+        .expect("tog should run");
+
+    assert!(command_output.status.success());
+    assert_eq!(
+        String::from_utf8(command_output.stdout).expect("standard output should be UTF-8"),
+        "Hello\n"
+    );
+    let standard_error =
+        String::from_utf8(command_output.stderr.clone()).expect("standard error should be UTF-8");
+    assert!(standard_error.contains("## waiting for model openrouter/auto\n"));
+    let conversation_id = reported_conversation_id(&command_output.stderr);
+    let events = persisted_events(&data_directory, &conversation_id);
+    let model_request = &events[3];
+    assert_eq!(model_request["source"]["provider"], "openrouter");
+    assert_eq!(model_request["source"]["model"], "openrouter/auto");
+    let requests = server.finish();
+    assert_eq!(requests[0]["model"], "openrouter/auto");
+    assert_eq!(requests[0]["stream"], true);
+    assert_eq!(requests[0]["messages"][0]["role"], "user");
+    assert_eq!(requests[0]["messages"][0]["content"], "say hi");
+}
+
+#[test]
+fn openrouter_defaults_to_openai_driver() {
+    let server = MockOpenAiServer::start(vec![MockResponse::Success {
+        response_id: "resp_default",
+        assistant_text: "Hello",
+    }]);
+    let data_directory = temporary_data_directory();
+
+    let command_output = configured_command(&server, &data_directory)
+        .args(["say", "hi"])
+        .output()
+        .expect("tog should run");
+
+    assert!(command_output.status.success());
+    let requests = server.finish();
+    assert_eq!(requests[0]["model"], "gpt-5.6");
+}
+
+#[test]
+fn openrouter_tool_round_returns_the_result_to_the_model() {
+    let server =
+        MockOpenRouterServer::start(vec![OPENROUTER_TOOL_CALL_STREAM, OPENROUTER_CHAT_STREAM]);
+    let data_directory = temporary_data_directory();
+
+    let command_output = configured_openrouter_command(&server, &data_directory)
+        .args(["--driver", "openrouter", "run pwd and describe it"])
+        .output()
+        .expect("tog should run");
+
+    assert!(command_output.status.success());
+    assert_eq!(
+        String::from_utf8(command_output.stdout).expect("standard output should be UTF-8"),
+        "Hello\n"
+    );
+    let requests = server.finish();
+    assert_eq!(requests.len(), 2);
+    let messages = requests[1]["messages"]
+        .as_array()
+        .expect("the follow-up request should contain messages");
+    let tool_call = messages
+        .iter()
+        .find(|message| message["role"] == "assistant")
+        .expect("the follow-up request should contain the assistant tool call");
+    assert_eq!(tool_call["tool_calls"][0]["id"], "call_pwd");
+    assert_eq!(tool_call["tool_calls"][0]["function"]["name"], "shell");
+    let tool_message = messages
+        .iter()
+        .find(|message| message["role"] == "tool")
+        .expect("the follow-up request should contain the tool result");
+    assert_eq!(tool_message["tool_call_id"], "call_pwd");
+    let output: Value = serde_json::from_str(
+        tool_message["content"]
+            .as_str()
+            .expect("the tool content should be a JSON string"),
+    )
+    .expect("the tool content should be JSON");
+    assert_eq!(output["type"], "succeeded");
+}
+
+#[test]
 fn turn_rejects_a_missing_user_prompt() {
     let command_output = tog_command().output().expect("tog should run");
 
@@ -875,9 +1036,11 @@ fn log_defaults_to_the_most_recent_conversation_and_accepts_an_identifier() {
     assert!(default_log.status.success());
     let default_events = logged_events(&default_log.stdout);
     assert!(!default_events.is_empty());
-    assert!(default_events.iter().all(|event| {
-        logged_conversation_id(event) == second_conversation_id.trim_start_matches("conversation_")
-    }));
+    assert!(
+        default_events
+            .iter()
+            .all(|event| { logged_conversation_id(event) == second_conversation_id })
+    );
 
     let explicit_log = tog_command()
         .env("TOG_DATA_DIR", &data_directory)
@@ -956,14 +1119,14 @@ fn asset_add_stores_a_file_with_defaults() {
         .expect("the asset id should be reported")
         .to_owned();
 
-    assert!(asset_id.starts_with("asset_"));
+    assert!(asset_id.starts_with("ast_"));
     assert_eq!(asset_line["name"], "screenshot.png");
     assert_eq!(asset_line["mime_type"], "image/png");
     assert_eq!(asset_line["byte_size"], source_bytes.len() as u64);
     assert!(
         data_directory
             .join("assets")
-            .join(asset_id.trim_start_matches("asset_"))
+            .join(&asset_id)
             .join("content")
             .exists()
     );
@@ -1081,7 +1244,7 @@ fn stored_assets_remain_available_when_the_source_changes_or_disappears() {
     let stored_content = std::fs::read(
         data_directory
             .join("assets")
-            .join(asset_id.trim_start_matches("asset_"))
+            .join(&asset_id)
             .join("content"),
     )
     .expect("the stored content should still exist");

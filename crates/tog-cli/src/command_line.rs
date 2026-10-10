@@ -14,9 +14,11 @@ use tog::conversation::{
     TurnOutcome, UserContent,
 };
 use tog::conversation_event_store::{ConversationEventRecord, ConversationEventStore};
+use tog::model_driver::ModelDriver;
 use tog_context::environment::Environment;
 use tog_context::toolset::ToolRegistry;
 use tog_driver_openai::OpenAiModelDriver;
+use tog_driver_openrouter::OpenRouterModelDriver;
 use tog_engine::{ConversationSession, ConversationSessionProgress, ConversationSessionResult};
 use tog_store_local::{FileAssetStore, FileEventStore};
 use tog_tools::ShellTool;
@@ -55,7 +57,19 @@ impl CommandLine {
                 let user_prompt: UserPrompt = arguments.user_prompt_words.join(" ").parse()?;
                 let verbosity = arguments.verbosity;
                 let event_store = FileEventStore::new(environment.data_directory().to_path_buf())?;
-                let model_driver = Box::new(OpenAiModelDriver::from_environment(arguments.model)?);
+                let model = match arguments.model {
+                    Some(model) => model,
+                    None => match arguments.driver {
+                        Driver::OpenAi => ModelId::from_str(DEFAULT_OPENAI_MODEL)
+                            .expect("the OpenAI default model should be valid"),
+                        Driver::OpenRouter => ModelId::from_str(DEFAULT_OPENROUTER_MODEL)
+                            .expect("the OpenRouter default model should be valid"),
+                    },
+                };
+                let model_driver: Box<dyn ModelDriver> = match arguments.driver {
+                    Driver::OpenAi => Box::new(OpenAiModelDriver::from_environment(model)?),
+                    Driver::OpenRouter => Box::new(OpenRouterModelDriver::from_environment(model)?),
+                };
                 let mut tool_registry = ToolRegistry::default();
                 tool_registry.register(ShellTool::new());
                 let conversation_session = match arguments.conversation {
@@ -278,8 +292,11 @@ struct TurnArguments {
     #[arg(long)]
     conversation: Option<ConversationId>,
 
-    #[arg(long, default_value = "gpt-5.6")]
-    model: ModelId,
+    #[arg(long, value_enum, default_value = "openai")]
+    driver: Driver,
+
+    #[arg(long)]
+    model: Option<ModelId>,
 
     #[arg(long, value_enum, default_value = "low")]
     verbosity: Verbosity,
@@ -287,6 +304,17 @@ struct TurnArguments {
     #[arg(value_name = "USER_PROMPT", num_args = 1.., required = true)]
     user_prompt_words: Vec<String>,
 }
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum Driver {
+    #[value(name = "openai")]
+    OpenAi,
+    #[value(name = "openrouter")]
+    OpenRouter,
+}
+
+const DEFAULT_OPENAI_MODEL: &str = "gpt-5.6";
+const DEFAULT_OPENROUTER_MODEL: &str = "openrouter/auto";
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum Verbosity {
