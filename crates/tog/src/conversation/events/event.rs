@@ -97,6 +97,25 @@ impl ConversationEvent {
 }
 
 impl ConversationEventPayload {
+    pub fn describe(&self) -> String {
+        match self {
+            Self::User(event) => format!("user {}", event.describe()),
+            Self::TurnStart(event) => format!("turn_start {}", event.describe()),
+            Self::TurnEnd(event) => format!("turn_end {}", event.describe()),
+            Self::AssistantResponse(event) => format!("assistant_response {}", event.describe()),
+            Self::ToolRequest(event) => format!("tool_request {}", event.describe()),
+            Self::ToolResponse(event) => format!("tool_response {}", event.describe()),
+            Self::ModelRequest(event) => format!("model_request {}", event.describe()),
+            Self::ModelResponse(event) => format!("model_response {}", event.describe()),
+            Self::ModelSpecificEvent(event) => {
+                format!("model_specific_event {}", event.describe())
+            }
+            Self::Automation(event) => format!("automation {}", event.describe()),
+            Self::Context(event) => format!("context {}", event.describe()),
+            Self::Tools(tools) => format!("tools {}", tools.describe()),
+        }
+    }
+
     pub(crate) fn ensure_valid(&self) -> Result<(), InvalidConversationEvent> {
         match self {
             Self::User(event) => event.ensure_valid().map_err(InvalidConversationEvent::User),

@@ -54,6 +54,15 @@ impl ModelRequest {
         self.retry_of
     }
 
+    pub fn describe(&self) -> String {
+        format!(
+            "{}/{} input through {}",
+            self.source.provider().as_str(),
+            self.source.model().as_str(),
+            self.input_through
+        )
+    }
+
     pub(crate) fn ensure_valid(&self) -> Result<(), InvalidModelRequest> {
         if let Some(options) = &self.options {
             options

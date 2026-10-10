@@ -75,6 +75,19 @@ into another consumer:
 tog :log | jq 'select(.class == "fact")'
 ```
 
+Replace the raw dump with a concise human-readable summary of the same
+conversation using `--readable`. Each event prints its type and a one-line
+description under the conversation header:
+
+```console
+cargo run -- :log --readable
+# conversation cnv_aaaa
+## user test 123
+## tool_request shell {"command":"echo \"test 123\""}
+## tool_response {"type":"exited","code":0,"stdout":"test 123\n","stdout_truncated":false}
+## assistant_response test 123
+```
+
 ## Tools
 
 A turn may request tools. The current build registers one `shell` tool that

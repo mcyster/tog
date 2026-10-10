@@ -3,6 +3,8 @@ use std::fmt::{Display, Formatter};
 
 use serde::{Deserialize, Serialize};
 
+use super::one_line_text;
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "type", content = "value", rename_all = "snake_case")]
 pub enum UserContent {
@@ -23,6 +25,16 @@ impl User {
 
     pub fn content(&self) -> &[UserContent] {
         &self.content
+    }
+
+    pub fn describe(&self) -> String {
+        self.content
+            .iter()
+            .map(|part| match part {
+                UserContent::Text(text) => one_line_text(text),
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
     }
 
     pub(crate) fn ensure_valid(&self) -> Result<(), InvalidUser> {

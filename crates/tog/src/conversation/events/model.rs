@@ -59,6 +59,10 @@ impl ModelSource {
         Self { provider, model }
     }
 
+    pub fn provider(&self) -> &ProviderId {
+        &self.provider
+    }
+
     pub fn model(&self) -> &ModelId {
         &self.model
     }
@@ -67,6 +71,12 @@ impl ModelSource {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(transparent)]
 pub struct ProviderId(String);
+
+impl ProviderId {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
 
 impl FromStr for ProviderId {
     type Err = InvalidProviderId;

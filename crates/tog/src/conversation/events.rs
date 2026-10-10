@@ -13,6 +13,7 @@ mod turn_start;
 mod user;
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
@@ -31,6 +32,14 @@ pub use tools::{InvalidTools, Tool, ToolAvailability, ToolDefinition, ToolName, 
 pub use turn_end::{InvalidTurnOutcome, TurnEnd, TurnOutcome};
 pub use turn_start::TurnStart;
 pub use user::{InvalidUser, User, UserContent};
+
+fn compact_json(value: &Value) -> String {
+    serde_json::to_string(value).expect("a JSON value should always serialize")
+}
+
+fn one_line_text(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct ConversationEventId(Uuid);

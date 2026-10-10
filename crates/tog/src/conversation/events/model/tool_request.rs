@@ -9,6 +9,8 @@ use crate::conversation::events::tools::ToolName;
 
 use super::{InvalidModelData, ModelData};
 
+use super::super::compact_json;
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct ToolRequest {
     model_request_id: ConversationEventId,
@@ -49,6 +51,10 @@ impl ToolRequest {
 
     pub fn data(&self) -> Option<&ModelData> {
         self.data.as_ref()
+    }
+
+    pub fn describe(&self) -> String {
+        format!("{}({})", self.tool_name, compact_json(&self.arguments))
     }
 
     pub(crate) fn ensure_valid(&self) -> Result<(), InvalidToolRequest> {

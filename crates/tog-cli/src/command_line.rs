@@ -27,7 +27,7 @@ use tog_tools::ShellTool;
     version,
     about = "Command-line access to agentic services",
     disable_help_subcommand = true,
-    override_usage = "tog [:turn] [OPTIONS] <USER_PROMPT>...\n       tog :log [CONVERSATION_ID]\n       tog :asset add [OPTIONS] <SOURCE_PATH>\n       tog :asset list",
+    override_usage = "tog [:turn] [OPTIONS] <USER_PROMPT>...\n       tog :log [OPTIONS] [CONVERSATION_ID]\n       tog :asset add [OPTIONS] <SOURCE_PATH>\n       tog :asset list",
     after_help = "When no command is specified, :turn is used."
 )]
 pub(crate) struct CommandLine {
@@ -96,7 +96,11 @@ impl CommandLine {
                 let events = event_store.load(conversation_id)?;
                 let standard_output = io::stdout();
                 let mut standard_output = standard_output.lock();
-                write_conversation_log(&events, &mut standard_output)?;
+                if arguments.readable {
+                    write_readable_conversation_log(&events, &mut standard_output)?;
+                } else {
+                    write_conversation_log(&events, &mut standard_output)?;
+                }
                 Ok(CommandOutcome::ConversationLogged)
             }
             Command::Asset(arguments) => {
@@ -149,6 +153,22 @@ fn write_conversation_log(
     for event in events {
         serde_json::to_writer(&mut *output, event).map_err(io::Error::other)?;
         output.write_all(b"\n")?;
+    }
+    output.flush()
+}
+
+fn write_readable_conversation_log(
+    events: &[ConversationEventRecord],
+    output: &mut impl Write,
+) -> io::Result<()> {
+    if let Some(conversation_id) = events
+        .first()
+        .map(|record| record.event().conversation_id())
+    {
+        writeln!(output, "# conversation {conversation_id}")?;
+    }
+    for record in events {
+        writeln!(output, "## {}", record.event().payload().describe())?;
     }
     output.flush()
 }
@@ -217,8 +237,8 @@ enum Command {
 
     #[command(
         name = ":log",
-        about = "Dump a conversation log as JSON Lines",
-        override_usage = "tog :log [CONVERSATION_ID]"
+        about = "Dump a conversation log as JSON Lines or a readable summary",
+        override_usage = "tog :log [OPTIONS] [CONVERSATION_ID]"
     )]
     Log(LogArguments),
 
@@ -271,6 +291,10 @@ struct LogArguments {
     /// Conversation to dump; defaults to the most recently active conversation.
     #[arg(value_name = "CONVERSATION_ID")]
     conversation_id: Option<ConversationId>,
+
+    /// Print a concise summary of each event instead of JSON Lines.
+    #[arg(long)]
+    readable: bool,
 }
 
 #[derive(Debug, Args)]

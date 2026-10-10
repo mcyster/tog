@@ -47,6 +47,15 @@ impl ModelResponse {
         self.usage.as_ref()
     }
 
+    pub fn describe(&self) -> String {
+        match &self.outcome {
+            ModelOutcome::Succeeded => {
+                format!("succeeded with {} outputs", self.output_event_ids.len())
+            }
+            ModelOutcome::Failed { failure } => format!("failed: {}", failure.message()),
+        }
+    }
+
     pub(crate) fn ensure_valid(&self) -> Result<(), InvalidModelResponse> {
         if let ModelOutcome::Failed { failure } = &self.outcome {
             failure

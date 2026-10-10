@@ -24,6 +24,13 @@ impl TurnStart {
         self.input_through
     }
 
+    pub fn describe(&self) -> String {
+        match self.user_id {
+            Some(user_id) => format!("input through {} before {user_id}", self.input_through),
+            None => format!("input through {}", self.input_through),
+        }
+    }
+
     pub(super) fn ensure_valid(&self) -> Result<(), super::InvalidConversationEvent> {
         Ok(())
     }

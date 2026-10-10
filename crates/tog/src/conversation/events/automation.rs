@@ -3,6 +3,8 @@ use std::fmt::{Display, Formatter};
 
 use serde::{Deserialize, Serialize};
 
+use super::one_line_text;
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct Automation {
     content: String,
@@ -19,6 +21,10 @@ impl Automation {
     #[cfg(test)]
     pub(crate) fn content(&self) -> &str {
         &self.content
+    }
+
+    pub fn describe(&self) -> String {
+        one_line_text(&self.content)
     }
 
     pub(crate) fn ensure_valid(&self) -> Result<(), InvalidAutomation> {
