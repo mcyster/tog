@@ -15,8 +15,9 @@ Do not leave finished work uncommitted in the working tree.
 
 ## Start from the latest default branch
 
-Begin new work by updating the default branch and branching from it. Do not
-commit directly to the default branch.
+Begin new work by updating the default branch and creating a linked git worktree
+for a new branch from it. Do the change's work in that worktree and do not commit
+directly to the default branch.
 
 ## Create or update the pull request
 
@@ -32,6 +33,10 @@ When a change is complete:
 
 When the current pull request is already merged, start a new branch from the
 latest default branch and open a new pull request.
+
+## Clean up the worktree
+
+Remove the linked worktree once its change is merged.
 
 ## Keep the description current
 
