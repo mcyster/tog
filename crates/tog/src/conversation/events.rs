@@ -32,9 +32,11 @@ pub use turn_end::{InvalidTurnOutcome, TurnEnd, TurnOutcome};
 pub use turn_start::TurnStart;
 pub use user::{InvalidUser, User, UserContent};
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
-#[serde(transparent)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct ConversationEventId(Uuid);
+
+#[derive(Debug)]
+pub struct InvalidConversationEventId(uuid::Error);
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct ConversationEvent {

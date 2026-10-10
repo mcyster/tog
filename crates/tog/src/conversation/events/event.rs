@@ -1,11 +1,16 @@
 use std::fmt::{Display, Formatter};
+use std::str::FromStr;
 
+use serde::de::Error as DeserializeError;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::conversation::{ConversationEvent, ConversationEventPayload, ConversationId};
 
-use super::{ConversationEventId, InvalidConversationEvent};
+use super::{ConversationEventId, InvalidConversationEvent, InvalidConversationEventId};
+
+const PREFIX: &str = "evt_";
 
 impl ConversationEventId {
     pub fn new() -> Self {
@@ -21,7 +26,42 @@ impl Default for ConversationEventId {
 
 impl Display for ConversationEventId {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "conversation_event_{}", self.0.simple())
+        write!(formatter, "{PREFIX}{}", self.0.simple())
+    }
+}
+
+impl FromStr for ConversationEventId {
+    type Err = InvalidConversationEventId;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        let uuid_text = text.strip_prefix(PREFIX).unwrap_or(text);
+        Uuid::parse_str(uuid_text)
+            .map(Self)
+            .map_err(InvalidConversationEventId)
+    }
+}
+
+impl Serialize for ConversationEventId {
+    fn serialize<SerializerType>(
+        &self,
+        serializer: SerializerType,
+    ) -> Result<SerializerType::Ok, SerializerType::Error>
+    where
+        SerializerType: Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for ConversationEventId {
+    fn deserialize<DeserializerType>(
+        deserializer: DeserializerType,
+    ) -> Result<Self, DeserializerType::Error>
+    where
+        DeserializerType: Deserializer<'de>,
+    {
+        let unvalidated_value = String::deserialize(deserializer)?;
+        Self::from_str(&unvalidated_value).map_err(DeserializerType::Error::custom)
     }
 }
 

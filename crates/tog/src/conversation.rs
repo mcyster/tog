@@ -7,11 +7,12 @@ mod view;
 
 pub use events::{
     AssistantResponse, Context, ConversationEvent, ConversationEventId, ConversationEventPayload,
-    FailureCategory, InvalidAssistantResponse, InvalidConversationEvent, InvalidModelResponse,
-    InvalidModelSpecificEvent, InvalidToolRequest, ModelData, ModelEvent, ModelId, ModelOutcome,
-    ModelRequest, ModelResponse, ModelSource, ModelSpecificEvent, OperationFailure, ProviderId,
-    Tool, ToolAvailability, ToolDefinition, ToolName, ToolOutcome, ToolRequest, ToolResponse,
-    Tools, TurnEnd, TurnOutcome, TurnStart, Usage, User, UserContent,
+    FailureCategory, InvalidAssistantResponse, InvalidConversationEvent,
+    InvalidConversationEventId, InvalidModelResponse, InvalidModelSpecificEvent,
+    InvalidToolRequest, ModelData, ModelEvent, ModelId, ModelOutcome, ModelRequest, ModelResponse,
+    ModelSource, ModelSpecificEvent, OperationFailure, ProviderId, Tool, ToolAvailability,
+    ToolDefinition, ToolName, ToolOutcome, ToolRequest, ToolResponse, Tools, TurnEnd, TurnOutcome,
+    TurnStart, Usage, User, UserContent,
 };
 pub use history::ConversationHistory;
 pub use id::ConversationId;
