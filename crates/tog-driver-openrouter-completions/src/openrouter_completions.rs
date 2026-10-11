@@ -70,6 +70,7 @@ enum ModelDriverEvent {
     },
     ModelSpecificEvent {
         event_type: String,
+        payload: Value,
         message: Option<String>,
     },
     ToolRequest {
@@ -578,13 +579,14 @@ fn translate_model_driver_event(
         ),
         ModelDriverEvent::ModelSpecificEvent {
             event_type,
+            payload,
             message,
         } => ModelDriverOutput::ModelSpecificEvent(
             ModelSpecificEvent::new(
                 model_request_id,
                 event_type,
                 PROVIDER_PAYLOAD_VERSION,
-                json!({}),
+                payload,
                 message,
             )
             .map_err(invalid_model_specific_event)?,
@@ -901,6 +903,7 @@ fn parse_choice_deltas(
                             .model_outputs
                             .push_back(ModelDriverEvent::ModelSpecificEvent {
                                 event_type: CONTENT_DELTA_EVENT_TYPE.to_owned(),
+                                payload: json!({}),
                                 message: Some(content.clone()),
                             });
                     }
@@ -962,12 +965,6 @@ fn accumulate_tool_call(
         .and_then(|function| function.get("arguments"))
         .and_then(Value::as_str)
         .unwrap_or_default();
-    if !arguments.is_empty() {
-        model_outputs.push_back(ModelDriverEvent::ModelSpecificEvent {
-            event_type: TOOL_CALL_ARGUMENTS_DELTA_EVENT_TYPE.to_owned(),
-            message: Some(arguments.to_owned()),
-        });
-    }
 
     if let Some(existing) = tool_calls.iter_mut().find(|call| call.index == index) {
         if existing.call_id.is_none() {
@@ -977,14 +974,29 @@ fn accumulate_tool_call(
             existing.name = name;
         }
         existing.arguments.push_str(arguments);
-        return Ok(());
+    } else {
+        tool_calls.push(AccumulatedToolCall {
+            index,
+            call_id,
+            name,
+            arguments: arguments.to_owned(),
+        });
     }
-    tool_calls.push(AccumulatedToolCall {
-        index,
-        call_id,
-        name,
-        arguments: arguments.to_owned(),
-    });
+
+    if !arguments.is_empty() {
+        let correlation_payload = tool_calls
+            .iter()
+            .find(|call| call.index == index)
+            .and_then(|call| call.call_id.clone())
+            .map(|call_id| json!({ "call_id": call_id }))
+            .unwrap_or_else(|| json!({}));
+        model_outputs.push_back(ModelDriverEvent::ModelSpecificEvent {
+            event_type: TOOL_CALL_ARGUMENTS_DELTA_EVENT_TYPE.to_owned(),
+            payload: correlation_payload,
+            message: Some(arguments.to_owned()),
+        });
+    }
+
     Ok(())
 }
 
@@ -1472,6 +1484,7 @@ mod tests {
             ModelDriverEvent::ModelSpecificEvent {
                 event_type,
                 message: Some(message),
+                ..
             } if event_type == "content_delta" && message == "Hello "
         ));
         assert!(matches!(
@@ -1479,6 +1492,7 @@ mod tests {
             ModelDriverEvent::ModelSpecificEvent {
                 event_type,
                 message: Some(message),
+                ..
             } if event_type == "content_delta" && message == "world"
         ));
         assert!(matches!(
@@ -1667,8 +1681,11 @@ mod tests {
             &events[0],
             ModelDriverEvent::ModelSpecificEvent {
                 event_type,
+                payload,
                 message: Some(message),
-            } if event_type == "tool_call_arguments_delta" && message == "{\"command\":\"pwd\"}"
+            } if event_type == "tool_call_arguments_delta"
+                && payload["call_id"] == "call_1"
+                && message == "{\"command\":\"pwd\"}"
         ));
         let ModelDriverEvent::ToolRequest {
             tool_name,
@@ -1713,15 +1730,21 @@ mod tests {
             &events[0],
             ModelDriverEvent::ModelSpecificEvent {
                 event_type,
+                payload,
                 message: Some(message),
-            } if event_type == "tool_call_arguments_delta" && message == "{\"command\":\"pwd\"}"
+            } if event_type == "tool_call_arguments_delta"
+                && payload["call_id"] == "call_1"
+                && message == "{\"command\":\"pwd\"}"
         ));
         assert!(matches!(
             &events[1],
             ModelDriverEvent::ModelSpecificEvent {
                 event_type,
+                payload,
                 message: Some(message),
-            } if event_type == "tool_call_arguments_delta" && message == "{\"command\":\"ls\"}"
+            } if event_type == "tool_call_arguments_delta"
+                && payload["call_id"] == "call_2"
+                && message == "{\"command\":\"ls\"}"
         ));
         let ModelDriverEvent::ToolRequest {
             arguments: first,
@@ -1749,6 +1772,139 @@ mod tests {
                 outcome: TerminalModelOutcome::Succeeded,
                 ..
             }
+        ));
+    }
+
+    #[tokio::test]
+    async fn interleaved_tool_call_fragments_carry_their_call_ids() {
+        let input = concat!(
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"shell\",\"arguments\":\"\"}},{\"index\":1,\"id\":\"call_2\",\"function\":{\"name\":\"shell\",\"arguments\":\"\"}}]},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"command\\\":\\\"pwd\\\"}\"}},{\"index\":1,\"function\":{\"arguments\":\"{\\\"command\\\":\\\"ls\\\"}\"}}]},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+
+        let events = collect_driver_events(input)
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .expect("the interleaved tool call stream should parse");
+
+        let partials = events
+            .iter()
+            .filter_map(|event| match event {
+                ModelDriverEvent::ModelSpecificEvent {
+                    event_type,
+                    payload,
+                    message,
+                } if event_type == "tool_call_arguments_delta" => Some((payload, message)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(partials.len(), 2, "one argument delta per tool call");
+        assert_eq!(partials[0].0["call_id"], "call_1");
+        assert_eq!(partials[0].1.as_deref(), Some("{\"command\":\"pwd\"}"));
+        assert_eq!(partials[1].0["call_id"], "call_2");
+        assert_eq!(partials[1].1.as_deref(), Some("{\"command\":\"ls\"}"));
+
+        let requests = events
+            .iter()
+            .filter_map(|event| match event {
+                ModelDriverEvent::ToolRequest {
+                    arguments,
+                    provider_call_id,
+                    ..
+                } => Some((arguments, provider_call_id.as_deref())),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].0, &json!({ "command": "pwd" }));
+        assert_eq!(requests[0].1, Some("call_1"));
+        assert_eq!(requests[1].0, &json!({ "command": "ls" }));
+        assert_eq!(requests[1].1, Some("call_2"));
+    }
+
+    #[tokio::test]
+    async fn split_argument_fragments_retain_the_call_id_across_chunks() {
+        let input = concat!(
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"shell\",\"arguments\":\"\"}}]},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"command\\\":\\\"pw\"}}]},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"d\\\"}\"}}]},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+
+        let events = collect_driver_events(input)
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .expect("the split argument stream should parse");
+
+        let partials = events
+            .iter()
+            .filter_map(|event| match event {
+                ModelDriverEvent::ModelSpecificEvent {
+                    event_type,
+                    payload,
+                    message,
+                } if event_type == "tool_call_arguments_delta" => Some((payload, message)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(partials.len(), 2);
+        assert_eq!(partials[0].0["call_id"], "call_1");
+        assert_eq!(partials[0].1.as_deref(), Some("{\"command\":\"pw"));
+        assert_eq!(partials[1].0["call_id"], "call_1");
+        assert_eq!(partials[1].1.as_deref(), Some("d\"}"));
+
+        let request = events
+            .iter()
+            .find_map(|event| match event {
+                ModelDriverEvent::ToolRequest {
+                    arguments,
+                    provider_call_id,
+                    ..
+                } => Some((arguments, provider_call_id.as_deref())),
+                _ => None,
+            })
+            .expect("the completed tool request should be present");
+        assert_eq!(request.0, &json!({ "command": "pwd" }));
+        assert_eq!(request.1, Some("call_1"));
+    }
+
+    #[tokio::test]
+    async fn tool_call_fragments_without_an_id_omit_the_correlation_payload() {
+        let input = concat!(
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"name\":\"shell\",\"arguments\":\"\"}}]},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"command\\\":\\\"pwd\\\"}\"}}]},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+
+        let events = collect_driver_events(input)
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .expect("the id-less tool call stream should parse");
+
+        assert!(matches!(
+            &events[0],
+            ModelDriverEvent::ModelSpecificEvent {
+                event_type,
+                payload,
+                message: Some(message),
+            } if event_type == "tool_call_arguments_delta"
+                && payload.get("call_id").is_none()
+                && message == "{\"command\":\"pwd\"}"
+        ));
+        assert!(matches!(
+            &events[1],
+            ModelDriverEvent::ToolRequest {
+                arguments,
+                provider_call_id: None,
+                ..
+            } if arguments == &json!({ "command": "pwd" })
         ));
     }
 
@@ -1863,6 +2019,7 @@ mod tests {
             ModelDriverEvent::ModelSpecificEvent {
                 event_type,
                 message: Some(message),
+                ..
             } if event_type == "content_delta" && message == "Hello"
         ));
         assert!(matches!(
