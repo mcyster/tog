@@ -6,6 +6,8 @@ use serde_json::Value;
 
 use crate::conversation::events::ConversationEventId;
 
+use super::super::one_line_text;
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct ModelSpecificEvent {
     model_request_id: ConversationEventId,
@@ -53,6 +55,13 @@ impl ModelSpecificEvent {
 
     pub fn message(&self) -> Option<&str> {
         self.message.as_deref()
+    }
+
+    pub fn describe(&self) -> String {
+        match &self.message {
+            Some(message) => format!("{}: {}", self.provider_event_type, one_line_text(message)),
+            None => self.provider_event_type.clone(),
+        }
     }
 
     pub(crate) fn ensure_valid(&self) -> Result<(), InvalidModelSpecificEvent> {

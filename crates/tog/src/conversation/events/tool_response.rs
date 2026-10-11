@@ -4,6 +4,7 @@ use std::fmt::{Display, Formatter};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use super::compact_json;
 use super::{ConversationEventId, InvalidOperationFailure, OperationFailure};
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -26,6 +27,13 @@ impl ToolResponse {
 
     pub fn outcome(&self) -> &ToolOutcome {
         &self.outcome
+    }
+
+    pub fn describe(&self) -> String {
+        match &self.outcome {
+            ToolOutcome::Succeeded { value } => compact_json(value),
+            ToolOutcome::Failed { failure } => format!("failed: {}", failure.message()),
+        }
     }
 
     pub(crate) fn ensure_valid(&self) -> Result<(), InvalidToolOutcome> {
