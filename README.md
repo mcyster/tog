@@ -34,7 +34,11 @@ Start a conversation without installing the binary:
 cargo run -- "Explain ownership in Rust"
 ```
 
-The command writes progress and the conversation ID to standard error. After OpenAI completes, it writes model-event messages admitted by the selected verbosity to standard output. Continue the conversation with that ID:
+The command writes progress, the conversation ID, and a description of each
+committed event to standard error. Model-event messages (like reasoning steps)
+are admitted by the selected verbosity. The assistant response is written to
+standard output, so the final result can be piped or redirected on its own.
+Continue the conversation with that ID:
 
 ```console
 cargo run -- --conversation cnv_019... "Show an example"
@@ -46,7 +50,9 @@ The default model is `gpt-5.6`. Select another OpenAI model with `--model`:
 cargo run -- --model MODEL_NAME "Explain ownership in Rust"
 ```
 
-CLI verbosity defaults to `low`. Model events classify their messages as detailed, interesting, or important. Select `low`, `medium`, or `high` to print progressively more of those messages:
+CLI verbosity defaults to `low`. It controls the model events described on
+standard error. Select `low`, `medium`, or `high` to print progressively more
+of those messages:
 
 ```console
 cargo run -- --verbosity medium "Explain ownership in Rust"

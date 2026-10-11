@@ -10,8 +10,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use prompt::UserPrompt;
 use tog::asset_store::{AssetMetadata, AssetStore, MimeType};
 use tog::conversation::{
-    ConversationEvent, ConversationEventPayload, ConversationId, ModelId, ModelOutcome,
-    TurnOutcome, UserContent,
+    ConversationEvent, ConversationEventPayload, ConversationId, ModelId, TurnOutcome, UserContent,
 };
 use tog::conversation_event_store::{ConversationEventRecord, ConversationEventStore};
 use tog_context::environment::Environment;
@@ -77,7 +76,7 @@ impl CommandLine {
                                 eprintln!("## waiting for model {model}");
                             }
                             ConversationSessionProgress::EventCompleted { event } => {
-                                render_model_event(&event, verbosity)?;
+                                render_event(&event, verbosity)?;
                             }
                         }
                         Ok(())
@@ -173,28 +172,24 @@ fn write_readable_conversation_log(
     output.flush()
 }
 
-fn render_model_event(event: &ConversationEvent, verbosity: Verbosity) -> io::Result<()> {
-    let message = match event.payload() {
+fn render_event(event: &ConversationEvent, verbosity: Verbosity) -> io::Result<()> {
+    match event.payload() {
         ConversationEventPayload::AssistantResponse(response) => {
-            Some(response.content().to_owned())
+            let mut standard_output = io::stdout().lock();
+            writeln!(standard_output, "{}", response.content())?;
+            standard_output.flush()
         }
-        ConversationEventPayload::ModelSpecificEvent(event)
-            if verbosity.shows_auxiliary_messages() =>
+        ConversationEventPayload::ModelSpecificEvent(_)
+            if !verbosity.shows_auxiliary_messages() =>
         {
-            event.message().map(|message| format!("### {message}"))
+            Ok(())
         }
-        ConversationEventPayload::ModelResponse(response) => match response.outcome() {
-            ModelOutcome::Failed { failure } => Some(format!("### {}", failure.message())),
-            ModelOutcome::Succeeded => None,
-        },
-        _ => None,
-    };
-    let Some(message) = message else {
-        return Ok(());
-    };
-    let mut standard_output = io::stdout().lock();
-    writeln!(standard_output, "{message}")?;
-    standard_output.flush()
+        payload => {
+            let mut standard_error = io::stderr().lock();
+            writeln!(standard_error, "## {}", payload.describe())?;
+            standard_error.flush()
+        }
+    }
 }
 
 fn write_asset_metadata(metadata: &AssetMetadata, output: &mut impl Write) -> io::Result<()> {

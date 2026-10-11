@@ -451,7 +451,17 @@ fn high_verbosity_prints_all_model_event_messages() {
     assert!(command_output.status.success());
     assert_eq!(
         String::from_utf8(command_output.stdout).expect("standard output should be UTF-8"),
-        "### Detailed thought\n### Reasoning summary\nFinal answer\n"
+        "Final answer\n"
+    );
+    let standard_error =
+        String::from_utf8(command_output.stderr).expect("standard error should be UTF-8");
+    assert!(
+        standard_error.contains("## model_specific_event reasoning: Detailed thought\n"),
+        "high verbosity should describe the reasoning event: {standard_error}"
+    );
+    assert!(
+        standard_error.contains("## model_specific_event reasoning_summary: Reasoning summary\n"),
+        "high verbosity should describe the reasoning summary: {standard_error}"
     );
     let requests = server.finish();
     assert_eq!(requests.len(), 1);
@@ -477,22 +487,31 @@ fn cli_output_is_incremental_and_not_duplicated() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("tog should start");
+    let mut standard_error = BufReader::new(
+        child
+            .stderr
+            .take()
+            .expect("tog standard error should be captured"),
+    );
+
+    loop {
+        let mut line = String::new();
+        standard_error
+            .read_line(&mut line)
+            .expect("the first semantic event should be readable");
+        if line.trim_end() == "## model_specific_event reasoning: Detailed thought" {
+            break;
+        }
+    }
+    continue_response
+        .send(())
+        .expect("the mock response should continue");
     let mut standard_output = BufReader::new(
         child
             .stdout
             .take()
             .expect("tog standard output should be captured"),
     );
-    let mut first_line = String::new();
-
-    standard_output
-        .read_line(&mut first_line)
-        .expect("the first semantic event should be readable");
-
-    assert_eq!(first_line, "### Detailed thought\n");
-    continue_response
-        .send(())
-        .expect("the mock response should continue");
     let mut remaining_output = String::new();
     standard_output
         .read_to_string(&mut remaining_output)
@@ -520,7 +539,13 @@ fn a_refusal_is_a_failed_terminal_response_and_fails_the_turn() {
     assert!(!command_output.status.success());
     assert_eq!(
         String::from_utf8(command_output.stdout).expect("standard output should be UTF-8"),
-        "### I cannot comply.\n"
+        ""
+    );
+    let standard_error =
+        String::from_utf8(command_output.stderr.clone()).expect("standard error should be UTF-8");
+    assert!(
+        standard_error.contains("## model_response failed: I cannot comply.\n"),
+        "the refusal should be described on standard error: {standard_error}"
     );
     let conversation_id = reported_conversation_id(&command_output.stderr);
     let events = persisted_events(&data_directory, &conversation_id);
@@ -594,7 +619,13 @@ fn medium_verbosity_prints_auxiliary_model_messages() {
     assert!(command_output.status.success());
     assert_eq!(
         String::from_utf8(command_output.stdout).expect("standard output should be UTF-8"),
-        "### Detailed thought\n### Reasoning summary\nFinal answer\n"
+        "Final answer\n"
+    );
+    let standard_error =
+        String::from_utf8(command_output.stderr).expect("standard error should be UTF-8");
+    assert!(
+        standard_error.contains("## model_specific_event reasoning: Detailed thought\n"),
+        "medium verbosity should describe the reasoning event: {standard_error}"
     );
     server.finish();
 }
@@ -623,7 +654,13 @@ fn reasoning_events_are_persisted_and_printed_but_not_replayed_as_assistant_mess
     assert!(first_output.status.success());
     assert_eq!(
         String::from_utf8(first_output.stdout).expect("standard output should be UTF-8"),
-        "### Detailed thought\n### Reasoning summary\nFinal answer\n"
+        "Final answer\n"
+    );
+    let first_standard_error =
+        String::from_utf8(first_output.stderr.clone()).expect("standard error should be UTF-8");
+    assert!(
+        first_standard_error.contains("## model_specific_event reasoning: Detailed thought\n"),
+        "high verbosity should describe the reasoning event: {first_standard_error}"
     );
     let conversation_id = reported_conversation_id(&first_output.stderr);
     let persisted_events = persisted_events(&data_directory, &conversation_id);
@@ -781,8 +818,11 @@ fn authentication_failure_exits_unsuccessfully() {
     assert!(!command_output.status.success());
     assert_eq!(
         String::from_utf8(command_output.stdout).expect("standard output should be UTF-8"),
-        "### The model provider could not authenticate the invocation.\n"
+        ""
     );
+    assert!(String::from_utf8(command_output.stderr)
+        .expect("standard error should be UTF-8")
+        .contains("## model_response failed: The model provider could not authenticate the invocation.\n"));
     assert_eq!(server.finish().len(), 1);
 }
 
