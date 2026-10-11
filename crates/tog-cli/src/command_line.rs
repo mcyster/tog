@@ -13,9 +13,11 @@ use tog::conversation::{
     ConversationEvent, ConversationEventPayload, ConversationId, ModelId, TurnOutcome, UserContent,
 };
 use tog::conversation_event_store::{ConversationEventRecord, ConversationEventStore};
+use tog::model_driver::ModelDriver;
 use tog_context::environment::Environment;
 use tog_context::toolset::ToolRegistry;
 use tog_driver_openai::OpenAiModelDriver;
+use tog_driver_openrouter_completions::OpenRouterCompletionsModelDriver;
 use tog_engine::{ConversationSession, ConversationSessionProgress, ConversationSessionResult};
 use tog_store_local::{FileAssetStore, FileEventStore};
 use tog_tools::ShellTool;
@@ -27,7 +29,7 @@ use tog_tools::ShellTool;
     about = "Command-line access to agentic services",
     disable_help_subcommand = true,
     override_usage = "tog [:turn] [OPTIONS] <USER_PROMPT>...\n       tog :log [OPTIONS] [CONVERSATION_ID]\n       tog :asset add [OPTIONS] <SOURCE_PATH>\n       tog :asset list",
-    after_help = "When no command is specified, :turn is used."
+    after_help = "When no command is specified, :turn is used. Select a driver with\ntog :turn --driver openai|openrouter-completions; see tog :turn --help\nfor all :turn options."
 )]
 pub(crate) struct CommandLine {
     #[command(subcommand)]
@@ -54,7 +56,23 @@ impl CommandLine {
                 let user_prompt: UserPrompt = arguments.user_prompt_words.join(" ").parse()?;
                 let verbosity = arguments.verbosity;
                 let event_store = FileEventStore::new(environment.data_directory().to_path_buf())?;
-                let model_driver = Box::new(OpenAiModelDriver::from_environment(arguments.model)?);
+                let model = match arguments.model {
+                    Some(model) => model,
+                    None => match arguments.driver {
+                        Driver::OpenAi => ModelId::from_str(DEFAULT_OPENAI_MODEL)
+                            .expect("the OpenAI default model should be valid"),
+                        Driver::OpenRouterCompletions => {
+                            ModelId::from_str(DEFAULT_OPENROUTER_MODEL)
+                                .expect("the OpenRouter default model should be valid")
+                        }
+                    },
+                };
+                let model_driver: Box<dyn ModelDriver> = match arguments.driver {
+                    Driver::OpenAi => Box::new(OpenAiModelDriver::from_environment(model)?),
+                    Driver::OpenRouterCompletions => {
+                        Box::new(OpenRouterCompletionsModelDriver::from_environment(model)?)
+                    }
+                };
                 let mut tool_registry = ToolRegistry::default();
                 tool_registry.register(ShellTool::new());
                 let conversation_session = match arguments.conversation {
@@ -294,18 +312,36 @@ struct LogArguments {
 
 #[derive(Debug, Args)]
 struct TurnArguments {
+    /// Conversation to continue; starts a new conversation when omitted.
     #[arg(long)]
     conversation: Option<ConversationId>,
 
-    #[arg(long, default_value = "gpt-5.6")]
-    model: ModelId,
+    /// Model driver to use: openai or openrouter-completions.
+    #[arg(long, value_enum, default_value = "openai")]
+    driver: Driver,
 
+    /// Model to use; defaults per driver.
+    #[arg(long)]
+    model: Option<ModelId>,
+
+    /// How much model-event detail to print.
     #[arg(long, value_enum, default_value = "low")]
     verbosity: Verbosity,
 
     #[arg(value_name = "USER_PROMPT", num_args = 1.., required = true)]
     user_prompt_words: Vec<String>,
 }
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum Driver {
+    #[value(name = "openai")]
+    OpenAi,
+    #[value(name = "openrouter-completions")]
+    OpenRouterCompletions,
+}
+
+const DEFAULT_OPENAI_MODEL: &str = "gpt-5.6";
+const DEFAULT_OPENROUTER_MODEL: &str = "openrouter/auto";
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum Verbosity {

@@ -35,13 +35,15 @@ definitions, and the storage contracts. `tog-context` supplies the environment a
 toolset; `tog-engine` executes conversations; `tog-tools` and `tog-store-local`
 hold concrete tool and filesystem-store implementations; and `tog-cli` composes
 the `tog` executable. Each model-driver provider lives in its own crate, starting
-with `tog-driver-openai`.
+with `tog-driver-openai` for the OpenAI Responses API and
+`tog-driver-openrouter-completions` for OpenRouter's OpenAI-compatible chat
+completions API.
 
 Within the workspace, `Conversation` defines the event model, `ModelDriver` its
-provider boundary, and `OpenAiModelDriver` the concrete integration.
+provider boundary, and each driver crate its concrete integration.
 `ConversationSession` coordinates a bounded loop with sequential tool execution.
-The CLI selects local storage and concrete tools. Assets are immutable files
-managed through `AssetStore`.
+The CLI selects a driver, local storage, and concrete tools. Assets are immutable
+files managed through `AssetStore`.
 
 The context/session model must not be inferred from the existing
 `ConversationSession` name. Daemon scheduling, automatic recovery and retries,

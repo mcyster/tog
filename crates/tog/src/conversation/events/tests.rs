@@ -3,10 +3,11 @@ use std::str::FromStr;
 use serde_json::json;
 
 use super::{
-    AssistantResponse, Automation, Context, ConversationEventId, FailureCategory, InvalidUser,
-    ModelData, ModelId, ModelOutcome, ModelRequest, ModelResponse, ModelSource, ModelSpecificEvent,
-    OperationFailure, ProviderId, Tool, ToolAvailability, ToolOutcome, ToolRequest, ToolResponse,
-    Tools, TurnEnd, TurnOutcome, TurnStart, User, UserContent,
+    AssistantResponse, Automation, Context, ConversationEventId, FailureCategory,
+    InvalidModelSpecificEvent, InvalidUser, ModelData, ModelId, ModelOutcome, ModelRequest,
+    ModelResponse, ModelSource, ModelSpecificEvent, OperationFailure, ProviderId, Tool,
+    ToolAvailability, ToolOutcome, ToolRequest, ToolResponse, Tools, TurnEnd, TurnOutcome,
+    TurnStart, User, UserContent,
 };
 use crate::conversation::{ConversationEvent, ConversationEventPayload, ConversationId};
 use crate::conversation_event_store::ConversationEventRecord;
@@ -307,6 +308,34 @@ fn a_model_specific_event_round_trips_its_payload_version_and_message() {
     assert_eq!(restored, event);
     assert_eq!(restored.provider_payload_version(), 2);
     assert_eq!(restored.message(), Some("Thinking."));
+}
+
+#[test]
+fn a_model_specific_event_accepts_a_whitespace_only_message() {
+    let event = ModelSpecificEvent::new(
+        ConversationEventId::new(),
+        "content_delta".to_owned(),
+        1,
+        json!({}),
+        Some(" ".to_owned()),
+    )
+    .expect("a whitespace-only message should be valid");
+
+    assert_eq!(event.message(), Some(" "));
+}
+
+#[test]
+fn a_model_specific_event_rejects_an_empty_message() {
+    let error = ModelSpecificEvent::new(
+        ConversationEventId::new(),
+        "content_delta".to_owned(),
+        1,
+        json!({}),
+        Some(String::new()),
+    )
+    .expect_err("an empty message should be rejected");
+
+    assert_eq!(error, InvalidModelSpecificEvent::EmptyMessage);
 }
 
 #[test]

@@ -69,7 +69,7 @@ impl ModelSpecificEvent {
             return Err(InvalidModelSpecificEvent::EmptyProviderEventType);
         }
         if let Some(message) = &self.message
-            && message.trim().is_empty()
+            && message.is_empty()
         {
             return Err(InvalidModelSpecificEvent::EmptyMessage);
         }
