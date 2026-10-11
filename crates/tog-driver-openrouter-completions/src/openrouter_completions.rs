@@ -12,9 +12,9 @@ use serde_json::{Map, Value, json};
 
 use tog::conversation::{
     AssistantResponse, ConversationEventId, ConversationEventPayload, FailureCategory,
-    InvalidAssistantResponse, InvalidModelResponse, InvalidToolRequest, ModelData, ModelId,
-    ModelOutcome, ModelResponse, ModelSource, OperationFailure, ProviderId, ToolRequest, Usage,
-    UserContent,
+    InvalidAssistantResponse, InvalidModelResponse, InvalidModelSpecificEvent, InvalidToolRequest,
+    ModelData, ModelId, ModelOutcome, ModelResponse, ModelSource, ModelSpecificEvent,
+    OperationFailure, ProviderId, ToolRequest, Usage, UserContent,
 };
 use tog::conversation::{ToolAvailability, ToolName};
 use tog::conversation_event_store::ConversationEventRecord;
@@ -23,11 +23,15 @@ use tog::model_driver::{
     TurnInput,
 };
 
-type ResponseByteStream = BoxStream<'static, Result<Vec<u8>, OpenRouterError>>;
-type ProviderOutputStream = BoxStream<'static, Result<ModelDriverEvent, OpenRouterError>>;
+type ResponseByteStream = BoxStream<'static, Result<Vec<u8>, OpenRouterCompletionsError>>;
+type ProviderOutputStream =
+    BoxStream<'static, Result<ModelDriverEvent, OpenRouterCompletionsError>>;
+
+const PROVIDER_PAYLOAD_VERSION: u32 = 1;
+const CONTENT_DELTA_EVENT_TYPE: &str = "content_delta";
 
 #[derive(Debug, Eq, PartialEq)]
-pub enum OpenRouterError {
+pub enum OpenRouterCompletionsError {
     Authentication(String),
     RateLimited(String),
     Transport(String),
@@ -37,7 +41,7 @@ pub enum OpenRouterError {
     Provider(String),
 }
 
-impl Display for OpenRouterError {
+impl Display for OpenRouterCompletionsError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Authentication(message) => write!(formatter, "authentication failed: {message}"),
@@ -56,12 +60,16 @@ impl Display for OpenRouterError {
     }
 }
 
-impl std::error::Error for OpenRouterError {}
+impl std::error::Error for OpenRouterCompletionsError {}
 
 #[derive(Clone)]
 enum ModelDriverEvent {
     AssistantResponse {
         content: String,
+    },
+    ModelSpecificEvent {
+        event_type: String,
+        message: Option<String>,
     },
     ToolRequest {
         tool_name: ToolName,
@@ -83,17 +91,17 @@ enum TerminalModelOutcome {
     },
 }
 
-pub struct OpenRouterModelDriver {
+pub struct OpenRouterCompletionsModelDriver {
     http_client: Client,
     api_key: String,
     chat_completions_url: String,
     source: ModelSource,
 }
 
-impl OpenRouterModelDriver {
-    pub fn from_environment(model: ModelId) -> Result<Self, OpenRouterError> {
+impl OpenRouterCompletionsModelDriver {
+    pub fn from_environment(model: ModelId) -> Result<Self, OpenRouterCompletionsError> {
         let api_key = std::env::var("OPENROUTER_API_KEY").map_err(|_| {
-            OpenRouterError::Authentication("OPENROUTER_API_KEY must be set".to_owned())
+            OpenRouterCompletionsError::Authentication("OPENROUTER_API_KEY must be set".to_owned())
         })?;
         let base_url = std::env::var("TOG_OPENROUTER_BASE_URL")
             .unwrap_or_else(|_| "https://openrouter.ai/api/v1".to_owned());
@@ -110,7 +118,7 @@ impl OpenRouterModelDriver {
     }
 }
 
-impl ModelDriver for OpenRouterModelDriver {
+impl ModelDriver for OpenRouterCompletionsModelDriver {
     fn source(&self) -> &ModelSource {
         &self.source
     }
@@ -154,7 +162,7 @@ impl ModelDriver for OpenRouterModelDriver {
             let request = match request {
                 Ok(request) => request,
                 Err(error) => {
-                    let error = OpenRouterError::InvalidRequest(error.to_string());
+                    let error = OpenRouterCompletionsError::InvalidRequest(error.to_string());
                     return Ok(failed_terminal_stream(
                         model_request_id,
                         FailureStage::BeforeStream,
@@ -168,7 +176,7 @@ impl ModelDriver for OpenRouterModelDriver {
                     return Ok(failed_terminal_stream(
                         model_request_id,
                         FailureStage::BeforeStream,
-                        OpenRouterError::Transport(error.to_string()),
+                        OpenRouterCompletionsError::Transport(error.to_string()),
                     ));
                 }
             };
@@ -180,7 +188,7 @@ impl ModelDriver for OpenRouterModelDriver {
                         return Ok(failed_terminal_stream(
                             model_request_id,
                             FailureStage::BeforeStream,
-                            OpenRouterError::Transport(error.to_string()),
+                            OpenRouterCompletionsError::Transport(error.to_string()),
                         ));
                     }
                 };
@@ -199,7 +207,7 @@ impl ModelDriver for OpenRouterModelDriver {
                 .map(|result| {
                     result
                         .map(|bytes| bytes.to_vec())
-                        .map_err(|error| OpenRouterError::Transport(error.to_string()))
+                        .map_err(|error| OpenRouterCompletionsError::Transport(error.to_string()))
                 })
                 .boxed();
             Ok(conversation_event_stream(
@@ -344,18 +352,23 @@ fn provider_tool_call_id(request: &ToolRequest) -> String {
         .unwrap_or_default()
 }
 
-fn classify_response_failure(status: StatusCode, body: String) -> Result<(), OpenRouterError> {
+fn classify_response_failure(
+    status: StatusCode,
+    body: String,
+) -> Result<(), OpenRouterCompletionsError> {
     if status == StatusCode::BAD_REQUEST && is_context_limit_error(&body) {
         return Ok(());
     }
 
     Err(match status {
-        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => OpenRouterError::Authentication(body),
-        StatusCode::TOO_MANY_REQUESTS => OpenRouterError::RateLimited(body),
-        StatusCode::BAD_REQUEST | StatusCode::NOT_FOUND | StatusCode::UNPROCESSABLE_ENTITY => {
-            OpenRouterError::InvalidRequest(body)
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
+            OpenRouterCompletionsError::Authentication(body)
         }
-        _ => OpenRouterError::Provider(format!(
+        StatusCode::TOO_MANY_REQUESTS => OpenRouterCompletionsError::RateLimited(body),
+        StatusCode::BAD_REQUEST | StatusCode::NOT_FOUND | StatusCode::UNPROCESSABLE_ENTITY => {
+            OpenRouterCompletionsError::InvalidRequest(body)
+        }
+        _ => OpenRouterCompletionsError::Provider(format!(
             "OpenRouter chat completions returned {status}: {body}"
         )),
     })
@@ -408,7 +421,7 @@ enum FailureStage {
 fn failed_terminal_stream(
     model_request_id: ConversationEventId,
     failure_stage: FailureStage,
-    error: OpenRouterError,
+    error: OpenRouterCompletionsError,
 ) -> ModelOutputStream {
     let (category, message) = provider_failure(&error, failure_stage);
     terminal_model_output(
@@ -424,39 +437,43 @@ fn failed_terminal_stream(
 }
 
 fn provider_failure(
-    error: &OpenRouterError,
+    error: &OpenRouterCompletionsError,
     failure_stage: FailureStage,
 ) -> (FailureCategory, String) {
     match error {
-        OpenRouterError::Authentication(_) => (
+        OpenRouterCompletionsError::Authentication(_) => (
             FailureCategory::Authentication,
             "The model provider could not authenticate the invocation.".to_owned(),
         ),
-        OpenRouterError::RateLimited(_) => (
+        OpenRouterCompletionsError::RateLimited(_) => (
             FailureCategory::RateLimited,
             "The model provider rate-limited the invocation.".to_owned(),
         ),
-        OpenRouterError::Transport(_) if matches!(failure_stage, FailureStage::DuringStream) => (
-            FailureCategory::StreamInterrupted,
-            "The model response stream was interrupted.".to_owned(),
-        ),
-        OpenRouterError::Transport(_) => (
+        OpenRouterCompletionsError::Transport(_)
+            if matches!(failure_stage, FailureStage::DuringStream) =>
+        {
+            (
+                FailureCategory::StreamInterrupted,
+                "The model response stream was interrupted.".to_owned(),
+            )
+        }
+        OpenRouterCompletionsError::Transport(_) => (
             FailureCategory::Transport,
             "The model provider could not be reached.".to_owned(),
         ),
-        OpenRouterError::InvalidRequest(_) => (
+        OpenRouterCompletionsError::InvalidRequest(_) => (
             FailureCategory::InvalidRequest,
             "The model invocation request was invalid.".to_owned(),
         ),
-        OpenRouterError::InvalidResponse(_) => (
+        OpenRouterCompletionsError::InvalidResponse(_) => (
             FailureCategory::InvalidProviderResponse,
             "The model provider returned an invalid response.".to_owned(),
         ),
-        OpenRouterError::StreamInterrupted(_) => (
+        OpenRouterCompletionsError::StreamInterrupted(_) => (
             FailureCategory::StreamInterrupted,
             "The model response stream was interrupted.".to_owned(),
         ),
-        OpenRouterError::Provider(_) => (
+        OpenRouterCompletionsError::Provider(_) => (
             FailureCategory::ProviderFailure,
             "The model provider failed the invocation.".to_owned(),
         ),
@@ -523,7 +540,7 @@ fn terminal_model_output(
     conversation_event_stream(provider_events, model_request_id)
 }
 
-fn fail_stream(state: &mut ConversationEventStreamState, error: OpenRouterError) {
+fn fail_stream(state: &mut ConversationEventStreamState, error: OpenRouterCompletionsError) {
     let (category, message) = provider_failure(&error, FailureStage::DuringStream);
     let outcome = TerminalModelOutcome::Failed { category, message };
     let response = ModelResponse::new(
@@ -553,11 +570,24 @@ fn translate_model_driver_event(
     driver_event: ModelDriverEvent,
     model_request_id: ConversationEventId,
     state: &mut ConversationEventStreamState,
-) -> Result<(), OpenRouterError> {
+) -> Result<(), OpenRouterCompletionsError> {
     let output = match driver_event {
         ModelDriverEvent::AssistantResponse { content } => ModelDriverOutput::AssistantResponse(
             AssistantResponse::new(model_request_id, content)
                 .map_err(invalid_assistant_response)?,
+        ),
+        ModelDriverEvent::ModelSpecificEvent {
+            event_type,
+            message,
+        } => ModelDriverOutput::ModelSpecificEvent(
+            ModelSpecificEvent::new(
+                model_request_id,
+                event_type,
+                PROVIDER_PAYLOAD_VERSION,
+                json!({}),
+                message,
+            )
+            .map_err(invalid_model_specific_event)?,
         ),
         ModelDriverEvent::ToolRequest {
             tool_name,
@@ -572,7 +602,7 @@ fn translate_model_driver_event(
                     )]))
                 })
                 .transpose()
-                .map_err(|error| OpenRouterError::InvalidResponse(error.to_string()))?;
+                .map_err(|error| OpenRouterCompletionsError::InvalidResponse(error.to_string()))?;
             ModelDriverOutput::ToolRequest(
                 ToolRequest::try_new(model_request_id, tool_name, arguments, data)
                     .map_err(invalid_tool_request)?,
@@ -599,16 +629,20 @@ fn translate_model_driver_event(
     Ok(())
 }
 
-fn invalid_assistant_response(error: InvalidAssistantResponse) -> OpenRouterError {
-    OpenRouterError::InvalidResponse(error.to_string())
+fn invalid_assistant_response(error: InvalidAssistantResponse) -> OpenRouterCompletionsError {
+    OpenRouterCompletionsError::InvalidResponse(error.to_string())
 }
 
-fn invalid_tool_request(error: InvalidToolRequest) -> OpenRouterError {
-    OpenRouterError::InvalidResponse(error.to_string())
+fn invalid_model_specific_event(error: InvalidModelSpecificEvent) -> OpenRouterCompletionsError {
+    OpenRouterCompletionsError::InvalidResponse(error.to_string())
 }
 
-fn invalid_model_response(error: InvalidModelResponse) -> OpenRouterError {
-    OpenRouterError::InvalidResponse(error.to_string())
+fn invalid_tool_request(error: InvalidToolRequest) -> OpenRouterCompletionsError {
+    OpenRouterCompletionsError::InvalidResponse(error.to_string())
+}
+
+fn invalid_model_response(error: InvalidModelResponse) -> OpenRouterCompletionsError {
+    OpenRouterCompletionsError::InvalidResponse(error.to_string())
 }
 
 struct ServerSentEvent {
@@ -623,7 +657,7 @@ struct ServerSentEventDecoder {
 }
 
 impl ServerSentEventDecoder {
-    fn push(&mut self, bytes: &[u8]) -> Result<(), OpenRouterError> {
+    fn push(&mut self, bytes: &[u8]) -> Result<(), OpenRouterCompletionsError> {
         self.bytes.extend_from_slice(bytes);
         while let Some(newline_position) = self.bytes.iter().position(|byte| *byte == b'\n') {
             let mut line = self.bytes.drain(..=newline_position).collect::<Vec<_>>();
@@ -636,7 +670,7 @@ impl ServerSentEventDecoder {
         Ok(())
     }
 
-    fn finish(&mut self) -> Result<(), OpenRouterError> {
+    fn finish(&mut self) -> Result<(), OpenRouterCompletionsError> {
         if !self.bytes.is_empty() {
             let mut line = std::mem::take(&mut self.bytes);
             if line.last() == Some(&b'\r') {
@@ -648,9 +682,9 @@ impl ServerSentEventDecoder {
         Ok(())
     }
 
-    fn process_line(&mut self, line: Vec<u8>) -> Result<(), OpenRouterError> {
+    fn process_line(&mut self, line: Vec<u8>) -> Result<(), OpenRouterCompletionsError> {
         let line = String::from_utf8(line)
-            .map_err(|error| OpenRouterError::InvalidResponse(error.to_string()))?;
+            .map_err(|error| OpenRouterCompletionsError::InvalidResponse(error.to_string()))?;
         if line.is_empty() {
             self.dispatch_event();
             return Ok(());
@@ -748,10 +782,10 @@ fn model_output_stream(response_bytes: ResponseByteStream) -> ProviderOutputStre
                     return None;
                 }
                 let error = match stream_end {
-                    ResponseEnd::BodyEnded => OpenRouterError::StreamInterrupted(
+                    ResponseEnd::BodyEnded => OpenRouterCompletionsError::StreamInterrupted(
                         "the response body ended before a finish_reason".to_owned(),
                     ),
-                    ResponseEnd::DoneSentinel => OpenRouterError::InvalidResponse(
+                    ResponseEnd::DoneSentinel => OpenRouterCompletionsError::InvalidResponse(
                         "the stream ended before a finish_reason".to_owned(),
                     ),
                 };
@@ -790,15 +824,15 @@ enum ProcessEventResult {
 fn process_server_sent_event(
     server_sent_event: ServerSentEvent,
     state: &mut OpenRouterStreamState,
-) -> Result<ProcessEventResult, OpenRouterError> {
+) -> Result<ProcessEventResult, OpenRouterCompletionsError> {
     if server_sent_event.data == "[DONE]" {
         return Ok(ProcessEventResult::Done);
     }
 
     let payload: Value = serde_json::from_str(&server_sent_event.data)
-        .map_err(|error| OpenRouterError::InvalidResponse(error.to_string()))?;
+        .map_err(|error| OpenRouterCompletionsError::InvalidResponse(error.to_string()))?;
     if let Some(error) = payload.get("error") {
-        return Err(OpenRouterError::Provider(format!(
+        return Err(OpenRouterCompletionsError::Provider(format!(
             "OpenRouter stream emitted an error: {error}"
         )));
     }
@@ -806,7 +840,7 @@ fn process_server_sent_event(
     state.usage = parsed_usage(&payload).or(state.usage.take());
     if state.finish_reason.is_some() {
         if payload_has_model_deltas(&payload) {
-            return Err(OpenRouterError::InvalidResponse(
+            return Err(OpenRouterCompletionsError::InvalidResponse(
                 "OpenRouter emitted a model delta after the response completed".to_owned(),
             ));
         }
@@ -841,7 +875,7 @@ fn payload_has_model_deltas(payload: &Value) -> bool {
 fn parse_choice_deltas(
     payload: &Value,
     state: &mut OpenRouterStreamState,
-) -> Result<Option<String>, OpenRouterError> {
+) -> Result<Option<String>, OpenRouterCompletionsError> {
     let Some(choices) = payload.get("choices").and_then(Value::as_array) else {
         return Ok(None);
     };
@@ -851,17 +885,25 @@ fn parse_choice_deltas(
     if let Some(delta) = choice.get("delta") {
         if let Some(content) = delta.get("content") {
             let content = content.as_str().ok_or_else(|| {
-                OpenRouterError::InvalidResponse(
+                OpenRouterCompletionsError::InvalidResponse(
                     "an OpenRouter content delta was not a string".to_owned(),
                 )
             })?;
+            if !content.trim().is_empty() {
+                state
+                    .model_outputs
+                    .push_back(ModelDriverEvent::ModelSpecificEvent {
+                        event_type: CONTENT_DELTA_EVENT_TYPE.to_owned(),
+                        message: Some(content.to_owned()),
+                    });
+            }
             state.assistant_outputs.push_str(content);
         }
         if let Some(tool_calls) = delta.get("tool_calls") {
             for tool_call in tool_calls
                 .as_array()
                 .ok_or_else(|| {
-                    OpenRouterError::InvalidResponse(
+                    OpenRouterCompletionsError::InvalidResponse(
                         "an OpenRouter tool_calls delta was not an array".to_owned(),
                     )
                 })?
@@ -881,12 +923,12 @@ fn parse_choice_deltas(
 fn accumulate_tool_call(
     tool_call: &Value,
     tool_calls: &mut Vec<AccumulatedToolCall>,
-) -> Result<(), OpenRouterError> {
+) -> Result<(), OpenRouterCompletionsError> {
     let index = tool_call
         .get("index")
         .and_then(Value::as_u64)
         .ok_or_else(|| {
-            OpenRouterError::InvalidResponse(
+            OpenRouterCompletionsError::InvalidResponse(
                 "an OpenRouter tool_calls delta did not contain an integer index".to_owned(),
             )
         })? as usize;
@@ -935,7 +977,7 @@ fn parsed_usage(payload: &Value) -> Option<Usage> {
 fn finalize_response(
     state: &mut OpenRouterStreamState,
     finish_reason: &str,
-) -> Result<Vec<ModelDriverEvent>, OpenRouterError> {
+) -> Result<Vec<ModelDriverEvent>, OpenRouterCompletionsError> {
     let mut model_events = Vec::new();
     match finish_reason {
         "stop" => {
@@ -951,20 +993,21 @@ fn finalize_response(
             }
             let tool_calls = std::mem::take(&mut state.tool_calls);
             if tool_calls.is_empty() {
-                return Err(OpenRouterError::InvalidResponse(
+                return Err(OpenRouterCompletionsError::InvalidResponse(
                     "the response finished with tool_calls but contained no tool calls".to_owned(),
                 ));
             }
             for mut tool_call in tool_calls {
                 let name = tool_call.name.take().ok_or_else(|| {
-                    OpenRouterError::InvalidResponse(
+                    OpenRouterCompletionsError::InvalidResponse(
                         "a completed tool call did not contain a name".to_owned(),
                     )
                 })?;
                 let arguments = parse_function_call_arguments(&tool_call.arguments)?;
                 model_events.push(ModelDriverEvent::ToolRequest {
-                    tool_name: ToolName::try_new(name)
-                        .map_err(|error| OpenRouterError::InvalidResponse(error.to_string()))?,
+                    tool_name: ToolName::try_new(name).map_err(|error| {
+                        OpenRouterCompletionsError::InvalidResponse(error.to_string())
+                    })?,
                     arguments,
                     provider_call_id: tool_call.call_id,
                 });
@@ -989,7 +1032,7 @@ fn finalize_response(
             }]);
         }
         other => {
-            return Err(OpenRouterError::InvalidResponse(format!(
+            return Err(OpenRouterCompletionsError::InvalidResponse(format!(
                 "OpenRouter stream finished with the unsupported finish_reason {other}"
             )));
         }
@@ -1002,7 +1045,7 @@ fn finalize_response(
         )
     });
     if !has_model_output {
-        return Err(OpenRouterError::InvalidResponse(
+        return Err(OpenRouterCompletionsError::InvalidResponse(
             "the completed OpenRouter response contained no model message".to_owned(),
         ));
     }
@@ -1013,12 +1056,12 @@ fn finalize_response(
     Ok(model_events)
 }
 
-fn parse_function_call_arguments(arguments: &str) -> Result<Value, OpenRouterError> {
+fn parse_function_call_arguments(arguments: &str) -> Result<Value, OpenRouterCompletionsError> {
     if arguments.trim().is_empty() {
         return Ok(Value::Object(Map::new()));
     }
     serde_json::from_str(arguments).map_err(|error| {
-        OpenRouterError::InvalidResponse(format!(
+        OpenRouterCompletionsError::InvalidResponse(format!(
             "a tool call contained invalid JSON arguments: {error}"
         ))
     })
@@ -1046,9 +1089,9 @@ mod tests {
     use tog::model_driver::{ModelDriver, ModelDriverOutput, ModelOutputStream, TurnInput};
 
     use super::{
-        ModelDriverEvent, OpenRouterError, OpenRouterModelDriver, ResponseByteStream,
-        TerminalModelOutcome, chat_messages, classify_response_failure, model_output_stream,
-        provider_tool,
+        ModelDriverEvent, OpenRouterCompletionsError, OpenRouterCompletionsModelDriver,
+        ResponseByteStream, TerminalModelOutcome, chat_messages, classify_response_failure,
+        model_output_stream, provider_tool,
     };
 
     fn conversation_event(
@@ -1236,17 +1279,24 @@ mod tests {
     }
 
     fn response_byte_stream(chunks: Vec<Vec<u8>>) -> ResponseByteStream {
-        stream::iter(chunks.into_iter().map(Ok::<Vec<u8>, OpenRouterError>)).boxed()
+        stream::iter(
+            chunks
+                .into_iter()
+                .map(Ok::<Vec<u8>, OpenRouterCompletionsError>),
+        )
+        .boxed()
     }
 
-    async fn collect_driver_events(input: &str) -> Vec<Result<ModelDriverEvent, OpenRouterError>> {
+    async fn collect_driver_events(
+        input: &str,
+    ) -> Vec<Result<ModelDriverEvent, OpenRouterCompletionsError>> {
         model_output_stream(response_byte_stream(vec![input.as_bytes().to_vec()]))
             .collect()
             .await
     }
 
     #[tokio::test]
-    async fn content_deltas_yield_one_assistant_response_and_a_terminal() {
+    async fn content_deltas_emit_partial_events_then_one_assistant_response_and_a_terminal() {
         let input = concat!(
             "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"Hello \"},\"finish_reason\":null}]}\n\n",
             "data: {\"choices\":[{\"delta\":{\"content\":\"world\"},\"finish_reason\":null}]}\n\n",
@@ -1260,13 +1310,27 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()
             .expect("the response stream should parse");
 
-        assert_eq!(events.len(), 2);
+        assert_eq!(events.len(), 4, "partial events, answer, then terminal");
         assert!(matches!(
             &events[0],
-            ModelDriverEvent::AssistantResponse { content } if content == "Hello world"
+            ModelDriverEvent::ModelSpecificEvent {
+                event_type,
+                message: Some(message),
+            } if event_type == "content_delta" && message == "Hello "
         ));
         assert!(matches!(
             &events[1],
+            ModelDriverEvent::ModelSpecificEvent {
+                event_type,
+                message: Some(message),
+            } if event_type == "content_delta" && message == "world"
+        ));
+        assert!(matches!(
+            &events[2],
+            ModelDriverEvent::AssistantResponse { content } if content == "Hello world"
+        ));
+        assert!(matches!(
+            &events[3],
             ModelDriverEvent::Terminal {
                 outcome: TerminalModelOutcome::Succeeded,
                 usage: Some(_),
@@ -1288,12 +1352,20 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()
             .expect("the response stream should parse");
 
+        assert_eq!(events.len(), 3, "partial event, answer, then terminal");
         assert!(matches!(
             &events[0],
-            ModelDriverEvent::AssistantResponse { content } if content == "Hello"
+            ModelDriverEvent::ModelSpecificEvent {
+                message: Some(message),
+                ..
+            } if message == "Hello"
         ));
         assert!(matches!(
             &events[1],
+            ModelDriverEvent::AssistantResponse { content } if content == "Hello"
+        ));
+        assert!(matches!(
+            &events[2],
             ModelDriverEvent::Terminal {
                 outcome: TerminalModelOutcome::Succeeded,
                 ..
@@ -1386,7 +1458,7 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert!(matches!(
             results[0],
-            Err(OpenRouterError::InvalidResponse(_))
+            Err(OpenRouterCompletionsError::InvalidResponse(_))
         ));
     }
 
@@ -1397,7 +1469,7 @@ mod tests {
 
         assert!(matches!(
             events.next().await,
-            Some(Err(OpenRouterError::InvalidResponse(_)))
+            Some(Err(OpenRouterCompletionsError::InvalidResponse(_)))
         ));
     }
 
@@ -1409,7 +1481,12 @@ mod tests {
 
         assert!(matches!(
             events.next().await,
-            Some(Err(OpenRouterError::StreamInterrupted(_)))
+            Some(Ok(ModelDriverEvent::ModelSpecificEvent { message: Some(message), .. }))
+                if message == "Hello"
+        ));
+        assert!(matches!(
+            events.next().await,
+            Some(Err(OpenRouterCompletionsError::StreamInterrupted(_)))
         ));
     }
 
@@ -1423,7 +1500,12 @@ mod tests {
 
         assert!(matches!(
             events.next().await,
-            Some(Err(OpenRouterError::InvalidResponse(_)))
+            Some(Ok(ModelDriverEvent::ModelSpecificEvent { message: Some(message), .. }))
+                if message == "Hello"
+        ));
+        assert!(matches!(
+            events.next().await,
+            Some(Err(OpenRouterCompletionsError::InvalidResponse(_)))
         ));
     }
 
@@ -1437,12 +1519,20 @@ mod tests {
 
         let results = collect_driver_events(input).await;
 
-        assert_eq!(results.len(), 3, "assistant, terminal, then the late error");
+        assert_eq!(
+            results.len(),
+            4,
+            "partial event, answer, terminal, then the late error"
+        );
         assert!(results[0].is_ok());
-        assert!(matches!(results[1], Ok(ModelDriverEvent::Terminal { .. })));
         assert!(matches!(
-            results[2],
-            Err(OpenRouterError::InvalidResponse(_))
+            results[1],
+            Ok(ModelDriverEvent::AssistantResponse { .. })
+        ));
+        assert!(matches!(results[2], Ok(ModelDriverEvent::Terminal { .. })));
+        assert!(matches!(
+            results[3],
+            Err(OpenRouterCompletionsError::InvalidResponse(_))
         ));
     }
 
@@ -1459,9 +1549,16 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()
             .expect("the length finish should parse");
 
-        assert_eq!(events.len(), 1);
+        assert_eq!(events.len(), 2, "partial event then the failed terminal");
         assert!(matches!(
             &events[0],
+            ModelDriverEvent::ModelSpecificEvent {
+                event_type,
+                message: Some(message),
+            } if event_type == "content_delta" && message == "Hello"
+        ));
+        assert!(matches!(
+            &events[1],
             ModelDriverEvent::Terminal {
                 outcome: TerminalModelOutcome::Failed {
                     category: FailureCategory::ProviderFailure,
@@ -1501,19 +1598,19 @@ mod tests {
     fn response_statuses_map_to_typed_driver_errors() {
         assert!(matches!(
             classify_response_failure(StatusCode::UNAUTHORIZED, "unauthorized".to_owned()),
-            Err(OpenRouterError::Authentication(_))
+            Err(OpenRouterCompletionsError::Authentication(_))
         ));
         assert!(matches!(
             classify_response_failure(StatusCode::TOO_MANY_REQUESTS, "slow down".to_owned()),
-            Err(OpenRouterError::RateLimited(_))
+            Err(OpenRouterCompletionsError::RateLimited(_))
         ));
         assert!(matches!(
             classify_response_failure(StatusCode::BAD_REQUEST, "bad request".to_owned()),
-            Err(OpenRouterError::InvalidRequest(_))
+            Err(OpenRouterCompletionsError::InvalidRequest(_))
         ));
         assert!(matches!(
             classify_response_failure(StatusCode::INTERNAL_SERVER_ERROR, "failed".to_owned()),
-            Err(OpenRouterError::Provider(_))
+            Err(OpenRouterCompletionsError::Provider(_))
         ));
     }
 
@@ -1568,8 +1665,8 @@ mod tests {
         serde_json::from_slice(&body).expect("the request body should be JSON")
     }
 
-    fn mock_driver(address: std::net::SocketAddr) -> OpenRouterModelDriver {
-        OpenRouterModelDriver {
+    fn mock_driver(address: std::net::SocketAddr) -> OpenRouterCompletionsModelDriver {
+        OpenRouterCompletionsModelDriver {
             http_client: reqwest::Client::new(),
             api_key: "test-key".to_owned(),
             chat_completions_url: format!("http://{address}/chat/completions"),
@@ -1619,7 +1716,9 @@ mod tests {
             .await
             .expect("the invocation should establish its stream");
         let first = expect_single(&mut model_events).await;
-        assert!(matches!(first, ModelDriverOutput::AssistantResponse(_)));
+        assert!(matches!(first, ModelDriverOutput::ModelSpecificEvent(_)));
+        let second = expect_single(&mut model_events).await;
+        assert!(matches!(second, ModelDriverOutput::AssistantResponse(_)));
         let terminal = expect_single(&mut model_events).await;
         assert!(matches!(
             terminal,

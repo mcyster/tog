@@ -865,7 +865,7 @@ fn openrouter_selected_by_driver_flag_uses_chat_completions() {
     let data_directory = temporary_data_directory();
 
     let command_output = configured_openrouter_command(&server, &data_directory)
-        .args(["--driver", "openrouter", "say", "hi"])
+        .args(["--driver", "openrouter-completions", "say", "hi"])
         .output()
         .expect("tog should run");
 
@@ -908,13 +908,50 @@ fn openrouter_defaults_to_openai_driver() {
 }
 
 #[test]
+fn openrouter_stream_emits_partial_content_events_at_medium_verbosity() {
+    let server = MockOpenRouterServer::start(vec![OPENROUTER_CHAT_STREAM]);
+    let data_directory = temporary_data_directory();
+
+    let command_output = configured_openrouter_command(&server, &data_directory)
+        .args([
+            "--driver",
+            "openrouter-completions",
+            "--verbosity",
+            "medium",
+            "say",
+            "hi",
+        ])
+        .output()
+        .expect("tog should run");
+
+    assert!(command_output.status.success());
+    assert_eq!(
+        String::from_utf8(command_output.stdout).expect("standard output should be UTF-8"),
+        "### Hello\nHello\n"
+    );
+    let conversation_id = reported_conversation_id(&command_output.stderr);
+    let events = persisted_events(&data_directory, &conversation_id);
+    let partial = events
+        .iter()
+        .find(|event| event["type"] == "model_specific_event")
+        .expect("the partial content should be persisted as a model-specific event");
+    assert_eq!(partial["provider_event_type"], "content_delta");
+    assert_eq!(partial["message"], "Hello");
+    server.finish();
+}
+
+#[test]
 fn openrouter_tool_round_returns_the_result_to_the_model() {
     let server =
         MockOpenRouterServer::start(vec![OPENROUTER_TOOL_CALL_STREAM, OPENROUTER_CHAT_STREAM]);
     let data_directory = temporary_data_directory();
 
     let command_output = configured_openrouter_command(&server, &data_directory)
-        .args(["--driver", "openrouter", "run pwd and describe it"])
+        .args([
+            "--driver",
+            "openrouter-completions",
+            "run pwd and describe it",
+        ])
         .output()
         .expect("tog should run");
 

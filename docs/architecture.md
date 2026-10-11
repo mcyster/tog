@@ -35,8 +35,9 @@ definitions, and the storage contracts. `tog-context` supplies the environment a
 toolset; `tog-engine` executes conversations; `tog-tools` and `tog-store-local`
 hold concrete tool and filesystem-store implementations; and `tog-cli` composes
 the `tog` executable. Each model-driver provider lives in its own crate, starting
-with `tog-driver-openai` for the OpenAI Responses API and `tog-driver-openrouter`
-for OpenRouter's OpenAI-compatible chat completions API.
+with `tog-driver-openai` for the OpenAI Responses API and
+`tog-driver-openrouter-completions` for OpenRouter's OpenAI-compatible chat
+completions API.
 
 Within the workspace, `Conversation` defines the event model, `ModelDriver` its
 provider boundary, and each driver crate its concrete integration.

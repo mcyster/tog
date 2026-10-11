@@ -1424,7 +1424,7 @@ dependencies = [
  "tog",
  "tog-context",
  "tog-driver-openai",
- "tog-driver-openrouter",
+ "tog-driver-openrouter-completions",
  "tog-engine",
  "tog-store-local",
  "tog-tools",
@@ -1457,7 +1457,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "tog-driver-openrouter"
+name = "tog-driver-openrouter-completions"
 version = "0.1.0"
 dependencies = [
  "futures-util",

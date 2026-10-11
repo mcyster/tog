@@ -18,7 +18,7 @@ use tog::model_driver::ModelDriver;
 use tog_context::environment::Environment;
 use tog_context::toolset::ToolRegistry;
 use tog_driver_openai::OpenAiModelDriver;
-use tog_driver_openrouter::OpenRouterModelDriver;
+use tog_driver_openrouter_completions::OpenRouterCompletionsModelDriver;
 use tog_engine::{ConversationSession, ConversationSessionProgress, ConversationSessionResult};
 use tog_store_local::{FileAssetStore, FileEventStore};
 use tog_tools::ShellTool;
@@ -62,13 +62,17 @@ impl CommandLine {
                     None => match arguments.driver {
                         Driver::OpenAi => ModelId::from_str(DEFAULT_OPENAI_MODEL)
                             .expect("the OpenAI default model should be valid"),
-                        Driver::OpenRouter => ModelId::from_str(DEFAULT_OPENROUTER_MODEL)
-                            .expect("the OpenRouter default model should be valid"),
+                        Driver::OpenRouterCompletions => {
+                            ModelId::from_str(DEFAULT_OPENROUTER_MODEL)
+                                .expect("the OpenRouter default model should be valid")
+                        }
                     },
                 };
                 let model_driver: Box<dyn ModelDriver> = match arguments.driver {
                     Driver::OpenAi => Box::new(OpenAiModelDriver::from_environment(model)?),
-                    Driver::OpenRouter => Box::new(OpenRouterModelDriver::from_environment(model)?),
+                    Driver::OpenRouterCompletions => {
+                        Box::new(OpenRouterCompletionsModelDriver::from_environment(model)?)
+                    }
                 };
                 let mut tool_registry = ToolRegistry::default();
                 tool_registry.register(ShellTool::new());
@@ -309,8 +313,8 @@ struct TurnArguments {
 enum Driver {
     #[value(name = "openai")]
     OpenAi,
-    #[value(name = "openrouter")]
-    OpenRouter,
+    #[value(name = "openrouter-completions")]
+    OpenRouterCompletions,
 }
 
 const DEFAULT_OPENAI_MODEL: &str = "gpt-5.6";

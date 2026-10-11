@@ -1,6 +1,6 @@
 [package]
-name = "tog-driver-openrouter"
-description = "OpenRouter model-driver provider"
+name = "tog-driver-openrouter-completions"
+description = "OpenRouter chat-completions model-driver provider"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

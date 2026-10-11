@@ -7,7 +7,7 @@ or OpenRouter's OpenAI-compatible chat completions API.
 
 The supported development environment uses [Nix](https://nixos.org/) with flakes
 enabled. You also need an API key for the driver you select: an OpenAI API key for
-the `openai` driver, or an OpenRouter API key for the `openrouter` driver.
+the `openai` driver, or an OpenRouter API key for the `openrouter-completions` driver.
 
 Enter the environment directly:
 
@@ -25,7 +25,7 @@ Set your API key in the current shell:
 
 ```console
 export OPENAI_API_KEY=...        # for the openai driver
-export OPENROUTER_API_KEY=...    # for the openrouter driver
+export OPENROUTER_API_KEY=...    # for the openrouter-completions driver
 ```
 
 With direnv, you can instead put the exports in `.env` or `$HOME/.env.tog`; both files are loaded by the repository's `.envrc`.
@@ -51,10 +51,10 @@ model with `--model`, and select a driver with `--driver`:
 
 ```console
 cargo run -- --model MODEL_NAME "Explain ownership in Rust"
-cargo run -- --driver openrouter --model openrouter/auto "Explain ownership in Rust"
+cargo run -- --driver openrouter-completions --model openrouter/auto "Explain ownership in Rust"
 ```
 
-Selecting the `openrouter` driver uses the chat completions API and reads
+Selecting the `openrouter-completions` driver uses the chat completions API and reads
 `OPENROUTER_API_KEY` (and an optional `TOG_OPENROUTER_BASE_URL`). The OpenRouter
 driver's default model is `openrouter/auto`.
 
