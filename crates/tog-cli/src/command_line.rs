@@ -30,7 +30,7 @@ use tog_tools::ShellTool;
     about = "Command-line access to agentic services",
     disable_help_subcommand = true,
     override_usage = "tog [:turn] [OPTIONS] <USER_PROMPT>...\n       tog :log [CONVERSATION_ID]\n       tog :asset add [OPTIONS] <SOURCE_PATH>\n       tog :asset list",
-    after_help = "When no command is specified, :turn is used."
+    after_help = "When no command is specified, :turn is used. Select a driver with\ntog :turn --driver openai|openrouter-completions; see tog :turn --help\nfor all :turn options."
 )]
 pub(crate) struct CommandLine {
     #[command(subcommand)]
@@ -293,15 +293,19 @@ struct LogArguments {
 
 #[derive(Debug, Args)]
 struct TurnArguments {
+    /// Conversation to continue; starts a new conversation when omitted.
     #[arg(long)]
     conversation: Option<ConversationId>,
 
+    /// Model driver to use: openai or openrouter-completions.
     #[arg(long, value_enum, default_value = "openai")]
     driver: Driver,
 
+    /// Model to use; defaults per driver.
     #[arg(long)]
     model: Option<ModelId>,
 
+    /// How much model-event detail to print.
     #[arg(long, value_enum, default_value = "low")]
     verbosity: Verbosity,
 

@@ -29,6 +29,7 @@ type ProviderOutputStream =
 
 const PROVIDER_PAYLOAD_VERSION: u32 = 1;
 const CONTENT_DELTA_EVENT_TYPE: &str = "content_delta";
+const TOOL_CALL_ARGUMENTS_DELTA_EVENT_TYPE: &str = "tool_call_arguments_delta";
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum OpenRouterCompletionsError {
@@ -272,7 +273,7 @@ fn chat_messages(events: &[ConversationEventRecord]) -> Value {
                         None
                     }
                     _ => {
-                        open_assistant = None;
+                        open_assistant = Some((messages.len(), request.model_request_id()));
                         Some(json!({
                             "role": "assistant",
                             "content": Value::Null,
@@ -336,20 +337,19 @@ fn provider_tool_call_ids(
         .iter()
         .filter_map(|record| match record.event().payload() {
             ConversationEventPayload::ToolRequest(request) => {
-                Some((record.event().id(), provider_tool_call_id(request)))
+                provider_tool_call_id(request).map(|call_id| (record.event().id(), call_id))
             }
             _ => None,
         })
         .collect()
 }
 
-fn provider_tool_call_id(request: &ToolRequest) -> String {
+fn provider_tool_call_id(request: &ToolRequest) -> Option<String> {
     request
         .data()
         .and_then(|data| data.content().get("call_id"))
         .and_then(Value::as_str)
         .map(str::to_owned)
-        .unwrap_or_default()
 }
 
 fn classify_response_failure(
@@ -728,6 +728,7 @@ struct OpenRouterStreamState {
     tool_calls: Vec<AccumulatedToolCall>,
     usage: Option<Usage>,
     finish_reason: Option<String>,
+    pending_terminal: Option<TerminalModelOutcome>,
     model_outputs: VecDeque<ModelDriverEvent>,
     stream_end: Option<ResponseEnd>,
     terminated: bool,
@@ -747,6 +748,7 @@ fn model_output_stream(response_bytes: ResponseByteStream) -> ProviderOutputStre
         tool_calls: Vec::new(),
         usage: None,
         finish_reason: None,
+        pending_terminal: None,
         model_outputs: VecDeque::new(),
         stream_end: None,
         terminated: false,
@@ -777,6 +779,14 @@ fn model_output_stream(response_bytes: ResponseByteStream) -> ProviderOutputStre
                 continue;
             }
             if let Some(stream_end) = state.stream_end {
+                if let Some(outcome) = state.pending_terminal.take() {
+                    state.model_outputs.push_back(ModelDriverEvent::Terminal {
+                        outcome,
+                        usage: state.usage.take(),
+                    });
+                    state.terminated = true;
+                    continue;
+                }
                 state.terminated = true;
                 if state.finish_reason.is_some() {
                     return None;
@@ -884,20 +894,25 @@ fn parse_choice_deltas(
     };
     if let Some(delta) = choice.get("delta") {
         if let Some(content) = delta.get("content") {
-            let content = content.as_str().ok_or_else(|| {
-                OpenRouterCompletionsError::InvalidResponse(
-                    "an OpenRouter content delta was not a string".to_owned(),
-                )
-            })?;
-            if !content.trim().is_empty() {
-                state
-                    .model_outputs
-                    .push_back(ModelDriverEvent::ModelSpecificEvent {
-                        event_type: CONTENT_DELTA_EVENT_TYPE.to_owned(),
-                        message: Some(content.to_owned()),
-                    });
+            match content {
+                Value::String(content) => {
+                    if !content.is_empty() {
+                        state
+                            .model_outputs
+                            .push_back(ModelDriverEvent::ModelSpecificEvent {
+                                event_type: CONTENT_DELTA_EVENT_TYPE.to_owned(),
+                                message: Some(content.clone()),
+                            });
+                    }
+                    state.assistant_outputs.push_str(content);
+                }
+                Value::Null => {}
+                _ => {
+                    return Err(OpenRouterCompletionsError::InvalidResponse(
+                        "an OpenRouter content delta was not a string".to_owned(),
+                    ));
+                }
             }
-            state.assistant_outputs.push_str(content);
         }
         if let Some(tool_calls) = delta.get("tool_calls") {
             for tool_call in tool_calls
@@ -909,7 +924,7 @@ fn parse_choice_deltas(
                 })?
                 .iter()
             {
-                accumulate_tool_call(tool_call, &mut state.tool_calls)?;
+                accumulate_tool_call(tool_call, &mut state.tool_calls, &mut state.model_outputs)?;
             }
         }
     }
@@ -923,6 +938,7 @@ fn parse_choice_deltas(
 fn accumulate_tool_call(
     tool_call: &Value,
     tool_calls: &mut Vec<AccumulatedToolCall>,
+    model_outputs: &mut VecDeque<ModelDriverEvent>,
 ) -> Result<(), OpenRouterCompletionsError> {
     let index = tool_call
         .get("index")
@@ -945,8 +961,13 @@ fn accumulate_tool_call(
         .get("function")
         .and_then(|function| function.get("arguments"))
         .and_then(Value::as_str)
-        .map(str::to_owned)
         .unwrap_or_default();
+    if !arguments.is_empty() {
+        model_outputs.push_back(ModelDriverEvent::ModelSpecificEvent {
+            event_type: TOOL_CALL_ARGUMENTS_DELTA_EVENT_TYPE.to_owned(),
+            message: Some(arguments.to_owned()),
+        });
+    }
 
     if let Some(existing) = tool_calls.iter_mut().find(|call| call.index == index) {
         if existing.call_id.is_none() {
@@ -955,14 +976,14 @@ fn accumulate_tool_call(
         if existing.name.is_none() {
             existing.name = name;
         }
-        existing.arguments.push_str(&arguments);
+        existing.arguments.push_str(arguments);
         return Ok(());
     }
     tool_calls.push(AccumulatedToolCall {
         index,
         call_id,
         name,
-        arguments,
+        arguments: arguments.to_owned(),
     });
     Ok(())
 }
@@ -1014,22 +1035,18 @@ fn finalize_response(
             }
         }
         "length" => {
-            return Ok(vec![ModelDriverEvent::Terminal {
-                outcome: TerminalModelOutcome::Failed {
-                    category: FailureCategory::ProviderFailure,
-                    message: "The model response was cut off before completing.".to_owned(),
-                },
-                usage: None,
-            }]);
+            state.pending_terminal = Some(TerminalModelOutcome::Failed {
+                category: FailureCategory::ProviderFailure,
+                message: "The model response was cut off before completing.".to_owned(),
+            });
+            return Ok(model_events);
         }
         "content_filter" => {
-            return Ok(vec![ModelDriverEvent::Terminal {
-                outcome: TerminalModelOutcome::Failed {
-                    category: FailureCategory::Refusal,
-                    message: "The model response was filtered by the provider.".to_owned(),
-                },
-                usage: None,
-            }]);
+            state.pending_terminal = Some(TerminalModelOutcome::Failed {
+                category: FailureCategory::Refusal,
+                message: "The model response was filtered by the provider.".to_owned(),
+            });
+            return Ok(model_events);
         }
         other => {
             return Err(OpenRouterCompletionsError::InvalidResponse(format!(
@@ -1049,10 +1066,7 @@ fn finalize_response(
             "the completed OpenRouter response contained no model message".to_owned(),
         ));
     }
-    model_events.push(ModelDriverEvent::Terminal {
-        outcome: TerminalModelOutcome::Succeeded,
-        usage: state.usage.take(),
-    });
+    state.pending_terminal = Some(TerminalModelOutcome::Succeeded);
     Ok(model_events)
 }
 
@@ -1278,6 +1292,148 @@ mod tests {
         );
     }
 
+    fn tool_request_event(
+        conversation_id: ConversationId,
+        position: u64,
+        model_request_id: ConversationEventId,
+        name: &str,
+        arguments: Value,
+        data: Option<ModelData>,
+    ) -> ConversationEventRecord {
+        conversation_event(
+            conversation_id,
+            position,
+            ConversationEventPayload::ToolRequest(
+                ToolRequest::try_new(
+                    model_request_id,
+                    ToolName::try_new(name.to_owned()).expect("the tool name should be valid"),
+                    arguments,
+                    data,
+                )
+                .expect("the tool request should be valid"),
+            ),
+        )
+    }
+
+    #[test]
+    fn chat_messages_merges_parallel_tool_calls_into_one_assistant_message() {
+        let conversation_id = ConversationId::new();
+        let (turn_start, model_request) = turn_and_request(conversation_id);
+        let request_id = model_request.event().id();
+        let first_request = tool_request_event(
+            conversation_id,
+            3,
+            request_id,
+            "shell",
+            json!({ "command": "pwd" }),
+            None,
+        );
+        let second_request = tool_request_event(
+            conversation_id,
+            4,
+            request_id,
+            "shell",
+            json!({ "command": "ls" }),
+            None,
+        );
+        let first_request_id = first_request.event().id();
+        let second_request_id = second_request.event().id();
+        let conversation = ConversationHistory::from_events(vec![
+            user_event(conversation_id, 0, "Run both"),
+            turn_start,
+            model_request,
+            first_request,
+            second_request,
+            conversation_event(
+                conversation_id,
+                5,
+                ConversationEventPayload::ToolResponse(ToolResponse::new(
+                    first_request_id,
+                    ToolOutcome::succeeded(json!({ "stdout": "/" })),
+                )),
+            ),
+            conversation_event(
+                conversation_id,
+                6,
+                ConversationEventPayload::ToolResponse(ToolResponse::new(
+                    second_request_id,
+                    ToolOutcome::succeeded(json!({ "stdout": "/" })),
+                )),
+            ),
+        ])
+        .expect("the conversation should be valid");
+
+        let messages = chat_messages(conversation.events());
+        let tool_calls = messages
+            .as_array()
+            .expect("the messages should be an array")
+            .iter()
+            .filter(|message| message.get("tool_calls").is_some())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            tool_calls.len(),
+            1,
+            "both tool calls must share one assistant message"
+        );
+        assert_eq!(
+            tool_calls[0]["tool_calls"].as_array().map(Vec::len),
+            Some(2)
+        );
+        let first_call_id = tool_calls[0]["tool_calls"][0]["id"]
+            .as_str()
+            .expect("the first call should carry its fallback id");
+        let second_call_id = tool_calls[0]["tool_calls"][1]["id"]
+            .as_str()
+            .expect("the second call should carry its fallback id");
+        assert_ne!(first_call_id, second_call_id, "call ids must stay distinct");
+    }
+
+    #[test]
+    fn chat_messages_falls_back_to_the_event_id_when_no_provider_call_id() {
+        let conversation_id = ConversationId::new();
+        let (turn_start, model_request) = turn_and_request(conversation_id);
+        let request_id = model_request.event().id();
+        let request_record = tool_request_event(
+            conversation_id,
+            3,
+            request_id,
+            "shell",
+            json!({ "command": "pwd" }),
+            None,
+        );
+        let fallback_id = request_record.event().id();
+        let conversation = ConversationHistory::from_events(vec![
+            user_event(conversation_id, 0, "Run pwd"),
+            turn_start,
+            model_request,
+            request_record,
+            conversation_event(
+                conversation_id,
+                4,
+                ConversationEventPayload::ToolResponse(ToolResponse::new(
+                    fallback_id,
+                    ToolOutcome::succeeded(json!({ "stdout": "/tmp\n" })),
+                )),
+            ),
+        ])
+        .expect("the conversation should be valid");
+
+        let messages = chat_messages(conversation.events());
+        let messages = messages
+            .as_array()
+            .expect("the messages should be an array");
+        let assistant = messages
+            .iter()
+            .find(|message| message.get("tool_calls").is_some())
+            .expect("the assistant tool call should be present");
+        let tool = messages
+            .iter()
+            .find(|message| message["role"] == "tool")
+            .expect("the tool response should be present");
+        assert_eq!(assistant["tool_calls"][0]["id"], fallback_id.to_string());
+        assert_eq!(tool["tool_call_id"], fallback_id.to_string());
+    }
+
     fn response_byte_stream(chunks: Vec<Vec<u8>>) -> ResponseByteStream {
         stream::iter(
             chunks
@@ -1374,6 +1530,120 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_null_content_delta_does_not_fail_a_tool_call_chunk() {
+        let input = concat!(
+            "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"shell\",\"arguments\":\"{\\\"command\\\":\\\"pwd\\\"}\"}}]},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+
+        let events = collect_driver_events(input)
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .expect("the null content chunk should parse");
+
+        assert!(matches!(
+            &events[0],
+            ModelDriverEvent::ModelSpecificEvent {
+                event_type,
+                ..
+            } if event_type == "tool_call_arguments_delta"
+        ));
+        assert!(matches!(
+            &events[1],
+            ModelDriverEvent::ToolRequest {
+                tool_name,
+                ..
+            } if tool_name.as_str() == "shell"
+        ));
+        assert!(matches!(
+            &events[2],
+            ModelDriverEvent::Terminal {
+                outcome: TerminalModelOutcome::Succeeded,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_whitespace_only_content_delta_is_emitted() {
+        let input = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\" \"},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"world\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+
+        let events = collect_driver_events(input)
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .expect("the whitespace stream should parse");
+
+        assert_eq!(
+            events.len(),
+            5,
+            "three partial events, answer, then terminal"
+        );
+        assert!(matches!(
+            &events[0],
+            ModelDriverEvent::ModelSpecificEvent { message: Some(message), .. }
+                if message == "Hello"
+        ));
+        assert!(matches!(
+            &events[1],
+            ModelDriverEvent::ModelSpecificEvent { message: Some(message), .. }
+                if message == " "
+        ));
+        assert!(matches!(
+            &events[2],
+            ModelDriverEvent::ModelSpecificEvent { message: Some(message), .. }
+                if message == "world"
+        ));
+        assert!(matches!(
+            &events[3],
+            ModelDriverEvent::AssistantResponse { content } if content == "Hello world"
+        ));
+        assert!(matches!(
+            &events[4],
+            ModelDriverEvent::Terminal {
+                outcome: TerminalModelOutcome::Succeeded,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn usage_arriving_after_finish_reason_is_captured_before_the_terminal() {
+        let input = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":4}}\n\n",
+            "data: [DONE]\n\n"
+        );
+
+        let events = collect_driver_events(input)
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .expect("the deferred usage stream should parse");
+
+        let terminal = events
+            .iter()
+            .find(|event| matches!(event, ModelDriverEvent::Terminal { .. }))
+            .expect("the terminal should be emitted");
+        assert!(matches!(
+            terminal,
+            ModelDriverEvent::Terminal {
+                outcome: TerminalModelOutcome::Succeeded,
+                usage: Some(_),
+            }
+        ));
+    }
+
+    #[tokio::test]
     async fn streamed_tool_calls_become_a_portable_tool_request() {
         let input = concat!(
             "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"shell\",\"arguments\":\"\"}}]},\"finish_reason\":null}]}\n\n",
@@ -1388,12 +1658,23 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()
             .expect("the tool call stream should parse");
 
-        assert_eq!(events.len(), 2);
+        assert_eq!(
+            events.len(),
+            3,
+            "argument delta, tool request, then terminal"
+        );
+        assert!(matches!(
+            &events[0],
+            ModelDriverEvent::ModelSpecificEvent {
+                event_type,
+                message: Some(message),
+            } if event_type == "tool_call_arguments_delta" && message == "{\"command\":\"pwd\"}"
+        ));
         let ModelDriverEvent::ToolRequest {
             tool_name,
             arguments,
             provider_call_id,
-        } = &events[0]
+        } = &events[1]
         else {
             panic!("the output should be a tool request");
         };
@@ -1401,7 +1682,7 @@ mod tests {
         assert_eq!(arguments, &json!({ "command": "pwd" }));
         assert_eq!(provider_call_id.as_deref(), Some("call_1"));
         assert!(matches!(
-            &events[1],
+            &events[2],
             ModelDriverEvent::Terminal {
                 outcome: TerminalModelOutcome::Succeeded,
                 ..
@@ -1423,12 +1704,30 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()
             .expect("the tool call stream should parse");
 
-        assert_eq!(events.len(), 3);
+        assert_eq!(
+            events.len(),
+            5,
+            "two argument deltas, two tool requests, then terminal"
+        );
+        assert!(matches!(
+            &events[0],
+            ModelDriverEvent::ModelSpecificEvent {
+                event_type,
+                message: Some(message),
+            } if event_type == "tool_call_arguments_delta" && message == "{\"command\":\"pwd\"}"
+        ));
+        assert!(matches!(
+            &events[1],
+            ModelDriverEvent::ModelSpecificEvent {
+                event_type,
+                message: Some(message),
+            } if event_type == "tool_call_arguments_delta" && message == "{\"command\":\"ls\"}"
+        ));
         let ModelDriverEvent::ToolRequest {
             arguments: first,
             provider_call_id: first_call_id,
             ..
-        } = &events[0]
+        } = &events[2]
         else {
             panic!("the first output should be a tool request");
         };
@@ -1436,7 +1735,7 @@ mod tests {
             arguments: second,
             provider_call_id: second_call_id,
             ..
-        } = &events[1]
+        } = &events[3]
         else {
             panic!("the second output should be a tool request");
         };
@@ -1444,6 +1743,13 @@ mod tests {
         assert_eq!(first_call_id.as_deref(), Some("call_1"));
         assert_eq!(second, &json!({ "command": "ls" }));
         assert_eq!(second_call_id.as_deref(), Some("call_2"));
+        assert!(matches!(
+            &events[4],
+            ModelDriverEvent::Terminal {
+                outcome: TerminalModelOutcome::Succeeded,
+                ..
+            }
+        ));
     }
 
     #[tokio::test]
@@ -1521,17 +1827,19 @@ mod tests {
 
         assert_eq!(
             results.len(),
-            4,
-            "partial event, answer, terminal, then the late error"
+            3,
+            "partial event, answer, then the late error"
         );
-        assert!(results[0].is_ok());
+        assert!(matches!(
+            results[0],
+            Ok(ModelDriverEvent::ModelSpecificEvent { .. })
+        ));
         assert!(matches!(
             results[1],
             Ok(ModelDriverEvent::AssistantResponse { .. })
         ));
-        assert!(matches!(results[2], Ok(ModelDriverEvent::Terminal { .. })));
         assert!(matches!(
-            results[3],
+            results[2],
             Err(OpenRouterCompletionsError::InvalidResponse(_))
         ));
     }
@@ -1757,6 +2065,11 @@ mod tests {
             .invoke(driver_request(&conversation))
             .await
             .expect("the invocation should establish its stream");
+        let argument_delta = expect_single(&mut model_events).await;
+        assert!(matches!(
+            argument_delta,
+            ModelDriverOutput::ModelSpecificEvent(_)
+        ));
         let tool_request = expect_single(&mut model_events).await;
         assert!(matches!(
             tool_request,
