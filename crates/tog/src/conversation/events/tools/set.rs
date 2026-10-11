@@ -35,6 +35,20 @@ impl Tools {
         &self.tools
     }
 
+    pub fn describe(&self) -> String {
+        self.tools
+            .iter()
+            .map(|tool| {
+                let name = tool.definition().name().to_string();
+                match tool.availability() {
+                    ToolAvailability::Immediate => name,
+                    ToolAvailability::Discoverable => format!("{name} (discoverable)"),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
     pub(crate) fn ensure_valid(&self) -> Result<(), InvalidTools> {
         for tool in &self.tools {
             tool.ensure_valid()?;

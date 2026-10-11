@@ -51,6 +51,10 @@ impl Context {
         &self.value
     }
 
+    pub fn describe(&self) -> String {
+        format!("{} ({})", self.name, self.context_type)
+    }
+
     pub(crate) fn ensure_valid(&self) -> Result<(), InvalidContext> {
         if self.name.trim().is_empty() {
             return Err(InvalidContext::EmptyName);

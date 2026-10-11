@@ -29,6 +29,13 @@ impl TurnEnd {
         &self.outcome
     }
 
+    pub fn describe(&self) -> String {
+        match &self.outcome {
+            TurnOutcome::Succeeded => "succeeded".to_owned(),
+            TurnOutcome::Failed { failure } => format!("failed: {}", failure.message()),
+        }
+    }
+
     pub(crate) fn ensure_valid(&self) -> Result<(), InvalidTurnOutcome> {
         if let TurnOutcome::Failed { failure } = &self.outcome {
             failure

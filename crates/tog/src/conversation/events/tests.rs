@@ -341,6 +341,188 @@ fn an_operation_failure_round_trips_and_exposes_its_retry_guidance() {
 }
 
 #[test]
+fn event_payloads_describe_themselves_concisely() {
+    let id = ConversationEventId::new();
+    let tools = Tools::new(vec![Tool::new(
+        tool_definition("shell"),
+        ToolAvailability::Immediate,
+    )]);
+    let cases = [
+        (
+            ConversationEventPayload::User(
+                User::new(vec![UserContent::Text("test 123".to_owned())])
+                    .expect("the user event should be valid"),
+            ),
+            "user test 123",
+        ),
+        (
+            ConversationEventPayload::TurnStart(TurnStart::new(None, 3)),
+            "turn_start input through 3",
+        ),
+        (
+            ConversationEventPayload::TurnEnd(
+                TurnEnd::new(id, TurnOutcome::Succeeded).expect("the turn end should be valid"),
+            ),
+            "turn_end succeeded",
+        ),
+        (
+            ConversationEventPayload::AssistantResponse(
+                AssistantResponse::new(id, "Hello, world.".to_owned())
+                    .expect("the assistant response should be valid"),
+            ),
+            "assistant_response Hello, world.",
+        ),
+        (
+            ConversationEventPayload::ToolRequest(
+                ToolRequest::try_new(
+                    id,
+                    crate::conversation::ToolName::from_str("shell")
+                        .expect("the tool name should be valid"),
+                    json!({ "command": "echo \"test 123\"" }),
+                    None,
+                )
+                .expect("the tool request should be valid"),
+            ),
+            r#"tool_request shell({"command":"echo \"test 123\""})"#,
+        ),
+        (
+            ConversationEventPayload::ToolResponse(ToolResponse::new(
+                id,
+                ToolOutcome::succeeded(json!({ "ok": true })),
+            )),
+            r#"tool_response {"ok":true}"#,
+        ),
+        (
+            ConversationEventPayload::ModelRequest(
+                ModelRequest::new(id, source(), 0, Vec::new(), None, None)
+                    .expect("the model request should be valid"),
+            ),
+            "model_request test/test-model input through 0",
+        ),
+        (
+            ConversationEventPayload::ModelResponse(
+                ModelResponse::new(id, Vec::new(), ModelOutcome::Succeeded, None)
+                    .expect("the model response should be valid"),
+            ),
+            "model_response succeeded with 0 outputs",
+        ),
+        (
+            ConversationEventPayload::ModelSpecificEvent(
+                ModelSpecificEvent::new(
+                    id,
+                    "reasoning".to_owned(),
+                    1,
+                    json!({}),
+                    Some("Thinking.".to_owned()),
+                )
+                .expect("the model specific event should be valid"),
+            ),
+            "model_specific_event reasoning: Thinking.",
+        ),
+        (
+            ConversationEventPayload::Automation(
+                Automation::new("auto".to_owned()).expect("the automation should be valid"),
+            ),
+            "automation auto",
+        ),
+        (
+            ConversationEventPayload::Context(
+                Context::try_new(
+                    "workspace".to_owned(),
+                    "tog.workspace".to_owned(),
+                    json!({}),
+                )
+                .expect("the context should be valid"),
+            ),
+            "context workspace (tog.workspace)",
+        ),
+        (ConversationEventPayload::Tools(tools), "tools shell"),
+    ];
+
+    for (payload, expected) in cases {
+        assert_eq!(payload.describe(), expected);
+    }
+}
+
+#[test]
+fn failed_event_payloads_describe_their_failure() {
+    let id = ConversationEventId::new();
+    let failure = OperationFailure::try_new(
+        FailureCategory::TimedOut,
+        "the shell command timed out".to_owned(),
+        None,
+    )
+    .expect("the failure should be valid");
+
+    let cases: [(&str, String); 3] = [
+        (
+            "turn_end",
+            ConversationEventPayload::TurnEnd(
+                TurnEnd::new(
+                    id,
+                    TurnOutcome::Failed {
+                        failure: failure.clone(),
+                    },
+                )
+                .expect("the turn end should be valid"),
+            )
+            .describe(),
+        ),
+        (
+            "model_response",
+            ConversationEventPayload::ModelResponse(
+                ModelResponse::new(
+                    id,
+                    Vec::new(),
+                    ModelOutcome::Failed {
+                        failure: failure.clone(),
+                    },
+                    None,
+                )
+                .expect("the model response should be valid"),
+            )
+            .describe(),
+        ),
+        (
+            "tool_response",
+            ConversationEventPayload::ToolResponse(ToolResponse::new(
+                id,
+                ToolOutcome::Failed {
+                    failure: failure.clone(),
+                },
+            ))
+            .describe(),
+        ),
+    ];
+
+    for (kind, description) in cases {
+        assert_eq!(
+            description,
+            format!("{kind} failed: the shell command timed out")
+        );
+    }
+}
+
+#[test]
+fn multiline_text_payloads_describe_as_one_line() {
+    let id = ConversationEventId::new();
+    let user = ConversationEventPayload::User(
+        User::new(vec![UserContent::Text("line one\n\nline two".to_owned())])
+            .expect("the user event should be valid"),
+    );
+    let assistant = ConversationEventPayload::AssistantResponse(
+        AssistantResponse::new(id, "first line\nsecond line".to_owned())
+            .expect("the assistant response should be valid"),
+    );
+
+    assert_eq!(user.describe(), "user line one line two");
+    assert_eq!(
+        assistant.describe(),
+        "assistant_response first line second line"
+    );
+}
+
+#[test]
 fn a_tool_request_keeps_its_provider_call_identifier_as_opaque_data() {
     let request = ToolRequest::try_new(
         ConversationEventId::new(),

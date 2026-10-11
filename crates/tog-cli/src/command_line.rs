@@ -10,8 +10,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use prompt::UserPrompt;
 use tog::asset_store::{AssetMetadata, AssetStore, MimeType};
 use tog::conversation::{
-    ConversationEvent, ConversationEventPayload, ConversationId, ModelId, ModelOutcome,
-    TurnOutcome, UserContent,
+    ConversationEvent, ConversationEventPayload, ConversationId, ModelId, TurnOutcome, UserContent,
 };
 use tog::conversation_event_store::{ConversationEventRecord, ConversationEventStore};
 use tog_context::environment::Environment;
@@ -27,7 +26,7 @@ use tog_tools::ShellTool;
     version,
     about = "Command-line access to agentic services",
     disable_help_subcommand = true,
-    override_usage = "tog [:turn] [OPTIONS] <USER_PROMPT>...\n       tog :log [CONVERSATION_ID]\n       tog :asset add [OPTIONS] <SOURCE_PATH>\n       tog :asset list",
+    override_usage = "tog [:turn] [OPTIONS] <USER_PROMPT>...\n       tog :log [OPTIONS] [CONVERSATION_ID]\n       tog :asset add [OPTIONS] <SOURCE_PATH>\n       tog :asset list",
     after_help = "When no command is specified, :turn is used."
 )]
 pub(crate) struct CommandLine {
@@ -77,7 +76,7 @@ impl CommandLine {
                                 eprintln!("## waiting for model {model}");
                             }
                             ConversationSessionProgress::EventCompleted { event } => {
-                                render_model_event(&event, verbosity)?;
+                                render_event(&event, verbosity)?;
                             }
                         }
                         Ok(())
@@ -96,7 +95,11 @@ impl CommandLine {
                 let events = event_store.load(conversation_id)?;
                 let standard_output = io::stdout();
                 let mut standard_output = standard_output.lock();
-                write_conversation_log(&events, &mut standard_output)?;
+                if arguments.readable {
+                    write_readable_conversation_log(&events, &mut standard_output)?;
+                } else {
+                    write_conversation_log(&events, &mut standard_output)?;
+                }
                 Ok(CommandOutcome::ConversationLogged)
             }
             Command::Asset(arguments) => {
@@ -153,28 +156,40 @@ fn write_conversation_log(
     output.flush()
 }
 
-fn render_model_event(event: &ConversationEvent, verbosity: Verbosity) -> io::Result<()> {
-    let message = match event.payload() {
+fn write_readable_conversation_log(
+    events: &[ConversationEventRecord],
+    output: &mut impl Write,
+) -> io::Result<()> {
+    if let Some(conversation_id) = events
+        .first()
+        .map(|record| record.event().conversation_id())
+    {
+        writeln!(output, "# conversation {conversation_id}")?;
+    }
+    for record in events {
+        writeln!(output, "## {}", record.event().payload().describe())?;
+    }
+    output.flush()
+}
+
+fn render_event(event: &ConversationEvent, verbosity: Verbosity) -> io::Result<()> {
+    match event.payload() {
         ConversationEventPayload::AssistantResponse(response) => {
-            Some(response.content().to_owned())
+            let mut standard_output = io::stdout().lock();
+            writeln!(standard_output, "{}", response.content())?;
+            standard_output.flush()
         }
-        ConversationEventPayload::ModelSpecificEvent(event)
-            if verbosity.shows_auxiliary_messages() =>
+        ConversationEventPayload::ModelSpecificEvent(_)
+            if !verbosity.shows_auxiliary_messages() =>
         {
-            event.message().map(|message| format!("### {message}"))
+            Ok(())
         }
-        ConversationEventPayload::ModelResponse(response) => match response.outcome() {
-            ModelOutcome::Failed { failure } => Some(format!("### {}", failure.message())),
-            ModelOutcome::Succeeded => None,
-        },
-        _ => None,
-    };
-    let Some(message) = message else {
-        return Ok(());
-    };
-    let mut standard_output = io::stdout().lock();
-    writeln!(standard_output, "{message}")?;
-    standard_output.flush()
+        payload => {
+            let mut standard_error = io::stderr().lock();
+            writeln!(standard_error, "## {}", payload.describe())?;
+            standard_error.flush()
+        }
+    }
 }
 
 fn write_asset_metadata(metadata: &AssetMetadata, output: &mut impl Write) -> io::Result<()> {
@@ -217,8 +232,8 @@ enum Command {
 
     #[command(
         name = ":log",
-        about = "Dump a conversation log as JSON Lines",
-        override_usage = "tog :log [CONVERSATION_ID]"
+        about = "Dump a conversation log as JSON Lines or a readable summary",
+        override_usage = "tog :log [OPTIONS] [CONVERSATION_ID]"
     )]
     Log(LogArguments),
 
@@ -271,6 +286,10 @@ struct LogArguments {
     /// Conversation to dump; defaults to the most recently active conversation.
     #[arg(value_name = "CONVERSATION_ID")]
     conversation_id: Option<ConversationId>,
+
+    /// Print a concise summary of each event instead of JSON Lines.
+    #[arg(long)]
+    readable: bool,
 }
 
 #[derive(Debug, Args)]

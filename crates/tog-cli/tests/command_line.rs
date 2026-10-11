@@ -243,7 +243,7 @@ fn reported_conversation_id(standard_error: &[u8]) -> String {
 fn persisted_events(data_directory: &Path, conversation_id: &str) -> Vec<Value> {
     let log_path = data_directory
         .join("conversations")
-        .join(conversation_id.trim_start_matches("conversation_"))
+        .join(conversation_id)
         .join("events.log");
     let bytes = fs::read(&log_path).expect("the conversation log should be readable");
     committed_events(&bytes)
@@ -279,7 +279,7 @@ fn logged_conversation_id(event: &Value) -> String {
     event["conversation_id"]
         .as_str()
         .expect("each logged event should carry its conversation identifier")
-        .replace('-', "")
+        .to_owned()
 }
 
 #[test]
@@ -303,9 +303,9 @@ fn turn_persists_events_and_prints_semantic_output() {
     let standard_error =
         String::from_utf8(command_output.stderr.clone()).expect("standard error should be UTF-8");
     let conversation_id = reported_conversation_id(&command_output.stderr);
-    assert!(conversation_id.starts_with("conversation_"));
+    assert!(conversation_id.starts_with("cnv_"));
     assert!(standard_error.contains("## waiting for model gpt-5.6\n"));
-    assert!(conversation_id.trim_start_matches("conversation_").len() > 8);
+    assert!(conversation_id.trim_start_matches("cnv_").len() > 8);
     let events = persisted_events(&data_directory, &conversation_id);
     let event_types = events
         .iter()
@@ -329,13 +329,12 @@ fn turn_persists_events_and_prints_semantic_output() {
         ]
     );
     let user = &events[0];
-    assert_eq!(user["schema_version"], 13);
+    assert_eq!(user["schema_version"], 14);
     assert_eq!(
         user["conversation_id"]
             .as_str()
-            .expect("the event should carry its conversation identifier")
-            .replace('-', ""),
-        conversation_id.trim_start_matches("conversation_")
+            .expect("the event should carry its conversation identifier"),
+        conversation_id
     );
     assert_eq!(user["content"][0]["type"], "text");
     assert_eq!(user["content"][0]["value"], "say hi");
@@ -452,7 +451,17 @@ fn high_verbosity_prints_all_model_event_messages() {
     assert!(command_output.status.success());
     assert_eq!(
         String::from_utf8(command_output.stdout).expect("standard output should be UTF-8"),
-        "### Detailed thought\n### Reasoning summary\nFinal answer\n"
+        "Final answer\n"
+    );
+    let standard_error =
+        String::from_utf8(command_output.stderr).expect("standard error should be UTF-8");
+    assert!(
+        standard_error.contains("## model_specific_event reasoning: Detailed thought\n"),
+        "high verbosity should describe the reasoning event: {standard_error}"
+    );
+    assert!(
+        standard_error.contains("## model_specific_event reasoning_summary: Reasoning summary\n"),
+        "high verbosity should describe the reasoning summary: {standard_error}"
     );
     let requests = server.finish();
     assert_eq!(requests.len(), 1);
@@ -478,22 +487,31 @@ fn cli_output_is_incremental_and_not_duplicated() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("tog should start");
+    let mut standard_error = BufReader::new(
+        child
+            .stderr
+            .take()
+            .expect("tog standard error should be captured"),
+    );
+
+    loop {
+        let mut line = String::new();
+        standard_error
+            .read_line(&mut line)
+            .expect("the first semantic event should be readable");
+        if line.trim_end() == "## model_specific_event reasoning: Detailed thought" {
+            break;
+        }
+    }
+    continue_response
+        .send(())
+        .expect("the mock response should continue");
     let mut standard_output = BufReader::new(
         child
             .stdout
             .take()
             .expect("tog standard output should be captured"),
     );
-    let mut first_line = String::new();
-
-    standard_output
-        .read_line(&mut first_line)
-        .expect("the first semantic event should be readable");
-
-    assert_eq!(first_line, "### Detailed thought\n");
-    continue_response
-        .send(())
-        .expect("the mock response should continue");
     let mut remaining_output = String::new();
     standard_output
         .read_to_string(&mut remaining_output)
@@ -521,7 +539,13 @@ fn a_refusal_is_a_failed_terminal_response_and_fails_the_turn() {
     assert!(!command_output.status.success());
     assert_eq!(
         String::from_utf8(command_output.stdout).expect("standard output should be UTF-8"),
-        "### I cannot comply.\n"
+        ""
+    );
+    let standard_error =
+        String::from_utf8(command_output.stderr.clone()).expect("standard error should be UTF-8");
+    assert!(
+        standard_error.contains("## model_response failed: I cannot comply.\n"),
+        "the refusal should be described on standard error: {standard_error}"
     );
     let conversation_id = reported_conversation_id(&command_output.stderr);
     let events = persisted_events(&data_directory, &conversation_id);
@@ -595,7 +619,13 @@ fn medium_verbosity_prints_auxiliary_model_messages() {
     assert!(command_output.status.success());
     assert_eq!(
         String::from_utf8(command_output.stdout).expect("standard output should be UTF-8"),
-        "### Detailed thought\n### Reasoning summary\nFinal answer\n"
+        "Final answer\n"
+    );
+    let standard_error =
+        String::from_utf8(command_output.stderr).expect("standard error should be UTF-8");
+    assert!(
+        standard_error.contains("## model_specific_event reasoning: Detailed thought\n"),
+        "medium verbosity should describe the reasoning event: {standard_error}"
     );
     server.finish();
 }
@@ -624,7 +654,13 @@ fn reasoning_events_are_persisted_and_printed_but_not_replayed_as_assistant_mess
     assert!(first_output.status.success());
     assert_eq!(
         String::from_utf8(first_output.stdout).expect("standard output should be UTF-8"),
-        "### Detailed thought\n### Reasoning summary\nFinal answer\n"
+        "Final answer\n"
+    );
+    let first_standard_error =
+        String::from_utf8(first_output.stderr.clone()).expect("standard error should be UTF-8");
+    assert!(
+        first_standard_error.contains("## model_specific_event reasoning: Detailed thought\n"),
+        "high verbosity should describe the reasoning event: {first_standard_error}"
     );
     let conversation_id = reported_conversation_id(&first_output.stderr);
     let persisted_events = persisted_events(&data_directory, &conversation_id);
@@ -782,8 +818,11 @@ fn authentication_failure_exits_unsuccessfully() {
     assert!(!command_output.status.success());
     assert_eq!(
         String::from_utf8(command_output.stdout).expect("standard output should be UTF-8"),
-        "### The model provider could not authenticate the invocation.\n"
+        ""
     );
+    assert!(String::from_utf8(command_output.stderr)
+        .expect("standard error should be UTF-8")
+        .contains("## model_response failed: The model provider could not authenticate the invocation.\n"));
     assert_eq!(server.finish().len(), 1);
 }
 
@@ -875,9 +914,11 @@ fn log_defaults_to_the_most_recent_conversation_and_accepts_an_identifier() {
     assert!(default_log.status.success());
     let default_events = logged_events(&default_log.stdout);
     assert!(!default_events.is_empty());
-    assert!(default_events.iter().all(|event| {
-        logged_conversation_id(event) == second_conversation_id.trim_start_matches("conversation_")
-    }));
+    assert!(
+        default_events
+            .iter()
+            .all(|event| { logged_conversation_id(event) == second_conversation_id })
+    );
 
     let explicit_log = tog_command()
         .env("TOG_DATA_DIR", &data_directory)
@@ -888,6 +929,45 @@ fn log_defaults_to_the_most_recent_conversation_and_accepts_an_identifier() {
     assert_eq!(
         logged_events(&explicit_log.stdout),
         persisted_events(&data_directory, &first_conversation_id)
+    );
+    server.finish();
+}
+
+#[test]
+fn log_readable_mode_prints_concise_event_summaries() {
+    let server = MockOpenAiServer::start(vec![MockResponse::Success {
+        response_id: "resp_readable",
+        assistant_text: "Hello",
+    }]);
+    let data_directory = temporary_data_directory();
+    let turn_output = configured_command(&server, &data_directory)
+        .args(["say", "hi"])
+        .output()
+        .expect("the turn should run");
+    assert!(turn_output.status.success());
+    let conversation_id = reported_conversation_id(&turn_output.stderr);
+
+    let log_output = tog_command()
+        .env("TOG_DATA_DIR", &data_directory)
+        .args([":log", "--readable", &conversation_id])
+        .output()
+        .expect("the log command should run");
+
+    assert!(log_output.status.success());
+    let standard_output =
+        String::from_utf8(log_output.stdout.clone()).expect("standard output should be UTF-8");
+    let first_line = standard_output
+        .lines()
+        .next()
+        .expect("the readable log should open with a conversation header");
+    assert_eq!(first_line, format!("# conversation {conversation_id}"));
+    assert!(
+        standard_output.contains("## user say hi"),
+        "the readable log should summarize the user message: {standard_output}"
+    );
+    assert!(
+        standard_output.contains("## assistant_response Hello"),
+        "the readable log should summarize the assistant message: {standard_output}"
     );
     server.finish();
 }
@@ -956,14 +1036,14 @@ fn asset_add_stores_a_file_with_defaults() {
         .expect("the asset id should be reported")
         .to_owned();
 
-    assert!(asset_id.starts_with("asset_"));
+    assert!(asset_id.starts_with("ast_"));
     assert_eq!(asset_line["name"], "screenshot.png");
     assert_eq!(asset_line["mime_type"], "image/png");
     assert_eq!(asset_line["byte_size"], source_bytes.len() as u64);
     assert!(
         data_directory
             .join("assets")
-            .join(asset_id.trim_start_matches("asset_"))
+            .join(asset_id)
             .join("content")
             .exists()
     );
@@ -1078,13 +1158,9 @@ fn stored_assets_remain_available_when_the_source_changes_or_disappears() {
         .as_str()
         .expect("the asset id should be reported")
         .to_owned();
-    let stored_content = std::fs::read(
-        data_directory
-            .join("assets")
-            .join(asset_id.trim_start_matches("asset_"))
-            .join("content"),
-    )
-    .expect("the stored content should still exist");
+    let stored_content =
+        std::fs::read(data_directory.join("assets").join(asset_id).join("content"))
+            .expect("the stored content should still exist");
     assert_eq!(stored_content, b"original");
 }
 

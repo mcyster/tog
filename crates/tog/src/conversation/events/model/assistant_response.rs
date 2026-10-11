@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::conversation::events::ConversationEventId;
 
+use super::super::one_line_text;
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct AssistantResponse {
     model_request_id: ConversationEventId,
@@ -30,6 +32,10 @@ impl AssistantResponse {
 
     pub fn content(&self) -> &str {
         &self.content
+    }
+
+    pub fn describe(&self) -> String {
+        one_line_text(&self.content)
     }
 
     pub(crate) fn ensure_valid(&self) -> Result<(), InvalidAssistantResponse> {
