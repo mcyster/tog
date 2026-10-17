@@ -1,3 +1,3 @@
-mod shell;
+pub mod shell;
 
-pub use shell::ShellTool;
+pub use shell::ShellTools;
