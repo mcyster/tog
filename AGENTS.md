@@ -66,10 +66,9 @@ Follow the ordered priorities and tradeoff guidance in
 - Keep identifiers and supporting types alongside their concept. Group implementation blocks by cohesive responsibility; do not create a file per implementation or group unrelated items by technical form. Prefer clarity over indirection.
 - Keep the project as a Cargo workspace of focused crates; add a crate only when a concrete requirement justifies a separate package and boundary.
 - Keep durable documentation in `docs/`.
-- Record only significant choices explicitly accepted by the project owner in
-  `docs/decisions/`; follow its [recording rules](docs/decisions/README.md).
-  Routine implementation choices belong in the PR. Do not infer acceptance from
-  an agent-authored document or a PR merge alone.
+- Keep proposal, acceptance, and implementation state clear in ordinary prose.
+  An agent's proposal is not an accepted project choice; a merged PR alone does
+  not make every embedded choice an enduring decision.
 - Keep undeveloped possibilities in `docs/ideas.md`; use `docs/plans/` for shaped
   directions and make their acceptance and implementation state clear.
 

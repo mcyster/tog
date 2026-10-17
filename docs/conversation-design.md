@@ -1561,7 +1561,7 @@ Keep it small.
 
 Let future implementations change it.
 
-The [crate workspace decision](decisions/2026-10-03-organize-into-a-crate-workspace.md) records this rationale so the exception is deliberate rather than accidental and is now the project structure.
+The [crate workspace](../architecture.md#where-the-implementation-stands) records this rationale so the exception is deliberate rather than accidental and is now the project structure.
 
 ---
 
@@ -1575,4 +1575,5 @@ If OpenAI Responses exposes assumptions that conflict with the design, document 
 
 The shorter `docs/conversation.md` should describe the stable semantic conversation model and should not imply that a durable ModelDriver run log is required for Phase 1.
 
-Major future architectural changes should be captured as concise decisions when useful.
+Major future architectural changes are captured in plans and designs, with
+proposal, acceptance, and implementation state clear in prose when useful.

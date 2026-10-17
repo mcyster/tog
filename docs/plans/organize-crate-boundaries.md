@@ -32,8 +32,8 @@ crates in anticipation of future capabilities.
 
 Extract the reusable library and providers first, then move existing responsibilities
 into context, execution, tools, and storage. Keep current command behavior, event
-semantics, and stored-data compatibility. Update the initial single-package decision
-and repository guidance when the workspace is actually introduced.
+semantics, and stored-data compatibility, and update repository guidance when the
+workspace was actually introduced.
 
 The split is complete when Cargo enforces these dependencies, a consumer can use
 conversations and a model driver without the engine or CLI, and the CLI uses the

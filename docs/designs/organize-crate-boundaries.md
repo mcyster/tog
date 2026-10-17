@@ -8,9 +8,8 @@ Cargo workspace. Developers should be able to use conversations and model driver
 without adopting tog's execution engine, CLI, or server.
 
 This workspace is now implemented under `crates/`, and the CLI runs through the
-extracted engine with explicitly supplied implementations. See the
-[crate-workspace decision](../decisions/2026-10-03-organize-into-a-crate-workspace.md)
-and the current [architecture overview](../architecture.md).
+extracted engine with explicitly supplied implementations. See the current
+[architecture overview](../architecture.md).
 
 ## Crate responsibilities
 
