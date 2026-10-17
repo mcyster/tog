@@ -11,7 +11,9 @@ use tog::conversation::{
     TurnStart, User, UserContent, latest_tools,
 };
 use tog::conversation_event_store::ConversationEventStore;
-use tog::model_driver::{ModelDriver, ModelDriverError, ModelDriverOutput, TurnInput};
+use tog::model_driver::{
+    ModelDriver, ModelDriverError, ModelDriverOutput, ModelDriverOutputPersistence, TurnInput,
+};
 use tog_context::toolset::{ToolRegistry, Toolset};
 
 pub type ConversationSessionResult<T> = Result<T, Box<dyn Error>>;
@@ -145,6 +147,18 @@ impl<Store: ConversationEventStore> ConversationSession<Store> {
                     return Err(Box::new(ModelDriverError::OutputAfterTerminalResponse {
                         model_request_id,
                     }));
+                }
+                if output_batch.persistence() == ModelDriverOutputPersistence::Unpersisted {
+                    for output in output_batch.into_outputs() {
+                        let ModelDriverOutput::ModelSpecificEvent(event) = output else {
+                            unreachable!("an unpersisted batch contains only model-specific events")
+                        };
+                        self.ensure_request_reference(&event, model_request_id)?;
+                        let event = self
+                            .complete_event(ConversationEventPayload::ModelSpecificEvent(event));
+                        report_progress(ConversationSessionProgress::EventCompleted { event })?;
+                    }
+                    continue;
                 }
                 let mut outputs = output_batch.into_outputs();
                 if outputs.iter().any(|output| output.is_terminal_response()) {
@@ -433,7 +447,7 @@ mod tests {
     use schemars::json_schema;
     use serde_json::{Value, json};
 
-    use super::{ConversationSession, MAXIMUM_CONTINUATION_ROUNDS};
+    use super::{ConversationSession, ConversationSessionProgress, MAXIMUM_CONTINUATION_ROUNDS};
     use tog::conversation::{
         AssistantResponse, ConversationEventId, ConversationEventPayload, FailureCategory,
         ModelContinuation, ModelId, ModelOutcome, ModelResponse, ModelSource, ModelSpecificEvent,
@@ -566,6 +580,7 @@ mod tests {
     fn bind_outputs(
         outputs: Vec<ModelDriverOutput>,
         model_request_id: ConversationEventId,
+        unpersisted_specific_events: bool,
     ) -> Vec<ModelDriverOutputBatch> {
         outputs
             .into_iter()
@@ -608,7 +623,16 @@ mod tests {
                     .expect("the terminal response should be valid"),
                 ),
             })
-            .map(ModelDriverOutputBatch::from)
+            .map(|output| {
+                if unpersisted_specific_events
+                    && matches!(output, ModelDriverOutput::ModelSpecificEvent(_))
+                {
+                    ModelDriverOutputBatch::try_new_unpersisted(vec![output])
+                        .expect("a single model-specific event forms a valid unpersisted batch")
+                } else {
+                    ModelDriverOutputBatch::from(output)
+                }
+            })
             .collect()
     }
 
@@ -623,14 +647,27 @@ mod tests {
         source: ModelSource,
         invocations: Arc<Mutex<Vec<ScriptedInvocation>>>,
         script: Mutex<VecDeque<Vec<ModelDriverOutput>>>,
+        unpersisted_specific_events: bool,
     }
 
     impl ScriptedDriver {
         fn new(script: Vec<Vec<ModelDriverOutput>>) -> Self {
+            Self::with_unpersisted_specific_events(script, false)
+        }
+
+        fn new_unpersisted_specific_events(script: Vec<Vec<ModelDriverOutput>>) -> Self {
+            Self::with_unpersisted_specific_events(script, true)
+        }
+
+        fn with_unpersisted_specific_events(
+            script: Vec<Vec<ModelDriverOutput>>,
+            unpersisted_specific_events: bool,
+        ) -> Self {
             Self {
                 source: source(),
                 invocations: Arc::new(Mutex::new(Vec::new())),
                 script: Mutex::new(script.into()),
+                unpersisted_specific_events,
             }
         }
     }
@@ -682,7 +719,11 @@ mod tests {
                 .expect("the script should lock")
                 .pop_front()
                 .unwrap_or_default();
-            let batches = bind_outputs(scripted_outputs, model_request_id);
+            let batches = bind_outputs(
+                scripted_outputs,
+                model_request_id,
+                self.unpersisted_specific_events,
+            );
             async move { Ok(stream::iter(batches.into_iter().map(Ok)).boxed()) }.boxed()
         }
     }
@@ -1535,5 +1576,113 @@ mod tests {
             .next_back()
             .expect("the second model request should be recorded");
         assert_eq!(second_model_request.depends_on(), &[tool_request_id]);
+    }
+
+    #[tokio::test]
+    async fn unpersisted_events_reach_live_subscribers_without_entering_history() {
+        let directory = temporary_directory();
+        let driver = Arc::new(ScriptedDriver::new_unpersisted_specific_events(vec![
+            vec![
+                reasoning_event(),
+                assistant_response(),
+                continuing_response(),
+            ],
+            vec![assistant_response(), completed_response()],
+        ]));
+        let session = ConversationSession::create(
+            FileEventStore::new(directory.clone()).expect("the store should be created"),
+            Box::new(SharedScriptedDriver(Arc::clone(&driver))),
+            ToolRegistry::default(),
+        );
+        let conversation_id = session.id();
+        session
+            .add_user_request(user_content("hello"))
+            .expect("the request should be recorded");
+
+        let mut live_events = Vec::new();
+        assert_eq!(
+            session
+                .invoke(|progress| {
+                    if let ConversationSessionProgress::EventCompleted { event } = progress {
+                        live_events.push(event);
+                    }
+                    Ok(())
+                })
+                .await
+                .expect("the invocation should complete"),
+            TurnOutcome::Succeeded
+        );
+
+        assert!(
+            live_events.iter().any(|event| matches!(
+                event.payload(),
+                ConversationEventPayload::ModelSpecificEvent(specific)
+                    if specific.provider_event_type() == "reasoning"
+            )),
+            "the unpersisted event must reach live subscribers"
+        );
+
+        let recorded = loaded_events(&directory, conversation_id);
+        assert!(
+            !recorded.iter().any(|event| matches!(
+                event.event().payload(),
+                ConversationEventPayload::ModelSpecificEvent(_)
+            )),
+            "the unpersisted event must not be stored"
+        );
+        let recorded_ids = recorded
+            .iter()
+            .map(|event| event.event().id())
+            .collect::<Vec<_>>();
+        for response in recorded
+            .iter()
+            .filter_map(|event| match event.event().payload() {
+                ConversationEventPayload::ModelResponse(response) => Some(response),
+                _ => None,
+            })
+        {
+            for output_id in response.output_event_ids() {
+                assert!(
+                    recorded_ids.contains(output_id),
+                    "every model response output must remain in durable history"
+                );
+            }
+        }
+        assert!(
+            recorded.iter().any(|event| matches!(
+                event.event().payload(),
+                ConversationEventPayload::AssistantResponse(_)
+            )),
+            "the durable assistant output remains in history"
+        );
+        assert!(matches!(
+            recorded.last().map(|event| event.event().payload()),
+            Some(ConversationEventPayload::TurnEnd(turn_end))
+                if matches!(turn_end.outcome(), TurnOutcome::Succeeded)
+        ));
+
+        let invocations = driver
+            .invocations
+            .lock()
+            .expect("the invocation list should lock");
+        assert_eq!(
+            invocations.len(),
+            2,
+            "the continuing response invokes the model again"
+        );
+        assert!(
+            invocations[1].events.iter().all(|event| !matches!(
+                event.event().payload(),
+                ConversationEventPayload::ModelSpecificEvent(_)
+            )),
+            "unpersisted events must not reach subsequent model input"
+        );
+        assert!(
+            invocations[1].events.iter().any(|event| matches!(
+                event.event().payload(),
+                ConversationEventPayload::AssistantResponse(_)
+            )),
+            "durable assistant output reaches subsequent model input"
+        );
     }
 }

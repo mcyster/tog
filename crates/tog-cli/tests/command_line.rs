@@ -978,12 +978,17 @@ fn openrouter_stream_emits_partial_content_events_at_medium_verbosity() {
     assert!(standard_error.contains("## model_specific_event content_delta: Hello\n"));
     let conversation_id = reported_conversation_id(&command_output.stderr);
     let events = persisted_events(&data_directory, &conversation_id);
-    let partial = events
+    assert!(
+        !events
+            .iter()
+            .any(|event| event["type"] == "model_specific_event"),
+        "the partial content must not be persisted"
+    );
+    let assistant = events
         .iter()
-        .find(|event| event["type"] == "model_specific_event")
-        .expect("the partial content should be persisted as a model-specific event");
-    assert_eq!(partial["provider_event_type"], "content_delta");
-    assert_eq!(partial["message"], "Hello");
+        .find(|event| event["type"] == "assistant_response")
+        .expect("the completed assistant output should be persisted");
+    assert_eq!(assistant["content"], "Hello");
     server.finish();
 }
 

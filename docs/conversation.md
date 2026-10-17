@@ -356,6 +356,18 @@ stream ends without a terminal response, the engine records a failed
 `ModelResponse` instead. Unknown usage stays unknown rather than being counted
 as zero.
 
+Persistence is explicit at the stream boundary. Each batch is durable by default;
+a driver marks intermediate observations as unpersisted. Unpersisted batches are
+delivered to live subscribers but never stored, so they do not enter
+reconstructed conversation state or provider input, do not claim model outputs,
+and do not trigger tool execution. Only `ModelSpecificEvent` values may be
+unpersisted. Intermediate model output and tool-call construction progress are
+emitted as unpersisted `ModelSpecificEvent` values, while the completed assistant
+response, tool request, model outcome, usage, and failures remain durable and
+self-contained. The persisted history must remain sufficient to replay and
+continue the conversation without any unpersisted events; reconstruction and
+provider input never depend on them.
+
 Event construction assigns identity and timestamp. The append boundary
 preserves them and assigns position. The session records the terminal turn
 outcome as `TurnEnd`:
