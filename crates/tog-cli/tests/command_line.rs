@@ -402,7 +402,7 @@ fn turn_persists_events_and_prints_semantic_output() {
         ]
     );
     let user = &events[0];
-    assert_eq!(user["schema_version"], 14);
+    assert_eq!(user["schema_version"], 15);
     assert_eq!(
         user["conversation_id"]
             .as_str()
@@ -428,6 +428,10 @@ fn turn_persists_events_and_prints_semantic_output() {
     assert!(assistant["model_request_id"].is_string());
     let model_response = &events[5];
     assert_eq!(model_response["outcome"]["type"], "succeeded");
+    assert_eq!(
+        model_response["continuation"]["type"], "complete",
+        "a final answer records an explicit completion"
+    );
     assert_eq!(
         model_response["output_event_ids"][0], events[4]["id"],
         "the terminal response seals the assistant output"

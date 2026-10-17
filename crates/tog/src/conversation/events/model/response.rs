@@ -11,6 +11,8 @@ pub struct ModelResponse {
     output_event_ids: Vec<ConversationEventId>,
     outcome: ModelOutcome,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    continuation: Option<ModelContinuation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     usage: Option<Usage>,
 }
 
@@ -19,12 +21,14 @@ impl ModelResponse {
         model_request_id: ConversationEventId,
         output_event_ids: Vec<ConversationEventId>,
         outcome: ModelOutcome,
+        continuation: Option<ModelContinuation>,
         usage: Option<Usage>,
     ) -> Result<Self, InvalidModelResponse> {
         let response = Self {
             model_request_id,
             output_event_ids,
             outcome,
+            continuation,
             usage,
         };
         response.ensure_valid()?;
@@ -43,6 +47,10 @@ impl ModelResponse {
         &self.outcome
     }
 
+    pub fn continuation(&self) -> Option<ModelContinuation> {
+        self.continuation
+    }
+
     pub fn usage(&self) -> Option<&Usage> {
         self.usage.as_ref()
     }
@@ -50,7 +58,15 @@ impl ModelResponse {
     pub fn describe(&self) -> String {
         match &self.outcome {
             ModelOutcome::Succeeded => {
-                format!("succeeded with {} outputs", self.output_event_ids.len())
+                let continuation = match self.continuation {
+                    Some(ModelContinuation::Complete) => "complete",
+                    Some(ModelContinuation::Continue) => "continue",
+                    None => unreachable!("a successful model response records its continuation"),
+                };
+                format!(
+                    "succeeded {continuation} with {} outputs",
+                    self.output_event_ids.len()
+                )
             }
             ModelOutcome::Failed { failure } => format!("failed: {}", failure.message()),
         }
@@ -62,8 +78,21 @@ impl ModelResponse {
                 .ensure_valid()
                 .map_err(InvalidModelResponse::Failure)?;
         }
-        Ok(())
+        match (&self.outcome, self.continuation) {
+            (ModelOutcome::Succeeded, None) => Err(InvalidModelResponse::MissingContinuation),
+            (ModelOutcome::Failed { .. }, Some(_)) => {
+                Err(InvalidModelResponse::UnexpectedContinuation)
+            }
+            _ => Ok(()),
+        }
     }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ModelContinuation {
+    Complete,
+    Continue,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -90,12 +119,26 @@ impl Usage {
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum InvalidModelResponse {
+    MissingContinuation,
+    UnexpectedContinuation,
     Failure(InvalidOperationFailure),
 }
 
 impl Display for InvalidModelResponse {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::MissingContinuation => {
+                write!(
+                    formatter,
+                    "a successful model response must record its continuation"
+                )
+            }
+            Self::UnexpectedContinuation => {
+                write!(
+                    formatter,
+                    "a failed model response must not record a continuation"
+                )
+            }
             Self::Failure(error) => Display::fmt(error, formatter),
         }
     }

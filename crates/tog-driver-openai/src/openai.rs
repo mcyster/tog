@@ -14,8 +14,8 @@ use serde_json::{Map, Value, json};
 use tog::conversation::{
     AssistantResponse, ConversationEventId, ConversationEventPayload, FailureCategory,
     InvalidAssistantResponse, InvalidModelResponse, InvalidModelSpecificEvent, InvalidToolRequest,
-    ModelData, ModelId, ModelOutcome, ModelResponse, ModelSource, ModelSpecificEvent,
-    OperationFailure, ProviderId, ToolRequest, Usage, UserContent,
+    ModelContinuation, ModelData, ModelId, ModelOutcome, ModelResponse, ModelSource,
+    ModelSpecificEvent, OperationFailure, ProviderId, ToolRequest, Usage, UserContent,
 };
 use tog::conversation::{ToolAvailability, ToolName};
 use tog::conversation_event_store::ConversationEventRecord;
@@ -83,7 +83,9 @@ enum ModelDriverEvent {
 
 #[derive(Clone)]
 enum TerminalModelOutcome {
-    Succeeded,
+    Succeeded {
+        continuation: ModelContinuation,
+    },
     Failed {
         category: FailureCategory,
         message: String,
@@ -504,26 +506,37 @@ fn terminal_model_output(
 fn fail_stream(state: &mut ConversationEventStreamState, error: OpenAiError) {
     let (category, message) = provider_failure(&error, FailureStage::DuringStream);
     let outcome = TerminalModelOutcome::Failed { category, message };
-    let response = ModelResponse::new(
-        state.model_request_id,
-        Vec::new(),
-        terminal_model_outcome(outcome),
-        None,
-    )
-    .expect("the failed terminal model response should be valid");
+    let response = terminal_model_response(state.model_request_id, outcome, None)
+        .expect("the failed terminal model response should be valid");
     state.pending_batches = VecDeque::from([ModelDriverOutputBatch::from(
         ModelDriverOutput::ModelResponse(response),
     )]);
     state.terminated = true;
 }
 
-fn terminal_model_outcome(outcome: TerminalModelOutcome) -> ModelOutcome {
+fn terminal_model_response(
+    model_request_id: ConversationEventId,
+    outcome: TerminalModelOutcome,
+    usage: Option<Usage>,
+) -> Result<ModelResponse, InvalidModelResponse> {
     match outcome {
-        TerminalModelOutcome::Succeeded => ModelOutcome::Succeeded,
-        TerminalModelOutcome::Failed { category, message } => ModelOutcome::Failed {
-            failure: OperationFailure::try_new(category, message, None)
-                .expect("the terminal failure should be valid"),
-        },
+        TerminalModelOutcome::Succeeded { continuation } => ModelResponse::new(
+            model_request_id,
+            Vec::new(),
+            ModelOutcome::Succeeded,
+            Some(continuation),
+            usage,
+        ),
+        TerminalModelOutcome::Failed { category, message } => ModelResponse::new(
+            model_request_id,
+            Vec::new(),
+            ModelOutcome::Failed {
+                failure: OperationFailure::try_new(category, message, None)
+                    .expect("the terminal failure should be valid"),
+            },
+            None,
+            usage,
+        ),
     }
 }
 
@@ -570,13 +583,8 @@ fn translate_model_driver_event(
             )
         }
         ModelDriverEvent::Terminal { outcome, usage } => {
-            let response = ModelResponse::new(
-                model_request_id,
-                Vec::new(),
-                terminal_model_outcome(outcome),
-                usage,
-            )
-            .map_err(invalid_model_response)?;
+            let response = terminal_model_response(model_request_id, outcome, usage)
+                .map_err(invalid_model_response)?;
             state.pending_batches = VecDeque::from([ModelDriverOutputBatch::from(
                 ModelDriverOutput::ModelResponse(response),
             )]);
@@ -1046,9 +1054,18 @@ fn complete_response(
             "the completed response contained no model message".to_owned(),
         ));
     }
+    let continuation = if response_state
+        .function_calls
+        .iter()
+        .any(|function_call| function_call.emitted)
+    {
+        ModelContinuation::Continue
+    } else {
+        ModelContinuation::Complete
+    };
     let usage = completed_usage(payload);
     model_events.push(ModelDriverEvent::Terminal {
-        outcome: TerminalModelOutcome::Succeeded,
+        outcome: TerminalModelOutcome::Succeeded { continuation },
         usage,
     });
     response_state.completed = true;
@@ -1596,9 +1613,10 @@ mod tests {
 
     use tog::conversation::{
         AssistantResponse, Conversation, ConversationEvent, ConversationEventId,
-        ConversationEventPayload, ConversationHistory, ConversationId, FailureCategory, ModelData,
-        ModelId, ModelOutcome, ModelRequest, ModelSource, ModelSpecificEvent, ProviderId,
-        ToolOutcome, ToolRequest, ToolResponse, TurnStart, User, UserContent,
+        ConversationEventPayload, ConversationHistory, ConversationId, FailureCategory,
+        ModelContinuation, ModelData, ModelId, ModelOutcome, ModelRequest, ModelSource,
+        ModelSpecificEvent, ProviderId, ToolOutcome, ToolRequest, ToolResponse, TurnStart, User,
+        UserContent,
     };
     use tog::conversation::{ToolDefinition, ToolName};
     use tog::conversation_event_store::ConversationEventRecord;
@@ -1847,7 +1865,9 @@ mod tests {
         assert!(matches!(
             &events[3],
             ModelDriverEvent::Terminal {
-                outcome: TerminalModelOutcome::Succeeded,
+                outcome: TerminalModelOutcome::Succeeded {
+                    continuation: ModelContinuation::Complete
+                },
                 ..
             }
         ));
@@ -1963,6 +1983,15 @@ mod tests {
         assert_eq!(tool_name.as_str(), "shell");
         assert_eq!(arguments, &json!({ "command": "pwd" }));
         assert_eq!(provider_call_id.as_deref(), Some("call_1"));
+        assert!(matches!(
+            &events[1],
+            ModelDriverEvent::Terminal {
+                outcome: TerminalModelOutcome::Succeeded {
+                    continuation: ModelContinuation::Continue
+                },
+                ..
+            }
+        ));
     }
 
     #[tokio::test]

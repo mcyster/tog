@@ -19,8 +19,10 @@ boundaries and future changes.
 | Application | Choose implementations and provide the command-line or other user interface |
 
 A model driver requests tool work through events; it does not execute tools or
-own the turn. Assistant text is content, not a completion signal. A model attempt
-and the turn containing it have separate outcomes.
+own the turn. Assistant text is content, not a completion signal; a successful
+model response explicitly records whether the model has finished or needs
+another invocation. A model attempt and the turn containing it have separate
+outcomes.
 
 Recorded history is the source for reconstruction. Replaying it must not execute
 external work. Model-visible semantic state belongs in events or immutable

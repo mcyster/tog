@@ -4,10 +4,10 @@ use serde_json::json;
 
 use super::{
     AssistantResponse, Automation, Context, ConversationEventId, FailureCategory,
-    InvalidModelSpecificEvent, InvalidUser, ModelData, ModelId, ModelOutcome, ModelRequest,
-    ModelResponse, ModelSource, ModelSpecificEvent, OperationFailure, ProviderId, Tool,
-    ToolAvailability, ToolOutcome, ToolRequest, ToolResponse, Tools, TurnEnd, TurnOutcome,
-    TurnStart, User, UserContent,
+    InvalidModelResponse, InvalidModelSpecificEvent, InvalidUser, ModelContinuation, ModelData,
+    ModelId, ModelOutcome, ModelRequest, ModelResponse, ModelSource, ModelSpecificEvent,
+    OperationFailure, ProviderId, Tool, ToolAvailability, ToolOutcome, ToolRequest, ToolResponse,
+    Tools, TurnEnd, TurnOutcome, TurnStart, User, UserContent,
 };
 use crate::conversation::{ConversationEvent, ConversationEventPayload, ConversationId};
 use crate::conversation_event_store::ConversationEventRecord;
@@ -119,8 +119,14 @@ fn every_event_kind_keeps_its_stable_discriminator() {
         ),
         (
             ConversationEventPayload::ModelResponse(
-                ModelResponse::new(id, Vec::new(), ModelOutcome::Succeeded, None)
-                    .expect("the model response should be valid"),
+                ModelResponse::new(
+                    id,
+                    Vec::new(),
+                    ModelOutcome::Succeeded,
+                    Some(ModelContinuation::Complete),
+                    None,
+                )
+                .expect("the model response should be valid"),
             ),
             "model_response",
         ),
@@ -430,10 +436,16 @@ fn event_payloads_describe_themselves_concisely() {
         ),
         (
             ConversationEventPayload::ModelResponse(
-                ModelResponse::new(id, Vec::new(), ModelOutcome::Succeeded, None)
-                    .expect("the model response should be valid"),
+                ModelResponse::new(
+                    id,
+                    Vec::new(),
+                    ModelOutcome::Succeeded,
+                    Some(ModelContinuation::Complete),
+                    None,
+                )
+                .expect("the model response should be valid"),
             ),
-            "model_response succeeded with 0 outputs",
+            "model_response succeeded complete with 0 outputs",
         ),
         (
             ConversationEventPayload::ModelSpecificEvent(
@@ -507,6 +519,7 @@ fn failed_event_payloads_describe_their_failure() {
                         failure: failure.clone(),
                     },
                     None,
+                    None,
                 )
                 .expect("the model response should be valid"),
             )
@@ -530,6 +543,87 @@ fn failed_event_payloads_describe_their_failure() {
             format!("{kind} failed: the shell command timed out")
         );
     }
+}
+
+#[test]
+fn a_successful_model_response_round_trips_its_continuation() {
+    let id = ConversationEventId::new();
+    let completed = ModelResponse::new(
+        id,
+        Vec::new(),
+        ModelOutcome::Succeeded,
+        Some(ModelContinuation::Complete),
+        None,
+    )
+    .expect("the completed response should be valid");
+    let continuing = ModelResponse::new(
+        id,
+        Vec::new(),
+        ModelOutcome::Succeeded,
+        Some(ModelContinuation::Continue),
+        None,
+    )
+    .expect("the continuing response should be valid");
+
+    let completed_value = serde_json::to_value(&completed).expect("the response should serialize");
+    assert_eq!(completed_value["continuation"]["type"], "complete");
+    let restored: ModelResponse =
+        serde_json::from_value(completed_value).expect("the completed response should deserialize");
+    assert_eq!(restored, completed);
+    assert_eq!(restored.continuation(), Some(ModelContinuation::Complete));
+
+    let continuing_value =
+        serde_json::to_value(&continuing).expect("the response should serialize");
+    assert_eq!(continuing_value["continuation"]["type"], "continue");
+    let restored: ModelResponse = serde_json::from_value(continuing_value)
+        .expect("the continuing response should deserialize");
+    assert_eq!(restored.continuation(), Some(ModelContinuation::Continue));
+
+    assert_eq!(completed.describe(), "succeeded complete with 0 outputs");
+    assert_eq!(continuing.describe(), "succeeded continue with 0 outputs");
+    let failing = ModelResponse::new(
+        id,
+        Vec::new(),
+        ModelOutcome::Failed {
+            failure: OperationFailure::try_new(
+                FailureCategory::ProviderFailure,
+                "the model failed".to_owned(),
+                None,
+            )
+            .expect("the failure should be valid"),
+        },
+        None,
+        None,
+    )
+    .expect("the failed response should be valid");
+    let failing_value = serde_json::to_value(&failing).expect("the response should serialize");
+    assert!(failing_value.get("continuation").is_none());
+}
+
+#[test]
+fn a_model_response_rejects_outcome_and_continuation_mismatches() {
+    let id = ConversationEventId::new();
+    assert_eq!(
+        ModelResponse::new(id, Vec::new(), ModelOutcome::Succeeded, None, None),
+        Err(InvalidModelResponse::MissingContinuation)
+    );
+    assert_eq!(
+        ModelResponse::new(
+            id,
+            Vec::new(),
+            ModelOutcome::Failed {
+                failure: OperationFailure::try_new(
+                    FailureCategory::ProviderFailure,
+                    "the model failed".to_owned(),
+                    None,
+                )
+                .expect("the failure should be valid"),
+            },
+            Some(ModelContinuation::Complete),
+            None,
+        ),
+        Err(InvalidModelResponse::UnexpectedContinuation)
+    );
 }
 
 #[test]
