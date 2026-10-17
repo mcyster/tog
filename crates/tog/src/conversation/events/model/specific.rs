@@ -16,7 +16,7 @@ pub struct ModelSpecificEvent {
     payload: Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     message: Option<String>,
-    #[serde(skip)]
+    #[serde(default)]
     persistence: ConversationEventPersistence,
 }
 
