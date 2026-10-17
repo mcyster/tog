@@ -5,13 +5,17 @@ use serde_json::{Value, json};
 
 use super::{PROVIDER_PAYLOAD_VERSION, REASONING_ITEM_EVENT_TYPE};
 use tog::conversation::{
-    ConversationEventId, ConversationEventPayload, ModelSpecificEvent, ToolDefinition, ToolRequest,
-    UserContent,
+    ConversationEventId, ConversationEventPayload, ModelSource, ModelSpecificEvent, ToolDefinition,
+    ToolRequest, UserContent,
 };
 use tog::conversation_event_store::ConversationEventRecord;
 
-pub(crate) fn responses_input(events: &[ConversationEventRecord]) -> Value {
+pub(crate) fn responses_input(
+    events: &[ConversationEventRecord],
+    current_source: &ModelSource,
+) -> Value {
     let provider_call_ids = provider_tool_call_ids(events);
+    let model_request_sources = model_request_sources(events);
     let input = events
         .iter()
         .filter_map(|conversation_event| {
@@ -33,7 +37,7 @@ pub(crate) fn responses_input(events: &[ConversationEventRecord]) -> Value {
                     }))
                 }
                 ConversationEventPayload::ModelSpecificEvent(specific_event) => {
-                    replay_reasoning_item(specific_event)
+                    replay_reasoning_item(specific_event, &model_request_sources, current_source)
                 }
                 ConversationEventPayload::AssistantResponse(response) => Some(json!({
                     "type": "message",
@@ -86,10 +90,18 @@ pub(crate) fn responses_input(events: &[ConversationEventRecord]) -> Value {
     Value::Array(input)
 }
 
-fn replay_reasoning_item(specific_event: &ModelSpecificEvent) -> Option<Value> {
+fn replay_reasoning_item(
+    specific_event: &ModelSpecificEvent,
+    model_request_sources: &HashMap<ConversationEventId, ModelSource>,
+    current_source: &ModelSource,
+) -> Option<Value> {
     if specific_event.provider_event_type() != REASONING_ITEM_EVENT_TYPE
         || specific_event.provider_payload_version() != PROVIDER_PAYLOAD_VERSION
     {
+        return None;
+    }
+    let origin = model_request_sources.get(&specific_event.model_request_id())?;
+    if origin != current_source {
         return None;
     }
     let payload = specific_event.payload();
@@ -104,6 +116,22 @@ fn replay_reasoning_item(specific_event: &ModelSpecificEvent) -> Option<Value> {
         item["encrypted_content"] = Value::String(encrypted_content.to_owned());
     }
     Some(item)
+}
+
+fn model_request_sources(
+    events: &[ConversationEventRecord],
+) -> HashMap<ConversationEventId, ModelSource> {
+    events
+        .iter()
+        .filter_map(
+            |conversation_event| match conversation_event.event().payload() {
+                ConversationEventPayload::ModelRequest(request) => {
+                    Some((conversation_event.event().id(), request.source().clone()))
+                }
+                _ => None,
+            },
+        )
+        .collect()
 }
 
 pub(crate) fn is_summary_text(value: &Value) -> bool {
@@ -135,37 +163,38 @@ fn provider_tool_call_ids(
         .iter()
         .filter_map(
             |conversation_event| match conversation_event.event().payload() {
-                ConversationEventPayload::ToolRequest(request) => Some((
-                    conversation_event.event().id(),
-                    provider_tool_call_id(request),
-                )),
+                ConversationEventPayload::ToolRequest(request) => provider_tool_call_id(request)
+                    .map(|call_id| (conversation_event.event().id(), call_id)),
                 _ => None,
             },
         )
         .collect()
 }
 
-fn provider_tool_call_id(request: &ToolRequest) -> String {
+fn provider_tool_call_id(request: &ToolRequest) -> Option<String> {
     request
         .data()
         .and_then(|data| data.content().get("call_id"))
         .and_then(Value::as_str)
+        .filter(|call_id| !call_id.is_empty())
         .map(str::to_owned)
-        .unwrap_or_default()
 }
 
 #[cfg(test)]
 mod tests {
+    use std::str::FromStr;
+
     use serde_json::{Map, json};
 
     use super::super::PROVIDER_PAYLOAD_VERSION;
     use super::super::tests::{
-        conversation_event, reasoning_event, tool_definition, turn_and_request, user_event,
+        conversation_event, reasoning_event, source, tool_definition, turn_and_request, user_event,
     };
     use super::responses_input;
     use tog::conversation::{
         AssistantResponse, Conversation, ConversationEventPayload, ConversationHistory,
-        ConversationId, ModelData, ToolName, ToolOutcome, ToolRequest, ToolResponse,
+        ConversationId, ModelData, ModelId, ModelRequest, ModelSource, ProviderId, ToolName,
+        ToolOutcome, ToolRequest, ToolResponse, TurnStart,
     };
 
     #[test]
@@ -187,7 +216,7 @@ mod tests {
         ])
         .expect("the conversation should be valid");
 
-        let input = responses_input(conversation.events());
+        let input = responses_input(conversation.events(), &source());
         assert_eq!(
             input,
             json!([
@@ -275,7 +304,7 @@ mod tests {
         .expect("the conversation should be valid");
 
         assert_eq!(
-            responses_input(conversation.events()),
+            responses_input(conversation.events(), &source()),
             json!([
                 {
                     "type": "message",
@@ -342,7 +371,7 @@ mod tests {
         .expect("the conversation should be valid");
 
         assert_eq!(
-            responses_input(conversation.events()),
+            responses_input(conversation.events(), &source()),
             json!([
                 {
                     "type": "message",
@@ -351,6 +380,114 @@ mod tests {
                 }
             ]),
             "an incompatible reasoning payload must not be replayed"
+        );
+    }
+
+    #[test]
+    fn responses_input_falls_back_to_the_event_id_when_no_provider_call_id() {
+        let conversation_id = ConversationId::new();
+        let (turn_start, model_request) = turn_and_request(conversation_id);
+        let request_id = model_request.event().id();
+        let tool_request_record = conversation_event(
+            conversation_id,
+            3,
+            ConversationEventPayload::ToolRequest(
+                ToolRequest::try_new(
+                    request_id,
+                    ToolName::try_new("shell".to_owned()).expect("the tool name should be valid"),
+                    json!({ "command": "pwd" }),
+                    None,
+                )
+                .expect("the tool request should be valid"),
+            ),
+        );
+        let tool_request_id = tool_request_record.event().id();
+        let tool_response_record = conversation_event(
+            conversation_id,
+            4,
+            ConversationEventPayload::ToolResponse(ToolResponse::new(
+                tool_request_id,
+                ToolOutcome::succeeded(json!({ "stdout": "/tmp\n" })),
+            )),
+        );
+        let conversation = ConversationHistory::from_events(vec![
+            user_event(conversation_id, 0, "Run pwd"),
+            turn_start,
+            model_request,
+            tool_request_record,
+            tool_response_record,
+        ])
+        .expect("the conversation should be valid");
+
+        let input = responses_input(conversation.events(), &source());
+        assert_eq!(
+            input[1]["call_id"],
+            tool_request_id.to_string(),
+            "the function call must fall back to the event id when no native call id exists"
+        );
+        assert_eq!(
+            input[2]["call_id"],
+            tool_request_id.to_string(),
+            "the tool result must correlate through the same event id fallback"
+        );
+    }
+
+    #[test]
+    fn responses_input_skips_reasoning_from_a_different_model() {
+        let conversation_id = ConversationId::new();
+        let turn_start = conversation_event(
+            conversation_id,
+            1,
+            ConversationEventPayload::TurnStart(TurnStart::new(None, 0)),
+        );
+        let previous_source = ModelSource::new(
+            ProviderId::from_str("openrouter").expect("the provider should be valid"),
+            ModelId::from_str("deepseek/deepseek-v4-pro").expect("the model should be valid"),
+        );
+        let model_request = conversation_event(
+            conversation_id,
+            2,
+            ConversationEventPayload::ModelRequest(
+                ModelRequest::new(
+                    turn_start.event().id(),
+                    previous_source,
+                    1,
+                    Vec::new(),
+                    None,
+                    None,
+                )
+                .expect("the model request should be valid"),
+            ),
+        );
+        let request_id = model_request.event().id();
+        let reasoning_record = conversation_event(
+            conversation_id,
+            3,
+            reasoning_event(
+                request_id,
+                "rs_prev",
+                Some("gAAAA-prev"),
+                json!([{ "type": "summary_text", "text": "Old." }]),
+            ),
+        );
+        let conversation = ConversationHistory::from_events(vec![
+            user_event(conversation_id, 0, "Hello"),
+            turn_start,
+            model_request,
+            reasoning_record,
+        ])
+        .expect("the conversation should be valid");
+
+        assert_eq!(
+            responses_input(conversation.events(), &source()),
+            json!([
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": "Hello" }]
+                }
+            ]),
+            "a previous model's reasoning state must not be replayed to the current model"
         );
     }
 

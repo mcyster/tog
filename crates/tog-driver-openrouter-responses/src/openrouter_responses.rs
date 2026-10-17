@@ -94,7 +94,10 @@ impl ModelDriver for OpenRouterResponsesModelDriver {
             "model".to_owned(),
             Value::String(self.source.model().as_str().to_owned()),
         );
-        request_body.insert("input".to_owned(), input::responses_input(events));
+        request_body.insert(
+            "input".to_owned(),
+            input::responses_input(events, &self.source),
+        );
         let immediate_tools = input
             .tools()
             .map(|tools| {
