@@ -320,6 +320,13 @@ such as `model_request_id`, `tool_request_id`, and `turn_id` state what a
 reference points to. A `ConversationId` remains distinct because it identifies
 the conversation.
 
+Every identifier carries a short type prefix of 1-4 characters followed by an
+underscore, then the underlying UUID: conversations use `cnv_`, conversation
+events use `evt_`, and assets use `ast_`. The prefixed form is used uniformly
+for display, JSON serialization, and filesystem storage keys so an identifier is
+self-describing wherever it appears. Parsers continue to accept an unprefixed
+UUID; no other legacy forms are supported.
+
 A complete `ConversationEvent` owns its ID, conversation ID, timestamp, and
 payload. Event construction assigns the ID and timestamp and receives the
 conversation ID; the store preserves them, assigns the record position, and

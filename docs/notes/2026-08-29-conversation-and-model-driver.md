@@ -46,7 +46,7 @@ Only the Conversation Log is required for correctness. Provider events may be
 traced for development and observability. A durable run log remains a possible
 future supplement, never a replacement for semantic history.
 
-See [Conversation Is the Portable Model Input](../decisions/2026-08-22-use-conversation-as-portable-model-input.md).
+See [Conversation Is the Portable Model Input](../conversation.md#completeness).
 
 ### Completed semantic output over raw streaming detail
 
@@ -59,7 +59,7 @@ This replaced the earlier batch interface. Completed outputs can be persisted
 immediately and remain valid if the provider stream later fails. Incomplete
 deltas are discarded.
 
-See [Use Asynchronous Streaming ModelDriver Invocations](../decisions/2026-08-22-use-asynchronous-streaming-model-driver-invocations.md).
+See [Use Asynchronous Streaming ModelDriver Invocations](../conversation.md#durability-and-projection).
 
 ### Durable failed-turn semantics without rollback
 
@@ -73,7 +73,7 @@ Already appended facts are never rolled back. Detailed transport errors remain
 control-flow errors and diagnostics; sensitive provider bodies and credentials
 do not enter the conversation.
 
-See [Represent Model-Associated Problems as Conversation Events](../decisions/2026-08-23-represent-model-associated-problems-as-conversation-events.md).
+See [Represent Model-Associated Problems as Conversation Events](../conversation.md#modelrequest-modelresponse-and-modelspecificevent).
 
 ## Open pressure points
 

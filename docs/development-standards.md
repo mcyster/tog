@@ -51,7 +51,7 @@ The ordered priorities and reasons behind these conventions live in
 - Organize code by feature or responsibility rather than by technical layer.
 - Keep the executable entry point thin.
 - Keep durable documentation in `docs/`.
-- Record only significant choices explicitly accepted by the project owner in `docs/decisions/`, following its [recording rules](decisions/README.md). Routine implementation choices belong in the PR.
+- Record only significant choices explicitly accepted by the project owner, and state proposal, acceptance, and implementation status in ordinary prose where it matters. Routine implementation choices belong in the PR. An agent's proposal or a merged PR alone does not establish acceptance of every embedded choice.
 - Keep undeveloped possibilities in `docs/ideas.md`. Use `docs/plans/` for shaped directions, making proposal, acceptance, and implementation state clear.
 - Before choosing an approach, consult the principles, architecture overview, and relevant plans and topic documents. Follow detail links as needed, surface conflicts, and update documents whose meaning changes.
 - Keep the project as a Cargo workspace of focused crates; add a crate only when a concrete requirement justifies a separate package and boundary.

@@ -31,6 +31,14 @@ are registered outside the conversation and are never persisted.
 not validate argument values. A tool validates arguments by deserializing them
 into its parameter type and reports mismatches as an execution problem.
 
+Schemars is the conventional crate for deriving JSON Schema from Serde types; the
+standard library has no JSON Schema derivation, and hand-maintained schema
+constants drift from the types. Because `schemars::Schema` does not implement
+`Eq`, conversation facts that carry tool definitions implement `PartialEq`
+rather than `Eq`. Generated schemas keep their `$schema` metadata for
+portability; provider request construction projects a view that omits it without
+mutating the recorded definition.
+
 ## Execution loop
 
 `ConversationSession::invoke` owns the caller loop:
@@ -108,8 +116,7 @@ retries.
 
 ## Dependencies
 
-- `schemars` derives JSON Schema from Rust types, as recorded in
-  [the Schemars decision](decisions/2026-09-12-use-schemars-for-tool-contracts.md).
+- `schemars` derives JSON Schema from Rust types, as described above.
 - `nix` provides safe process-group signalling. The standard library has no
   safe process-group kill, and `tog` forbids unsafe code.
 - `tokio` gains the `process`, `time`, and `io-util` features for asynchronous

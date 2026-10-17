@@ -65,9 +65,17 @@ and interprets output in its own way. The [conversation architecture](architectu
 defines the concrete ownership and lifecycle boundaries. Flexibility within the
 contract must preserve portable meaning.
 
+The conversation is the only durable model input required for correctness. It
+must be self-contained with respect to model-visible state: everything visible
+to a model is recorded in the conversation or immutably referenced by it.
+Provider-native continuation can optimize fidelity, latency, or cost, but it must
+never be required; another compatible driver must be able to continue from the
+conversation alone.
+
 ## Preserve the owner's intent
 
 Distinguish proposals, implementation choices, and explicitly accepted project
 decisions. Agent-authored text and merged code do not by themselves establish
-agreement with every embedded choice. See [decision records](decisions/README.md)
-for what warrants an enduring record of acceptance.
+agreement with every embedded choice. State proposal, acceptance, and
+implementation status in ordinary prose where it matters, and treat an agent's
+proposal as a proposal until the owner accepts it.

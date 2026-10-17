@@ -12,7 +12,7 @@ Read linked detail when the decision or implementation depends on it.
 | `plans/` | Intended changes, their reasons, constraints, and important open choices |
 | `designs/` | Detailed approaches, examples, and validation scenarios linked from plans |
 | `notes/` | Dated investigation and developing thought; historical, not authoritative |
-| `decisions/` | Significant choices explicitly accepted by the project owner and their reasons |
+| `memory/` | Dated context agents write for themselves and future agents; not authoritative |
 
 Plans and designs state whether their direction is proposed, accepted, or already
 implemented in ordinary prose where it matters. A merged document does not imply
@@ -28,9 +28,9 @@ Existing topic references can stay directly under `docs/` until moving them serv
 a concrete reading need. Keep one authoritative explanation of each concern and
 update it when the work changes its meaning. Git preserves superseded text.
 
-Name notes `YYYY-MM-DD-brief-name.md`, using the date the thinking was captured.
-Name decision records `YYYY-MM-DD-brief-decision.md`, using the date the owner
-explicitly accepted the choice. Ordinary edits do not change either date. A
-record's name states the decision; no numbering or formal ADR template is needed.
-Follow the [decision recording rules](decisions/README.md) before creating or
-relying on a record. Notes and merged PRs do not automatically establish acceptance.
+Name notes and memory files `YYYY-MM-DD-brief-name.md`, using the date the
+thinking or context was captured. Ordinary edits do not change the date. Plans,
+designs, and architecture use concept names and reflect current intent; do not
+date-prefix living documents. Do not invent a capture date. Notes and merged PRs
+do not automatically establish acceptance; keep proposal, acceptance, and
+implementation state clear in ordinary prose.

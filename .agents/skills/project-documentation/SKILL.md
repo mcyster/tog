@@ -1,6 +1,6 @@
 ---
 name: project-documentation
-description: Consult project direction before choosing an approach to repository work, and maintain concise principles, architecture, plans, designs, notes, and decisions under docs/. Use when starting or revising an effort or changing project documentation; not for end-user manuals or generated API reference.
+description: Consult project direction before choosing an approach to repository work, and maintain concise principles, architecture, plans, designs, and notes under docs/. Use when starting or revising an effort or changing project documentation; not for end-user manuals or generated API reference.
 ---
 
 # Project Documentation
@@ -14,7 +14,7 @@ because an LLM can summarize it.
 Read `docs/principles.md` for priorities and tradeoffs, then `docs/architecture.md`
 for the shared model. Inspect the plan and architecture
 topic names and read those relevant to the effort, including boundaries it affects.
-Follow links to designs, references, decisions, or code when a concrete choice
+Follow links to designs, references, or code when a concrete choice
 needs that detail. Do not read every document by default or skip applicable intent
 because the code already suggests an implementation.
 
@@ -43,8 +43,8 @@ same change when the work changes their meaning.
   proposed behavior; identify earlier or superseded material explicitly.
 - `docs/notes/` holds dated investigations and developing thoughts. Notes may be
   incomplete, superseded, or wrong; they are not authoritative.
-- `docs/decisions/` holds the small current set of significant choices explicitly
-  accepted by the project owner and why they were made.
+- `docs/memory/` holds dated notes agents write for themselves and future agents.
+  Memory may be informal and incomplete; it is not authoritative project guidance.
 
 Keep existing topic references directly under `docs/` until moving them improves
 navigation. Keep undeveloped possibilities in `docs/ideas.md`. Do not create a
@@ -56,23 +56,20 @@ Use short, specific, lowercase names separated by hyphens.
 
 - Notes capture thinking at a moment, so name them
   `docs/notes/YYYY-MM-DD-brief-name.md`, dated when the thinking was captured.
-- Date decisions by explicit owner acceptance and name them
-  `docs/decisions/YYYY-MM-DD-brief-decision.md`. State the decision rather
-  than merely its subject: prefer
-  `2026-08-29-use-semantic-conversation-events.md` to
-  `2026-08-29-conversation-events.md`.
+- Memory notes capture context for future agents, so name them
+  `docs/memory/YYYY-MM-DD-brief-name.md`, dated when the context was captured.
 - Plans are living documents, so omit the date and name them by intended outcome,
   such as `docs/plans/add-tool-execution.md`.
 - Designs and architecture describe the system, so omit the date and name them by
   concept, such as `docs/architecture/conversation.md`.
 
-Do not date-prefix everything. Dates distinguish historical notes and decisions
-from living descriptions. Use the capture date for notes and the acceptance date for decisions;
-ordinary revisions do not rename the file. Do not invent an acceptance date.
+Do not date-prefix everything. Dates distinguish historical notes and memory
+from living descriptions. Ordinary revisions do not rename files. Do not invent
+a date.
 
 Do not add status metadata to notes. Their date and location already communicate
 that they are historical working material. Do not maintain a README that lists each
-note or decision; browse the directories directly.
+note; browse the directories directly.
 
 ## Write for human readers
 
@@ -99,17 +96,20 @@ should understand the note without access to the original conversation.
 
 ## Preserve decision authority
 
-Apply [the decision recording rules](../../../docs/decisions/README.md) before
-creating, revising, or relying on a decision record. Record only consequential
-choices explicitly accepted by the project owner, with the source of acceptance.
-An agent's implementation choice belongs in its PR; a proposal belongs in a note
-or plan. A merged PR alone does not make every embedded choice an enduring decision.
+Distinguish established principles, proposed changes, and implemented behavior in
+ordinary prose. An agent's proposal is not an accepted project choice, and a merged
+PR alone does not make every embedded choice an enduring decision. Say what the
+evidence supports: "the plan proposes" for proposals, "the implementation does"
+for behavior, and explicit owner statements for accepted choices. If the source is
+uncertain, describe the uncertainty rather than asserting "we decided". Escalate
+only when the distinction materially affects the work; do not turn routine
+implementation into an approval process.
 
-Do not ask for acceptance again when the conversation already provides it. If older
-records lack evidence, describe the uncertainty rather than asserting "we decided".
-Use "the earlier note proposed" or "the implementation does" when that is what
-the evidence supports. Escalate only when the unresolved distinction materially
-affects the work; do not turn routine implementation into an approval process.
+Keep proposal, acceptance, and implementation state clear where it matters, such as
+in a plan's prose. When a choice is accepted, record that acceptance where the
+choice lives; recorded choices belong in the ordinary documents, not a separate
+decision registry. Git preserves the history of superseded or revised choices, so
+removing an outdated account in the same change is expected.
 
 ## Keep architecture visible
 
@@ -154,9 +154,9 @@ through links without maintaining competing current explanations.
 
 Read relevant code and nearby documents before writing. Update an existing document
 instead of creating a competing account when they cover the same subject. Link to
-code, issues, plans, notes, or decisions when the link saves meaningful rediscovery.
+code, issues, plans, notes, or designs when the link saves meaningful rediscovery.
 
-Treat Git as the history. Notes may preserve historical investigation, while plans,
-decisions, and durable project documentation should reflect current intent. When
+Treat Git as the history. Notes and memory preserve historical investigation, while plans
+and durable project documentation should reflect current intent. When
 implementation changes make durable documentation untrue, update the documentation
 in the same change.
