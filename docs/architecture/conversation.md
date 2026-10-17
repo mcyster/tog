@@ -26,24 +26,32 @@ text automatically becomes model input.
 ## Calls and turns
 
 A model response closes one attempt. The session records its ordered output
-references, observed outcome, and the driver's continuation decision. Every
-terminal response states whether the model needs another invocation: `complete`
-means the turn should end, while `continue` asks the session to execute any
-requested tools and invoke the model again. The driver derives that decision
-from provider semantics and may also request continuation after a failed
-attempt. Assistant text can accompany tool requests or be absent from a
-successful call; neither text nor the absence of tool requests decides
-completion.
+references, its observed outcome, and the driver's continuation decision.
 
-The session follows the recorded continuation: `continue` executes the requested
-tools sequentially, records their results, and invokes the model again, bounding
-continuation rounds; `complete` ends the turn with `succeeded` for a successful
-response and `failed` for a failed one, with or without assistant text. A
-response that records `complete` while this call also requested tools is a
-driver contract error: the session preserves the response, answers each
-unexecuted tool request with a durable failure, and fails the turn rather than
-completing it with work left unanswered. Normal stream exhaustion without a
-terminal response is recorded as failure.
+Every terminal response records a continuation:
+
+- `complete`: the turn should end.
+- `continue`: execute the requested tools, then invoke the model again.
+
+The driver derives the decision from provider semantics. A failed attempt may
+also request continuation. Assistant text can accompany tool requests. It can
+also be absent from a successful call. Neither text nor the absence of tool
+requests decides completion.
+
+The session follows the recorded continuation:
+
+- `continue`: the session executes the requested tools sequentially. It records
+  their results. It invokes the model again. It bounds continuation rounds.
+- `complete`: the session ends the turn. A successful response ends it as
+  `succeeded`. A failed response ends it as `failed`. Assistant text is not
+  required.
+
+A `complete` response that also requested tools is a driver contract error. The
+session preserves the response. It answers each unexecuted tool request with a
+durable failure. It fails the turn.
+
+The session records normal stream exhaustion without a terminal response as
+failure.
 
 This does not promise complete recovery from every interruption. Invocation or
 stream errors can escape before a terminal event is written. Automatic retries,
