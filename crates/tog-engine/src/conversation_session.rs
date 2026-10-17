@@ -267,9 +267,7 @@ impl<Store: ConversationEventStore> ConversationSession<Store> {
                 ModelContinuation::Continue
             );
             if !continues {
-                if matches!(terminal_response.outcome(), ModelOutcome::Succeeded)
-                    && !tool_requests.is_empty()
-                {
+                if !tool_requests.is_empty() {
                     let tool_failure = OperationFailure::try_new(
                         FailureCategory::ExecutionFailed,
                         "The tool was not executed because the model response completed the turn."
@@ -290,16 +288,6 @@ impl<Store: ConversationEventStore> ConversationSession<Store> {
                             ))],
                         )?;
                     }
-                    let failure = OperationFailure::try_new(
-                        FailureCategory::ExecutionFailed,
-                        "A model response that completed the turn left requested tools unexecuted."
-                            .to_owned(),
-                        None,
-                    )
-                    .map_err(Box::new)?;
-                    let outcome = TurnOutcome::Failed { failure };
-                    self.record_turn_end(turn_id, outcome.clone())?;
-                    return Ok(outcome);
                 }
                 let outcome = match terminal_response.outcome() {
                     ModelOutcome::Succeeded => TurnOutcome::Succeeded,
@@ -1304,7 +1292,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_complete_response_with_unanswered_tool_requests_is_a_durable_contract_error() {
+    async fn a_complete_response_answers_unexecuted_tool_requests_with_durable_failures() {
         let directory = temporary_directory();
         let mut registry = ToolRegistry::default();
         registry.register(ObservingTool::new());
@@ -1322,13 +1310,13 @@ mod tests {
             .add_user_request(user_content("finish"))
             .expect("the request should be recorded");
 
-        assert!(matches!(
+        assert_eq!(
             session
                 .invoke(|_| Ok(()))
                 .await
-                .expect("the contract error should fail the turn"),
-            TurnOutcome::Failed { .. }
-        ));
+                .expect("the completed turn should end"),
+            TurnOutcome::Succeeded
+        );
 
         let invocations = driver
             .invocations
@@ -1363,7 +1351,7 @@ mod tests {
         assert_eq!(
             tool_responses.len(),
             1,
-            "every unanswered tool request receives a durable explanation"
+            "every unexecuted tool request receives a durable explanation"
         );
         assert!(matches!(
             tool_responses[0].outcome(),
@@ -1375,12 +1363,7 @@ mod tests {
         assert!(matches!(
             events.last().map(|event| event.event().payload()),
             Some(ConversationEventPayload::TurnEnd(turn_end))
-                if matches!(turn_end.outcome(),
-                    TurnOutcome::Failed { failure }
-                        if failure.category() == FailureCategory::ExecutionFailed
-                            && failure.message()
-                                == "A model response that completed the turn left requested tools unexecuted."
-                )
+                if matches!(turn_end.outcome(), TurnOutcome::Succeeded)
         ));
     }
 

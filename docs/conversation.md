@@ -212,9 +212,9 @@ without a final answer. A failed attempt may request continuation. This is a
 bounded escape hatch. The engine decides the turn from the attempt outcome only
 when the response records `complete`.
 
-A `complete` response with requested tools is a driver contract error. The
-engine keeps the response. It records a failed `ToolResponse` for each
-unexecuted request. It fails the turn.
+A `complete` response can leave requested tools unexecuted. The engine keeps
+the response. It records a failed `ToolResponse` for each unexecuted request.
+Then it ends the turn.
 
 Only one terminal response exists per model request. A stream that ends without
 a terminal response is closed by the engine as a failed `ModelResponse`. It is

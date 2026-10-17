@@ -46,9 +46,9 @@ The session follows the recorded continuation:
   `succeeded`. A failed response ends it as `failed`. Assistant text is not
   required.
 
-A `complete` response that also requested tools is a driver contract error. The
-session preserves the response. It answers each unexecuted tool request with a
-durable failure. It fails the turn.
+A `complete` response can leave requested tools unexecuted. The session
+preserves the response. It answers each unexecuted tool request with a durable
+failure. Then it ends the turn.
 
 The session records normal stream exhaustion without a terminal response as
 failure.
