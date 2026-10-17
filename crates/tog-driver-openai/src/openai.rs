@@ -76,19 +76,9 @@ enum ModelDriverEvent {
         provider_call_id: Option<String>,
     },
     Terminal {
-        outcome: TerminalModelOutcome,
-        usage: Option<Usage>,
-    },
-}
-
-#[derive(Clone)]
-enum TerminalModelOutcome {
-    Succeeded {
+        outcome: ModelOutcome,
         continuation: ModelContinuation,
-    },
-    Failed {
-        category: FailureCategory,
-        message: String,
+        usage: Option<Usage>,
     },
 }
 
@@ -370,10 +360,11 @@ fn context_limit_stream(model_request_id: ConversationEventId) -> ModelOutputStr
     terminal_model_output(
         stream::once(async move {
             Ok(ModelDriverEvent::Terminal {
-                outcome: TerminalModelOutcome::Failed {
-                    category: FailureCategory::ContextLimitExceeded,
-                    message: "The model context limit was exceeded.".to_owned(),
-                },
+                outcome: failed_outcome(
+                    FailureCategory::ContextLimitExceeded,
+                    "The model context limit was exceeded.",
+                ),
+                continuation: ModelContinuation::Complete,
                 usage: None,
             })
         })
@@ -397,13 +388,21 @@ fn failed_terminal_stream(
     terminal_model_output(
         stream::once(async move {
             Ok(ModelDriverEvent::Terminal {
-                outcome: TerminalModelOutcome::Failed { category, message },
+                outcome: failed_outcome(category, &message),
+                continuation: ModelContinuation::Complete,
                 usage: None,
             })
         })
         .boxed(),
         model_request_id,
     )
+}
+
+fn failed_outcome(category: FailureCategory, message: &str) -> ModelOutcome {
+    ModelOutcome::Failed {
+        failure: OperationFailure::try_new(category, message.to_owned(), None)
+            .expect("the terminal failure should be valid"),
+    }
 }
 
 fn provider_failure(error: &OpenAiError, failure_stage: FailureStage) -> (FailureCategory, String) {
@@ -505,9 +504,13 @@ fn terminal_model_output(
 
 fn fail_stream(state: &mut ConversationEventStreamState, error: OpenAiError) {
     let (category, message) = provider_failure(&error, FailureStage::DuringStream);
-    let outcome = TerminalModelOutcome::Failed { category, message };
-    let response = terminal_model_response(state.model_request_id, outcome, None)
-        .expect("the failed terminal model response should be valid");
+    let response = terminal_model_response(
+        state.model_request_id,
+        failed_outcome(category, &message),
+        ModelContinuation::Complete,
+        None,
+    )
+    .expect("the failed terminal model response should be valid");
     state.pending_batches = VecDeque::from([ModelDriverOutputBatch::from(
         ModelDriverOutput::ModelResponse(response),
     )]);
@@ -516,28 +519,11 @@ fn fail_stream(state: &mut ConversationEventStreamState, error: OpenAiError) {
 
 fn terminal_model_response(
     model_request_id: ConversationEventId,
-    outcome: TerminalModelOutcome,
+    outcome: ModelOutcome,
+    continuation: ModelContinuation,
     usage: Option<Usage>,
 ) -> Result<ModelResponse, InvalidModelResponse> {
-    match outcome {
-        TerminalModelOutcome::Succeeded { continuation } => ModelResponse::new(
-            model_request_id,
-            Vec::new(),
-            ModelOutcome::Succeeded,
-            Some(continuation),
-            usage,
-        ),
-        TerminalModelOutcome::Failed { category, message } => ModelResponse::new(
-            model_request_id,
-            Vec::new(),
-            ModelOutcome::Failed {
-                failure: OperationFailure::try_new(category, message, None)
-                    .expect("the terminal failure should be valid"),
-            },
-            None,
-            usage,
-        ),
-    }
+    ModelResponse::new(model_request_id, Vec::new(), outcome, continuation, usage)
 }
 
 fn translate_model_driver_event(
@@ -582,8 +568,12 @@ fn translate_model_driver_event(
                     .map_err(invalid_tool_request)?,
             )
         }
-        ModelDriverEvent::Terminal { outcome, usage } => {
-            let response = terminal_model_response(model_request_id, outcome, usage)
+        ModelDriverEvent::Terminal {
+            outcome,
+            continuation,
+            usage,
+        } => {
+            let response = terminal_model_response(model_request_id, outcome, continuation, usage)
                 .map_err(invalid_model_response)?;
             state.pending_batches = VecDeque::from([ModelDriverOutputBatch::from(
                 ModelDriverOutput::ModelResponse(response),
@@ -989,12 +979,9 @@ fn complete_response(
         matches!(
             event,
             ModelDriverEvent::Terminal {
-                outcome: TerminalModelOutcome::Failed {
-                    category: FailureCategory::Refusal,
-                    ..
-                },
+                outcome: ModelOutcome::Failed { failure },
                 ..
-            }
+            } if failure.category() == FailureCategory::Refusal
         )
     }) {
         return Ok(vec![refusal.clone()]);
@@ -1065,7 +1052,8 @@ fn complete_response(
     };
     let usage = completed_usage(payload);
     model_events.push(ModelDriverEvent::Terminal {
-        outcome: TerminalModelOutcome::Succeeded { continuation },
+        outcome: ModelOutcome::Succeeded,
+        continuation,
         usage,
     });
     response_state.completed = true;
@@ -1138,10 +1126,8 @@ fn emit_refusal(
         return Ok(None);
     };
     let model_event = ModelDriverEvent::Terminal {
-        outcome: TerminalModelOutcome::Failed {
-            category: FailureCategory::Refusal,
-            message: refusal,
-        },
+        outcome: failed_outcome(FailureCategory::Refusal, &refusal),
+        continuation: ModelContinuation::Complete,
         usage: None,
     };
     output.emitted = true;
@@ -1366,10 +1352,11 @@ fn assistant_response(content: String) -> Result<ModelDriverEvent, OpenAiError> 
 
 fn model_context_limit_exceeded() -> Result<ModelDriverEvent, OpenAiError> {
     Ok(ModelDriverEvent::Terminal {
-        outcome: TerminalModelOutcome::Failed {
-            category: FailureCategory::ContextLimitExceeded,
-            message: "The model context limit was exceeded.".to_owned(),
-        },
+        outcome: failed_outcome(
+            FailureCategory::ContextLimitExceeded,
+            "The model context limit was exceeded.",
+        ),
+        continuation: ModelContinuation::Complete,
         usage: None,
     })
 }
@@ -1623,7 +1610,7 @@ mod tests {
     use tog::model_driver::{ModelDriver, ModelDriverOutput, ModelOutputStream, TurnInput};
 
     use super::{
-        ModelDriverEvent, OpenAiError, OpenAiModelDriver, ResponseByteStream, TerminalModelOutcome,
+        ModelDriverEvent, OpenAiError, OpenAiModelDriver, ResponseByteStream,
         classify_response_failure, model_output_stream, provider_tool, semantic_input,
     };
 
@@ -1865,9 +1852,8 @@ mod tests {
         assert!(matches!(
             &events[3],
             ModelDriverEvent::Terminal {
-                outcome: TerminalModelOutcome::Succeeded {
-                    continuation: ModelContinuation::Complete
-                },
+                outcome: ModelOutcome::Succeeded,
+                continuation: ModelContinuation::Complete,
                 ..
             }
         ));
@@ -1891,12 +1877,11 @@ mod tests {
         assert!(matches!(
             &events[0],
             ModelDriverEvent::Terminal {
-                outcome: TerminalModelOutcome::Failed {
-                    category: FailureCategory::Refusal,
-                    message,
-                },
+                outcome: ModelOutcome::Failed { failure },
+                continuation: ModelContinuation::Complete,
                 ..
-            } if message == "I cannot comply."
+            } if failure.category() == FailureCategory::Refusal
+                && failure.message() == "I cannot comply."
         ));
     }
 
@@ -1986,9 +1971,8 @@ mod tests {
         assert!(matches!(
             &events[1],
             ModelDriverEvent::Terminal {
-                outcome: TerminalModelOutcome::Succeeded {
-                    continuation: ModelContinuation::Continue
-                },
+                outcome: ModelOutcome::Succeeded,
+                continuation: ModelContinuation::Continue,
                 ..
             }
         ));

@@ -106,14 +106,16 @@ such as a timeout. Stream exhaustion without a terminal response is not success,
 even if assistant text was already committed.
 
 An assistant message is content, not turn completion. It may precede tool
-requests, accompany them, or be absent from a successful call. A successful
+requests, accompany them, or be absent from a successful call. Every terminal
 `ModelResponse` explicitly records whether the model is done (`complete`) or
 needs another invocation (`continue`); the driver derives that decision from
-provider semantics. A turn succeeds when its terminal model call succeeds and
-records `complete`. The engine records that decision as `TurnEnd`; a final
-assistant message is not required. Closing a call that requested tools does not
-close its turn. A failed call may be retried within a turn that ultimately
-succeeds.
+provider semantics, and a failed attempt may also request continuation. The
+engine follows the recorded continuation and bounds continuation rounds. A turn
+succeeds when its terminal response records `complete` and its outcome
+succeeded; a failed response that records `complete` fails it. The engine
+records that decision as `TurnEnd`; a final assistant message is not required.
+Closing a call that requested tools does not close its turn. A failed call may
+be retried within a turn that ultimately succeeds.
 
 ## Layered Semantic Representation
 
@@ -166,8 +168,8 @@ Large or binary content belongs in a content store and is referenced by a strong
 prompted it, when one did, and records the input position selected at start.
 `TurnEnd` records the terminal outcome of the turn: `succeeded`, or `failed`
 with the portable failure details. Assistant output is content, not turn
-completion; a successful terminal model call that records a `complete`
-continuation finishes a turn without requiring assistant text.
+completion; the continuation a terminal model response records decides whether
+the turn finishes, and its outcome decides whether that finish succeeded.
 
 ### AssistantResponse
 
@@ -186,14 +188,15 @@ requirement of this slice.
 `ModelResponse` is the terminal response to one model request. It references the
 request, lists the ordered durable output ids it produced, and carries the
 attempt outcome (`succeeded` or `failed` with portable failure details), the
-continuation a successful attempt requests (`complete` or `continue`), and
-known usage. The continuation is separate from the outcome: `complete` means the
-model has finished, while `continue` asks the engine to execute any requested
-tools and invoke the model again, which also permits reasoning-only or
-provider-side tool work without a final answer. Only one terminal response
-exists per model request. A stream that ends without a terminal response is
-closed by the engine as a failed `ModelResponse`; it is never treated as
-success.
+continuation it requests (`complete` or `continue`), and known usage. The
+continuation is separate from the outcome: `complete` means the turn should
+end, while `continue` asks the engine to execute any requested tools and invoke
+the model again, which also permits reasoning-only or provider-side tool work
+without a final answer. A failed attempt may request continuation as a bounded
+escape hatch; the engine decides the turn from the attempt outcome only when
+the response records `complete`. Only one terminal response exists per model
+request. A stream that ends without a terminal response is closed by the engine
+as a failed `ModelResponse`; it is never treated as success.
 
 `ModelSpecificEvent` carries model-request reference, provider event type,
 payload version, provider-specific payload, and an optional human-readable
@@ -332,10 +335,10 @@ stream ends without a terminal response, the engine records a failed
 as zero.
 
 Event construction assigns identity and timestamp; the append boundary preserves
-them and assigns position. The session records the terminal turn outcome as `TurnEnd`: a successful terminal
-model response that records `complete` succeeds the turn, a failed response
-fails it, and a stream ending without a terminal response is failed by the
-engine. Completed semantic events already yielded remain valid conversation
+them and assigns position. The session records the terminal turn outcome as `TurnEnd`: a terminal model
+response that records `complete` ends the turn with its outcome, a response
+that records `continue` keeps the turn open, and a stream ending without a
+terminal response is failed by the engine. Completed semantic events already yielded remain valid conversation
 facts and appended events are not rolled back.
 
 This supersedes the earlier contract in which a driver emitted session-owned

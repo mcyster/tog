@@ -402,7 +402,7 @@ fn turn_persists_events_and_prints_semantic_output() {
         ]
     );
     let user = &events[0];
-    assert_eq!(user["schema_version"], 15);
+    assert_eq!(user["schema_version"], 16);
     assert_eq!(
         user["conversation_id"]
             .as_str()

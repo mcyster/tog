@@ -262,7 +262,7 @@ fn conversation_rejects_invalid_deserialized_tool_definitions() {
         "position": 0,
         "id": ConversationEventId::new(),
         "timestamp": "2026-08-22T18:42:31.482Z",
-        "schema_version": 15,
+        "schema_version": 16,
         "type": "tools",
         "tools": [{
             "definition": {
@@ -293,7 +293,7 @@ fn conversation_rejects_an_empty_user_event() {
         "position": 0,
         "id": ConversationEventId::new(),
         "timestamp": "2026-08-22T18:42:31.482Z",
-        "schema_version": 15,
+        "schema_version": 16,
         "type": "user",
         "content": []
     }))
@@ -389,7 +389,7 @@ fn conversation_accepts_references_within_a_turn() {
                         request_id,
                         vec![tool_request_id],
                         ModelOutcome::Succeeded,
-                        Some(ModelContinuation::Complete),
+                        ModelContinuation::Complete,
                         None,
                     )
                     .expect("the model response should be valid"),
@@ -490,7 +490,7 @@ fn conversation_rejects_two_terminal_model_responses() {
                         request_id,
                         Vec::new(),
                         ModelOutcome::Succeeded,
-                        Some(ModelContinuation::Complete),
+                        ModelContinuation::Complete,
                         None,
                     )
                     .expect("the model response should be valid"),
@@ -506,7 +506,7 @@ fn conversation_rejects_two_terminal_model_responses() {
                         request_id,
                         Vec::new(),
                         ModelOutcome::Succeeded,
-                        Some(ModelContinuation::Complete),
+                        ModelContinuation::Complete,
                         None,
                     )
                     .expect("the second model response should be valid"),
@@ -558,7 +558,7 @@ fn conversation_rejects_overlapping_model_response_outputs() {
                         second_request_id,
                         vec![assistant_id],
                         ModelOutcome::Succeeded,
-                        Some(ModelContinuation::Complete),
+                        ModelContinuation::Complete,
                         None,
                     )
                     .expect("the model response should be valid"),

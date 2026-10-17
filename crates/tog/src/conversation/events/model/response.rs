@@ -10,8 +10,7 @@ pub struct ModelResponse {
     model_request_id: ConversationEventId,
     output_event_ids: Vec<ConversationEventId>,
     outcome: ModelOutcome,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    continuation: Option<ModelContinuation>,
+    continuation: ModelContinuation,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     usage: Option<Usage>,
 }
@@ -21,7 +20,7 @@ impl ModelResponse {
         model_request_id: ConversationEventId,
         output_event_ids: Vec<ConversationEventId>,
         outcome: ModelOutcome,
-        continuation: Option<ModelContinuation>,
+        continuation: ModelContinuation,
         usage: Option<Usage>,
     ) -> Result<Self, InvalidModelResponse> {
         let response = Self {
@@ -47,7 +46,7 @@ impl ModelResponse {
         &self.outcome
     }
 
-    pub fn continuation(&self) -> Option<ModelContinuation> {
+    pub fn continuation(&self) -> ModelContinuation {
         self.continuation
     }
 
@@ -59,9 +58,8 @@ impl ModelResponse {
         match &self.outcome {
             ModelOutcome::Succeeded => {
                 let continuation = match self.continuation {
-                    Some(ModelContinuation::Complete) => "complete",
-                    Some(ModelContinuation::Continue) => "continue",
-                    None => unreachable!("a successful model response records its continuation"),
+                    ModelContinuation::Complete => "complete",
+                    ModelContinuation::Continue => "continue",
                 };
                 format!(
                     "succeeded {continuation} with {} outputs",
@@ -78,13 +76,7 @@ impl ModelResponse {
                 .ensure_valid()
                 .map_err(InvalidModelResponse::Failure)?;
         }
-        match (&self.outcome, self.continuation) {
-            (ModelOutcome::Succeeded, None) => Err(InvalidModelResponse::MissingContinuation),
-            (ModelOutcome::Failed { .. }, Some(_)) => {
-                Err(InvalidModelResponse::UnexpectedContinuation)
-            }
-            _ => Ok(()),
-        }
+        Ok(())
     }
 }
 
@@ -119,26 +111,12 @@ impl Usage {
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum InvalidModelResponse {
-    MissingContinuation,
-    UnexpectedContinuation,
     Failure(InvalidOperationFailure),
 }
 
 impl Display for InvalidModelResponse {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::MissingContinuation => {
-                write!(
-                    formatter,
-                    "a successful model response must record its continuation"
-                )
-            }
-            Self::UnexpectedContinuation => {
-                write!(
-                    formatter,
-                    "a failed model response must not record a continuation"
-                )
-            }
             Self::Failure(error) => Display::fmt(error, formatter),
         }
     }

@@ -245,7 +245,7 @@ impl<Store: ConversationEventStore> ConversationSession<Store> {
                         model_request_id,
                         std::mem::take(&mut outputs_for_request),
                         ModelOutcome::Failed { failure },
-                        None,
+                        ModelContinuation::Complete,
                         None,
                     )
                     .map_err(Box::new)?;
@@ -263,11 +263,8 @@ impl<Store: ConversationEventStore> ConversationSession<Store> {
             };
 
             let continues = matches!(
-                (
-                    terminal_response.outcome(),
-                    terminal_response.continuation()
-                ),
-                (ModelOutcome::Succeeded, Some(ModelContinuation::Continue))
+                terminal_response.continuation(),
+                ModelContinuation::Continue
             );
             if !continues {
                 let outcome = match terminal_response.outcome() {
@@ -459,7 +456,7 @@ mod tests {
                 ConversationEventId::new(),
                 Vec::new(),
                 ModelOutcome::Succeeded,
-                Some(ModelContinuation::Complete),
+                ModelContinuation::Complete,
                 None,
             )
             .expect("the terminal response should be valid"),
@@ -472,7 +469,7 @@ mod tests {
                 ConversationEventId::new(),
                 Vec::new(),
                 ModelOutcome::Succeeded,
-                Some(ModelContinuation::Continue),
+                ModelContinuation::Continue,
                 None,
             )
             .expect("the continuing terminal response should be valid"),
@@ -492,10 +489,30 @@ mod tests {
                     )
                     .expect("the failure should be valid"),
                 },
-                None,
+                ModelContinuation::Complete,
                 None,
             )
             .expect("the failed terminal response should be valid"),
+        )
+    }
+
+    fn failed_continuing_response(failure: FailureCategory) -> ModelDriverOutput {
+        ModelDriverOutput::ModelResponse(
+            ModelResponse::new(
+                ConversationEventId::new(),
+                Vec::new(),
+                ModelOutcome::Failed {
+                    failure: OperationFailure::try_new(
+                        failure,
+                        "the provider failed".to_owned(),
+                        None,
+                    )
+                    .expect("the failure should be valid"),
+                },
+                ModelContinuation::Continue,
+                None,
+            )
+            .expect("the failed continuing response should be valid"),
         )
     }
 
@@ -1183,6 +1200,68 @@ mod tests {
             )),
             "no tool responses are recorded without tool requests"
         );
+        assert!(matches!(
+            events.last().map(|event| event.event().payload()),
+            Some(ConversationEventPayload::TurnEnd(turn_end))
+                if matches!(turn_end.outcome(), TurnOutcome::Succeeded)
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_failed_attempt_can_request_continuation_and_the_turn_still_succeeds() {
+        let directory = temporary_directory();
+        let driver = Arc::new(ScriptedDriver::new(vec![
+            vec![failed_continuing_response(FailureCategory::ProviderFailure)],
+            vec![assistant_response(), completed_response()],
+        ]));
+        let session = ConversationSession::create(
+            FileEventStore::new(directory.clone()).expect("the store should be created"),
+            Box::new(SharedScriptedDriver(Arc::clone(&driver))),
+            ToolRegistry::default(),
+        );
+        let conversation_id = session.id();
+        session
+            .add_user_request(user_content("recover"))
+            .expect("the request should be recorded");
+
+        assert_eq!(
+            session
+                .invoke(|_| Ok(()))
+                .await
+                .expect("the recovering turn should complete"),
+            TurnOutcome::Succeeded
+        );
+
+        let invocations = driver
+            .invocations
+            .lock()
+            .expect("the invocation list should lock");
+        assert_eq!(
+            invocations.len(),
+            2,
+            "a failed continuation still invokes the model again"
+        );
+        drop(invocations);
+        let events = loaded_events(&directory, conversation_id);
+        let model_responses = events
+            .iter()
+            .filter_map(|event| match event.event().payload() {
+                ConversationEventPayload::ModelResponse(response) => {
+                    Some((response.outcome().clone(), response.continuation()))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            model_responses
+                .iter()
+                .map(|(_, continuation)| *continuation)
+                .collect::<Vec<_>>(),
+            vec![ModelContinuation::Continue, ModelContinuation::Complete,],
+            "the failed round records a continuation and the turn ends complete"
+        );
+        assert!(matches!(model_responses[0].0, ModelOutcome::Failed { .. }));
+        assert!(matches!(model_responses[1].0, ModelOutcome::Succeeded));
         assert!(matches!(
             events.last().map(|event| event.event().payload()),
             Some(ConversationEventPayload::TurnEnd(turn_end))

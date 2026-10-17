@@ -381,7 +381,7 @@ fn event_store_round_trips_tool_definitions_requests_and_responses() {
                             model_request_id,
                             vec![tool_request_id],
                             ModelOutcome::Succeeded,
-                            Some(ModelContinuation::Complete),
+                            ModelContinuation::Complete,
                             None,
                         )
                         .expect("the model response should be valid"),
