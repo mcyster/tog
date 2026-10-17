@@ -291,7 +291,7 @@ impl<Store: ConversationEventStore> ConversationSession<Store> {
                         )?;
                     }
                     let failure = OperationFailure::try_new(
-                        FailureCategory::InvalidProviderResponse,
+                        FailureCategory::ExecutionFailed,
                         "A model response that completed the turn left requested tools unexecuted."
                             .to_owned(),
                         None,
@@ -1377,7 +1377,7 @@ mod tests {
             Some(ConversationEventPayload::TurnEnd(turn_end))
                 if matches!(turn_end.outcome(),
                     TurnOutcome::Failed { failure }
-                        if failure.category() == FailureCategory::InvalidProviderResponse
+                        if failure.category() == FailureCategory::ExecutionFailed
                             && failure.message()
                                 == "A model response that completed the turn left requested tools unexecuted."
                 )
