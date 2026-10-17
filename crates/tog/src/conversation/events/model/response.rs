@@ -66,7 +66,13 @@ impl ModelResponse {
                     self.output_event_ids.len()
                 )
             }
-            ModelOutcome::Failed { failure } => format!("failed: {}", failure.message()),
+            ModelOutcome::Failed { failure } => {
+                let continuation = match self.continuation {
+                    ModelContinuation::Complete => "complete",
+                    ModelContinuation::Continue => "continue",
+                };
+                format!("failed {continuation}: {}", failure.message())
+            }
         }
     }
 

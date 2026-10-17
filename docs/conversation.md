@@ -194,9 +194,12 @@ end, while `continue` asks the engine to execute any requested tools and invoke
 the model again, which also permits reasoning-only or provider-side tool work
 without a final answer. A failed attempt may request continuation as a bounded
 escape hatch; the engine decides the turn from the attempt outcome only when
-the response records `complete`. Only one terminal response exists per model
-request. A stream that ends without a terminal response is closed by the engine
-as a failed `ModelResponse`; it is never treated as success.
+the response records `complete`. A successful response that records `complete`
+while requesting tools is a driver contract error: the engine records that
+attempt as failed rather than leaving requested work unanswered. Only one
+terminal response exists per model request. A stream that ends without a
+terminal response is closed by the engine as a failed `ModelResponse`; it is
+never treated as success.
 
 `ModelSpecificEvent` carries model-request reference, provider event type,
 payload version, provider-specific payload, and an optional human-readable

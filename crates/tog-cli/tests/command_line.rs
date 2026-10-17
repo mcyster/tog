@@ -621,7 +621,7 @@ fn a_refusal_is_a_failed_terminal_response_and_fails_the_turn() {
     let standard_error =
         String::from_utf8(command_output.stderr.clone()).expect("standard error should be UTF-8");
     assert!(
-        standard_error.contains("## model_response failed: I cannot comply.\n"),
+        standard_error.contains("## model_response failed complete: I cannot comply.\n"),
         "the refusal should be described on standard error: {standard_error}"
     );
     let conversation_id = reported_conversation_id(&command_output.stderr);
@@ -899,7 +899,7 @@ fn authentication_failure_exits_unsuccessfully() {
     );
     assert!(String::from_utf8(command_output.stderr)
         .expect("standard error should be UTF-8")
-        .contains("## model_response failed: The model provider could not authenticate the invocation.\n"));
+        .contains("## model_response failed complete: The model provider could not authenticate the invocation.\n"));
     assert_eq!(server.finish().len(), 1);
 }
 

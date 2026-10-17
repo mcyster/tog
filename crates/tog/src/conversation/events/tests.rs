@@ -538,10 +538,12 @@ fn failed_event_payloads_describe_their_failure() {
     ];
 
     for (kind, description) in cases {
-        assert_eq!(
-            description,
+        let expected = if kind == "model_response" {
+            "model_response failed complete: the shell command timed out".to_owned()
+        } else {
             format!("{kind} failed: the shell command timed out")
-        );
+        };
+        assert_eq!(description, expected);
     }
 }
 
@@ -606,7 +608,7 @@ fn a_model_response_round_trips_its_outcome_and_continuation_every_time() {
 
     assert_eq!(completed.describe(), "succeeded complete with 0 outputs");
     assert_eq!(continuing.describe(), "succeeded continue with 0 outputs");
-    assert_eq!(failed.describe(), "failed: the model failed");
+    assert_eq!(failed.describe(), "failed complete: the model failed");
 }
 
 #[test]
@@ -634,7 +636,7 @@ fn a_failed_model_response_may_also_request_continuation() {
     );
     assert_eq!(
         failed_continuing.describe(),
-        "failed: the model rate-limited the attempt"
+        "failed continue: the model rate-limited the attempt"
     );
 }
 

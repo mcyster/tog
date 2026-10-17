@@ -158,14 +158,39 @@ impl<Store: ConversationEventStore> ConversationSession<Store> {
                         unreachable!("the terminal response output was just identified");
                     };
                     self.ensure_request_reference(&driver_response, model_request_id)?;
-                    let response = ModelResponse::new(
-                        model_request_id,
-                        std::mem::take(&mut outputs_for_request),
-                        driver_response.outcome().clone(),
-                        driver_response.continuation(),
-                        driver_response.usage().cloned(),
-                    )
-                    .map_err(Box::new)?;
+                    let driver_outcome = driver_response.outcome().clone();
+                    let driver_continuation = driver_response.continuation();
+                    let driver_usage = driver_response.usage().cloned();
+                    let completed_with_unanswered_tools = matches!(
+                        (&driver_outcome, driver_continuation),
+                        (ModelOutcome::Succeeded, ModelContinuation::Complete)
+                    ) && !tool_requests.is_empty();
+                    let response = if completed_with_unanswered_tools {
+                        let failure = OperationFailure::try_new(
+                            FailureCategory::InvalidProviderResponse,
+                            "A model response that completes the turn left requested tools unexecuted."
+                                .to_owned(),
+                            None,
+                        )
+                        .map_err(Box::new)?;
+                        ModelResponse::new(
+                            model_request_id,
+                            std::mem::take(&mut outputs_for_request),
+                            ModelOutcome::Failed { failure },
+                            driver_continuation,
+                            driver_usage,
+                        )
+                        .map_err(Box::new)?
+                    } else {
+                        ModelResponse::new(
+                            model_request_id,
+                            std::mem::take(&mut outputs_for_request),
+                            driver_outcome,
+                            driver_continuation,
+                            driver_usage,
+                        )
+                        .map_err(Box::new)?
+                    };
                     let records = self.event_store.append(
                         self.conversation_id,
                         vec![self.complete_event(ConversationEventPayload::ModelResponse(
@@ -1270,7 +1295,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_complete_response_does_not_execute_tool_requests() {
+    async fn a_complete_response_with_unanswered_tool_requests_is_a_durable_contract_error() {
         let directory = temporary_directory();
         let mut registry = ToolRegistry::default();
         registry.register(ObservingTool::new());
@@ -1288,13 +1313,13 @@ mod tests {
             .add_user_request(user_content("finish"))
             .expect("the request should be recorded");
 
-        assert_eq!(
+        assert!(matches!(
             session
                 .invoke(|_| Ok(()))
                 .await
-                .expect("the completed turn should finish"),
-            TurnOutcome::Succeeded
-        );
+                .expect("the contract error should fail the turn"),
+            TurnOutcome::Failed { .. }
+        ));
 
         let invocations = driver
             .invocations
@@ -1303,7 +1328,7 @@ mod tests {
         assert_eq!(
             invocations.len(),
             1,
-            "a complete response does not invoke the model again"
+            "the completing response does not invoke the model again"
         );
         drop(invocations);
         let events = loaded_events(&directory, conversation_id);
@@ -1312,12 +1337,26 @@ mod tests {
                 event.event().payload(),
                 ConversationEventPayload::ToolResponse(_)
             )),
-            "tools are not executed when the response completes"
+            "unanswered tool requests are never executed"
         );
+        let model_response = events
+            .iter()
+            .find_map(|event| match event.event().payload() {
+                ConversationEventPayload::ModelResponse(response) => Some(response),
+                _ => None,
+            })
+            .expect("the terminal model response should be recorded");
+        assert!(matches!(
+            model_response.outcome(),
+            ModelOutcome::Failed { failure }
+                if failure.category() == FailureCategory::InvalidProviderResponse
+                    && failure.message()
+                        == "A model response that completes the turn left requested tools unexecuted."
+        ));
         assert!(matches!(
             events.last().map(|event| event.event().payload()),
             Some(ConversationEventPayload::TurnEnd(turn_end))
-                if matches!(turn_end.outcome(), TurnOutcome::Succeeded)
+                if matches!(turn_end.outcome(), TurnOutcome::Failed { .. })
         ));
     }
 
