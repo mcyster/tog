@@ -75,6 +75,14 @@ pub enum ConversationEventPayload {
     Tools(Tools),
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationEventPersistence {
+    #[default]
+    Durable,
+    Unpersisted,
+}
+
 #[derive(Debug, Eq, PartialEq)]
 pub enum InvalidConversationEvent {
     User(InvalidUser),

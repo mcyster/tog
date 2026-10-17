@@ -581,7 +581,7 @@ fn translate_model_driver_event(
             payload,
             message,
         } => ModelDriverOutput::ModelSpecificEvent(
-            ModelSpecificEvent::new(
+            ModelSpecificEvent::new_unpersisted(
                 model_request_id,
                 event_type,
                 PROVIDER_PAYLOAD_VERSION,
@@ -1113,9 +1113,10 @@ mod tests {
 
     use tog::conversation::{
         AssistantResponse, Conversation, ConversationEvent, ConversationEventId,
-        ConversationEventPayload, ConversationHistory, ConversationId, FailureCategory,
-        ModelContinuation, ModelData, ModelId, ModelOutcome, ModelRequest, ModelSource, ProviderId,
-        ToolOutcome, ToolRequest, ToolResponse, TurnStart, User, UserContent,
+        ConversationEventPayload, ConversationEventPersistence, ConversationHistory,
+        ConversationId, FailureCategory, ModelContinuation, ModelData, ModelId, ModelOutcome,
+        ModelRequest, ModelSource, ProviderId, ToolOutcome, ToolRequest, ToolResponse, TurnStart,
+        User, UserContent,
     };
     use tog::conversation::{ToolDefinition, ToolName};
     use tog::conversation_event_store::ConversationEventRecord;
@@ -2191,7 +2192,14 @@ mod tests {
             .await
             .expect("the invocation should establish its stream");
         let first = expect_single(&mut model_events).await;
-        assert!(matches!(first, ModelDriverOutput::ModelSpecificEvent(_)));
+        let ModelDriverOutput::ModelSpecificEvent(first_event) = &first else {
+            panic!("the first output should be an intermediate content delta");
+        };
+        assert_eq!(
+            first_event.persistence(),
+            ConversationEventPersistence::Unpersisted,
+            "the intermediate content delta must not be persisted"
+        );
         let second = expect_single(&mut model_events).await;
         assert!(matches!(second, ModelDriverOutput::AssistantResponse(_)));
         let terminal = expect_single(&mut model_events).await;
@@ -2233,16 +2241,30 @@ mod tests {
             .await
             .expect("the invocation should establish its stream");
         let argument_delta = expect_single(&mut model_events).await;
-        assert!(matches!(
-            argument_delta,
-            ModelDriverOutput::ModelSpecificEvent(_)
-        ));
+        let ModelDriverOutput::ModelSpecificEvent(delta_event) = &argument_delta else {
+            panic!("the first output should be a tool-call argument delta");
+        };
+        assert_eq!(
+            delta_event.persistence(),
+            ConversationEventPersistence::Unpersisted,
+            "the intermediate tool-call fragment must not be persisted"
+        );
         let tool_request = expect_single(&mut model_events).await;
         assert!(matches!(
-            tool_request,
+            &tool_request,
             ModelDriverOutput::ToolRequest(request)
                 if request.tool_name().as_str() == "shell"
         ));
+        if let ModelDriverOutput::ToolRequest(request) = &tool_request {
+            assert_eq!(
+                request
+                    .data()
+                    .and_then(|data| data.content().get("call_id"))
+                    .and_then(Value::as_str),
+                Some("call_1"),
+                "the durable tool request preserves the provider call id"
+            );
+        }
         let terminal = expect_single(&mut model_events).await;
         assert!(matches!(
             terminal,

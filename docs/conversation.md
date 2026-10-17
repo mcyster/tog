@@ -356,6 +356,20 @@ stream ends without a terminal response, the engine records a failed
 `ModelResponse` instead. Unknown usage stays unknown rather than being counted
 as zero.
 
+Persistence is declared by the event. `ModelSpecificEvent` carries a policy that
+is durable by default, and every other payload is durable;
+`ConversationEvent::persistence()` exposes it. The session applies the policy
+through its normal event handling: every event receives an identity and
+timestamp and reaches live subscribers, and only durable events are appended to
+the store and receive a position. Unpersisted events never enter reconstructed
+conversation state or provider input, do not claim model outputs, and do not
+trigger tool execution. A driver marks intermediate model output and tool-call
+construction progress as unpersisted `ModelSpecificEvent` values, while the
+completed assistant response, tool request, model outcome, usage, and failures
+remain durable and self-contained. The persisted history must remain sufficient
+to replay and continue the conversation without any unpersisted events;
+reconstruction and provider input never depend on them.
+
 Event construction assigns identity and timestamp. The append boundary
 preserves them and assigns position. The session records the terminal turn
 outcome as `TurnEnd`:

@@ -6,7 +6,9 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use crate::conversation::{ConversationEvent, ConversationEventPayload, ConversationId};
+use crate::conversation::{
+    ConversationEvent, ConversationEventPayload, ConversationEventPersistence, ConversationId,
+};
 
 use super::{ConversationEventId, InvalidConversationEvent, InvalidConversationEventId};
 
@@ -89,6 +91,13 @@ impl ConversationEvent {
 
     pub fn payload(&self) -> &ConversationEventPayload {
         &self.payload
+    }
+
+    pub fn persistence(&self) -> ConversationEventPersistence {
+        match &self.payload {
+            ConversationEventPayload::ModelSpecificEvent(event) => event.persistence(),
+            _ => ConversationEventPersistence::Durable,
+        }
     }
 
     pub fn ensure_valid(&self) -> Result<(), InvalidConversationEvent> {

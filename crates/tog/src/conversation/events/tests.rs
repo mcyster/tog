@@ -3,11 +3,11 @@ use std::str::FromStr;
 use serde_json::json;
 
 use super::{
-    AssistantResponse, Automation, Context, ConversationEventId, FailureCategory,
-    InvalidModelSpecificEvent, InvalidUser, ModelContinuation, ModelData, ModelId, ModelOutcome,
-    ModelRequest, ModelResponse, ModelSource, ModelSpecificEvent, OperationFailure, ProviderId,
-    Tool, ToolAvailability, ToolOutcome, ToolRequest, ToolResponse, Tools, TurnEnd, TurnOutcome,
-    TurnStart, User, UserContent,
+    AssistantResponse, Automation, Context, ConversationEventId, ConversationEventPersistence,
+    FailureCategory, InvalidModelSpecificEvent, InvalidUser, ModelContinuation, ModelData, ModelId,
+    ModelOutcome, ModelRequest, ModelResponse, ModelSource, ModelSpecificEvent, OperationFailure,
+    ProviderId, Tool, ToolAvailability, ToolOutcome, ToolRequest, ToolResponse, Tools, TurnEnd,
+    TurnOutcome, TurnStart, User, UserContent,
 };
 use crate::conversation::{ConversationEvent, ConversationEventPayload, ConversationId};
 use crate::conversation_event_store::ConversationEventRecord;
@@ -342,6 +342,124 @@ fn a_model_specific_event_rejects_an_empty_message() {
     .expect_err("an empty message should be rejected");
 
     assert_eq!(error, InvalidModelSpecificEvent::EmptyMessage);
+}
+
+#[test]
+fn a_model_specific_event_declares_its_own_persistence() {
+    let durable = ModelSpecificEvent::new(
+        ConversationEventId::new(),
+        "reasoning".to_owned(),
+        1,
+        json!({}),
+        Some("Thinking.".to_owned()),
+    )
+    .expect("the specific event should be valid");
+    let unpersisted = ModelSpecificEvent::new_unpersisted(
+        ConversationEventId::new(),
+        "content_delta".to_owned(),
+        1,
+        json!({}),
+        Some("Hello".to_owned()),
+    )
+    .expect("the specific event should be valid");
+
+    assert_eq!(durable.persistence(), ConversationEventPersistence::Durable);
+    assert_eq!(
+        unpersisted.persistence(),
+        ConversationEventPersistence::Unpersisted
+    );
+}
+
+#[test]
+fn a_conversation_event_exposes_its_persistence() {
+    let conversation_id = ConversationId::new();
+    let unpersisted = ConversationEvent::new(
+        conversation_id,
+        ConversationEventPayload::ModelSpecificEvent(
+            ModelSpecificEvent::new_unpersisted(
+                ConversationEventId::new(),
+                "content_delta".to_owned(),
+                1,
+                json!({}),
+                Some("Hello".to_owned()),
+            )
+            .expect("the specific event should be valid"),
+        ),
+    );
+    let assistant = ConversationEvent::new(
+        conversation_id,
+        ConversationEventPayload::AssistantResponse(
+            AssistantResponse::new(ConversationEventId::new(), "Hello.".to_owned())
+                .expect("the assistant response should be valid"),
+        ),
+    );
+
+    assert_eq!(
+        unpersisted.persistence(),
+        ConversationEventPersistence::Unpersisted
+    );
+    assert_eq!(
+        assistant.persistence(),
+        ConversationEventPersistence::Durable,
+        "non model-specific payloads are always durable"
+    );
+}
+
+#[test]
+fn an_unpersisted_conversation_event_keeps_its_persistence_across_serialization() {
+    let conversation_id = ConversationId::new();
+    let event = ConversationEvent::new(
+        conversation_id,
+        ConversationEventPayload::ModelSpecificEvent(
+            ModelSpecificEvent::new_unpersisted(
+                ConversationEventId::new(),
+                "content_delta".to_owned(),
+                1,
+                json!({}),
+                Some("Hello".to_owned()),
+            )
+            .expect("the specific event should be valid"),
+        ),
+    );
+
+    let restored: ConversationEvent =
+        serde_json::from_value(serde_json::to_value(&event).expect("the event should serialize"))
+            .expect("the event should deserialize");
+
+    assert_eq!(
+        restored.persistence(),
+        ConversationEventPersistence::Unpersisted,
+        "the unpersisted policy must survive serialization"
+    );
+    assert_eq!(restored.payload(), event.payload());
+}
+
+#[test]
+fn a_model_specific_event_without_a_persistence_field_defaults_to_durable() {
+    let event = ModelSpecificEvent::new(
+        ConversationEventId::new(),
+        "reasoning".to_owned(),
+        1,
+        json!({}),
+        Some("Thinking.".to_owned()),
+    )
+    .expect("the specific event should be valid");
+
+    let value = serde_json::to_value(&event).expect("the event should serialize");
+    let mut value_without_persistence = value
+        .as_object()
+        .expect("the event should serialize to an object")
+        .clone();
+    value_without_persistence.remove("persistence");
+
+    let restored: ModelSpecificEvent =
+        serde_json::from_value(serde_json::Value::Object(value_without_persistence))
+            .expect("an event without a persistence field should deserialize");
+
+    assert_eq!(
+        restored.persistence(),
+        ConversationEventPersistence::Durable
+    );
 }
 
 #[test]

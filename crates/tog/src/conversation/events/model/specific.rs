@@ -4,7 +4,7 @@ use std::fmt::{Display, Formatter};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::conversation::events::ConversationEventId;
+use crate::conversation::events::{ConversationEventId, ConversationEventPersistence};
 
 use super::super::one_line_text;
 
@@ -16,6 +16,8 @@ pub struct ModelSpecificEvent {
     payload: Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     message: Option<String>,
+    #[serde(default)]
+    persistence: ConversationEventPersistence,
 }
 
 impl ModelSpecificEvent {
@@ -26,12 +28,48 @@ impl ModelSpecificEvent {
         payload: Value,
         message: Option<String>,
     ) -> Result<Self, InvalidModelSpecificEvent> {
+        Self::new_with_persistence(
+            model_request_id,
+            provider_event_type,
+            provider_payload_version,
+            payload,
+            message,
+            ConversationEventPersistence::Durable,
+        )
+    }
+
+    pub fn new_unpersisted(
+        model_request_id: ConversationEventId,
+        provider_event_type: String,
+        provider_payload_version: u32,
+        payload: Value,
+        message: Option<String>,
+    ) -> Result<Self, InvalidModelSpecificEvent> {
+        Self::new_with_persistence(
+            model_request_id,
+            provider_event_type,
+            provider_payload_version,
+            payload,
+            message,
+            ConversationEventPersistence::Unpersisted,
+        )
+    }
+
+    fn new_with_persistence(
+        model_request_id: ConversationEventId,
+        provider_event_type: String,
+        provider_payload_version: u32,
+        payload: Value,
+        message: Option<String>,
+        persistence: ConversationEventPersistence,
+    ) -> Result<Self, InvalidModelSpecificEvent> {
         let event = Self {
             model_request_id,
             provider_event_type,
             provider_payload_version,
             payload,
             message,
+            persistence,
         };
         event.ensure_valid()?;
         Ok(event)
@@ -55,6 +93,10 @@ impl ModelSpecificEvent {
 
     pub fn message(&self) -> Option<&str> {
         self.message.as_deref()
+    }
+
+    pub fn persistence(&self) -> ConversationEventPersistence {
+        self.persistence
     }
 
     pub fn describe(&self) -> String {
