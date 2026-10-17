@@ -75,6 +75,13 @@ pub enum ConversationEventPayload {
     Tools(Tools),
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ConversationEventPersistence {
+    #[default]
+    Durable,
+    Unpersisted,
+}
+
 #[derive(Debug, Eq, PartialEq)]
 pub enum InvalidConversationEvent {
     User(InvalidUser),

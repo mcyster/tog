@@ -4,7 +4,7 @@ mod output;
 mod tests;
 mod turn_input;
 
-pub use output::{ModelDriverOutput, ModelDriverOutputBatch, ModelDriverOutputPersistence};
+pub use output::{ModelDriverOutput, ModelDriverOutputBatch};
 pub use turn_input::TurnInput;
 
 use futures_util::future::BoxFuture;
@@ -38,7 +38,4 @@ pub enum ModelDriverError {
 }
 
 #[derive(Debug, Eq, PartialEq)]
-pub enum InvalidModelDriverOutputBatch {
-    Empty,
-    UnpersistedOutputNotModelSpecific,
-}
+pub struct EmptyModelDriverOutputBatch;

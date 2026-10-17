@@ -6,14 +6,12 @@ use futures_util::StreamExt;
 
 use tog::conversation::{
     Conversation, ConversationEvent, ConversationEventId, ConversationEventPayload,
-    ConversationHistory, ConversationId, FailureCategory, ModelContinuation, ModelOutcome,
-    ModelRequest, ModelResponse, OperationFailure, ToolOutcome, ToolResponse, TurnEnd, TurnOutcome,
-    TurnStart, User, UserContent, latest_tools,
+    ConversationEventPersistence, ConversationHistory, ConversationId, FailureCategory,
+    ModelContinuation, ModelOutcome, ModelRequest, ModelResponse, OperationFailure, ToolOutcome,
+    ToolResponse, TurnEnd, TurnOutcome, TurnStart, User, UserContent, latest_tools,
 };
 use tog::conversation_event_store::ConversationEventStore;
-use tog::model_driver::{
-    ModelDriver, ModelDriverError, ModelDriverOutput, ModelDriverOutputPersistence, TurnInput,
-};
+use tog::model_driver::{ModelDriver, ModelDriverError, ModelDriverOutput, TurnInput};
 use tog_context::toolset::{ToolRegistry, Toolset};
 
 pub type ConversationSessionResult<T> = Result<T, Box<dyn Error>>;
@@ -148,18 +146,6 @@ impl<Store: ConversationEventStore> ConversationSession<Store> {
                         model_request_id,
                     }));
                 }
-                if output_batch.persistence() == ModelDriverOutputPersistence::Unpersisted {
-                    for output in output_batch.into_outputs() {
-                        let ModelDriverOutput::ModelSpecificEvent(event) = output else {
-                            unreachable!("an unpersisted batch contains only model-specific events")
-                        };
-                        self.ensure_request_reference(&event, model_request_id)?;
-                        let event = self
-                            .complete_event(ConversationEventPayload::ModelSpecificEvent(event));
-                        report_progress(ConversationSessionProgress::EventCompleted { event })?;
-                    }
-                    continue;
-                }
                 let mut outputs = output_batch.into_outputs();
                 if outputs.iter().any(|output| output.is_terminal_response()) {
                     if outputs.len() != 1 {
@@ -198,50 +184,49 @@ impl<Store: ConversationEventStore> ConversationSession<Store> {
                     match output {
                         ModelDriverOutput::AssistantResponse(response) => {
                             self.ensure_request_reference(&response, model_request_id)?;
-                            events.push(ConversationEventPayload::AssistantResponse(response));
+                            events.push(self.complete_event(
+                                ConversationEventPayload::AssistantResponse(response),
+                            ));
                         }
                         ModelDriverOutput::ToolRequest(request) => {
                             self.ensure_request_reference(&request, model_request_id)?;
-                            events.push(ConversationEventPayload::ToolRequest(request));
+                            events.push(
+                                self.complete_event(ConversationEventPayload::ToolRequest(request)),
+                            );
                         }
                         ModelDriverOutput::ModelSpecificEvent(event) => {
                             self.ensure_request_reference(&event, model_request_id)?;
-                            events.push(ConversationEventPayload::ModelSpecificEvent(event));
+                            events.push(self.complete_event(
+                                ConversationEventPayload::ModelSpecificEvent(event),
+                            ));
                         }
                         ModelDriverOutput::ModelResponse(_) => {
                             unreachable!("terminal responses are handled as the sole batch output")
                         }
                     }
                 }
-                let records = self.event_store.append(
-                    self.conversation_id,
-                    events
-                        .into_iter()
-                        .map(|content| self.complete_event(content))
-                        .collect(),
-                )?;
-                for record in &records {
-                    match record.event().payload() {
+                let durable_events = events
+                    .iter()
+                    .filter(|event| event.persistence() == ConversationEventPersistence::Durable)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if !durable_events.is_empty() {
+                    self.event_store
+                        .append(self.conversation_id, durable_events)?;
+                }
+                for event in events {
+                    match event.payload() {
                         ConversationEventPayload::AssistantResponse(_) => {
-                            outputs_for_request.push(record.event().id());
-                            report_progress(ConversationSessionProgress::EventCompleted {
-                                event: record.event().clone(),
-                            })?;
+                            outputs_for_request.push(event.id());
                         }
                         ConversationEventPayload::ToolRequest(request) => {
-                            outputs_for_request.push(record.event().id());
-                            tool_requests.push((record.event().id(), request.clone()));
-                            report_progress(ConversationSessionProgress::EventCompleted {
-                                event: record.event().clone(),
-                            })?;
+                            outputs_for_request.push(event.id());
+                            tool_requests.push((event.id(), request.clone()));
                         }
-                        ConversationEventPayload::ModelSpecificEvent(_) => {
-                            report_progress(ConversationSessionProgress::EventCompleted {
-                                event: record.event().clone(),
-                            })?;
-                        }
+                        ConversationEventPayload::ModelSpecificEvent(_) => {}
                         _ => {}
                     }
+                    report_progress(ConversationSessionProgress::EventCompleted { event })?;
                 }
             }
 
@@ -601,7 +586,16 @@ mod tests {
                     .expect("the tool request should be valid"),
                 ),
                 ModelDriverOutput::ModelSpecificEvent(event) => {
-                    ModelDriverOutput::ModelSpecificEvent(
+                    let event = if unpersisted_specific_events {
+                        ModelSpecificEvent::new_unpersisted(
+                            model_request_id,
+                            event.provider_event_type().to_owned(),
+                            event.provider_payload_version(),
+                            event.payload().clone(),
+                            event.message().map(str::to_owned),
+                        )
+                        .expect("the specific event should be valid")
+                    } else {
                         ModelSpecificEvent::new(
                             model_request_id,
                             event.provider_event_type().to_owned(),
@@ -609,8 +603,9 @@ mod tests {
                             event.payload().clone(),
                             event.message().map(str::to_owned),
                         )
-                        .expect("the specific event should be valid"),
-                    )
+                        .expect("the specific event should be valid")
+                    };
+                    ModelDriverOutput::ModelSpecificEvent(event)
                 }
                 ModelDriverOutput::ModelResponse(response) => ModelDriverOutput::ModelResponse(
                     ModelResponse::new(
@@ -623,16 +618,7 @@ mod tests {
                     .expect("the terminal response should be valid"),
                 ),
             })
-            .map(|output| {
-                if unpersisted_specific_events
-                    && matches!(output, ModelDriverOutput::ModelSpecificEvent(_))
-                {
-                    ModelDriverOutputBatch::try_new_unpersisted(vec![output])
-                        .expect("a single model-specific event forms a valid unpersisted batch")
-                } else {
-                    ModelDriverOutputBatch::from(output)
-                }
-            })
+            .map(ModelDriverOutputBatch::from)
             .collect()
     }
 

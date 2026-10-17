@@ -18,11 +18,13 @@ and model-specific events. The session commits the model request first and gives
 the driver an immutable input view bounded by its recorded position. The driver
 cannot create the authoritative request, accept user input, or close the turn.
 
-Each returned batch declares whether it is durable or unpersisted; durable is
-the default. An unpersisted batch is delivered to live subscribers but never
-enters the log, reconstructed conversation state, or provider input, and it does
-not trigger tool execution or change control flow. Only model-specific events
-may be unpersisted, so intermediate provider progress stays live while completed
+`ModelSpecificEvent` declares whether it is durable or unpersisted; durable is
+the default, and every other payload is durable. `ConversationEvent::persistence()`
+exposes the policy. The session gives both kinds an identity and timestamp and
+delivers them to live subscribers; only durable events are appended to the store
+and receive a position. Unpersisted events never enter reconstructed
+conversation state or provider input, and they do not trigger tool execution or
+change control flow. Intermediate provider progress stays live while completed
 assistant outputs, tool requests, outcomes, usage, and failures remain durable.
 
 `Tools` declares the available definitions; executable implementations live

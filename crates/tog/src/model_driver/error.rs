@@ -1,7 +1,7 @@
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
-use super::{InvalidModelDriverOutputBatch, ModelDriverError};
+use super::{EmptyModelDriverOutputBatch, ModelDriverError};
 
 impl Display for ModelDriverError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
@@ -24,16 +24,10 @@ impl Display for ModelDriverError {
 
 impl Error for ModelDriverError {}
 
-impl Display for InvalidModelDriverOutputBatch {
+impl Display for EmptyModelDriverOutputBatch {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Empty => write!(formatter, "a model driver output batch must not be empty"),
-            Self::UnpersistedOutputNotModelSpecific => write!(
-                formatter,
-                "an unpersisted output batch may contain only model-specific events"
-            ),
-        }
+        write!(formatter, "a model driver output batch must not be empty")
     }
 }
 
-impl Error for InvalidModelDriverOutputBatch {}
+impl Error for EmptyModelDriverOutputBatch {}

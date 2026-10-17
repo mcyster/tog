@@ -581,7 +581,7 @@ fn translate_model_driver_event(
             payload,
             message,
         } => ModelDriverOutput::ModelSpecificEvent(
-            ModelSpecificEvent::new(
+            ModelSpecificEvent::new_unpersisted(
                 model_request_id,
                 event_type,
                 PROVIDER_PAYLOAD_VERSION,
@@ -623,14 +623,9 @@ fn translate_model_driver_event(
             return Ok(());
         }
     };
-    let batch = match &output {
-        ModelDriverOutput::ModelSpecificEvent(_) => {
-            ModelDriverOutputBatch::try_new_unpersisted(vec![output])
-                .expect("a single model-specific event forms a valid unpersisted batch")
-        }
-        _ => ModelDriverOutputBatch::from(output),
-    };
-    state.pending_batches.push_back(batch);
+    state
+        .pending_batches
+        .push_back(ModelDriverOutputBatch::from(output));
     Ok(())
 }
 
@@ -1118,15 +1113,14 @@ mod tests {
 
     use tog::conversation::{
         AssistantResponse, Conversation, ConversationEvent, ConversationEventId,
-        ConversationEventPayload, ConversationHistory, ConversationId, FailureCategory,
-        ModelContinuation, ModelData, ModelId, ModelOutcome, ModelRequest, ModelSource, ProviderId,
-        ToolOutcome, ToolRequest, ToolResponse, TurnStart, User, UserContent,
+        ConversationEventPayload, ConversationEventPersistence, ConversationHistory,
+        ConversationId, FailureCategory, ModelContinuation, ModelData, ModelId, ModelOutcome,
+        ModelRequest, ModelSource, ProviderId, ToolOutcome, ToolRequest, ToolResponse, TurnStart,
+        User, UserContent,
     };
     use tog::conversation::{ToolDefinition, ToolName};
     use tog::conversation_event_store::ConversationEventRecord;
-    use tog::model_driver::{
-        ModelDriver, ModelDriverOutput, ModelDriverOutputPersistence, ModelOutputStream, TurnInput,
-    };
+    use tog::model_driver::{ModelDriver, ModelDriverOutput, ModelOutputStream, TurnInput};
 
     use super::{
         ModelDriverEvent, OpenRouterCompletionsError, OpenRouterCompletionsModelDriver,
@@ -2156,18 +2150,15 @@ mod tests {
         }
     }
 
-    async fn expect_single(
-        stream: &mut ModelOutputStream,
-    ) -> (ModelDriverOutput, ModelDriverOutputPersistence) {
+    async fn expect_single(stream: &mut ModelOutputStream) -> ModelDriverOutput {
         let batch = stream
             .next()
             .await
             .expect("the stream should yield a batch")
             .expect("the batch should be valid");
-        let persistence = batch.persistence();
         let mut outputs = batch.into_outputs();
         assert_eq!(outputs.len(), 1, "the batch should hold one output");
-        (outputs.remove(0), persistence)
+        outputs.remove(0)
     }
 
     #[tokio::test]
@@ -2200,31 +2191,23 @@ mod tests {
             .invoke(driver_request(&conversation))
             .await
             .expect("the invocation should establish its stream");
-        let (first, first_persistence) = expect_single(&mut model_events).await;
-        assert!(matches!(first, ModelDriverOutput::ModelSpecificEvent(_)));
+        let first = expect_single(&mut model_events).await;
+        let ModelDriverOutput::ModelSpecificEvent(first_event) = &first else {
+            panic!("the first output should be an intermediate content delta");
+        };
         assert_eq!(
-            first_persistence,
-            ModelDriverOutputPersistence::Unpersisted,
+            first_event.persistence(),
+            ConversationEventPersistence::Unpersisted,
             "the intermediate content delta must not be persisted"
         );
-        let (second, second_persistence) = expect_single(&mut model_events).await;
+        let second = expect_single(&mut model_events).await;
         assert!(matches!(second, ModelDriverOutput::AssistantResponse(_)));
-        assert_eq!(
-            second_persistence,
-            ModelDriverOutputPersistence::Durable,
-            "the completed assistant output must remain durable"
-        );
-        let (terminal, terminal_persistence) = expect_single(&mut model_events).await;
+        let terminal = expect_single(&mut model_events).await;
         assert!(matches!(
             terminal,
             ModelDriverOutput::ModelResponse(response)
                 if matches!(response.outcome(), ModelOutcome::Succeeded)
         ));
-        assert_eq!(
-            terminal_persistence,
-            ModelDriverOutputPersistence::Durable,
-            "the model outcome must remain durable"
-        );
         assert!(model_events.next().await.is_none());
         server.join().expect("the mock server should stop");
     }
@@ -2257,27 +2240,21 @@ mod tests {
             .invoke(driver_request(&conversation))
             .await
             .expect("the invocation should establish its stream");
-        let (argument_delta, delta_persistence) = expect_single(&mut model_events).await;
-        assert!(matches!(
-            argument_delta,
-            ModelDriverOutput::ModelSpecificEvent(_)
-        ));
+        let argument_delta = expect_single(&mut model_events).await;
+        let ModelDriverOutput::ModelSpecificEvent(delta_event) = &argument_delta else {
+            panic!("the first output should be a tool-call argument delta");
+        };
         assert_eq!(
-            delta_persistence,
-            ModelDriverOutputPersistence::Unpersisted,
+            delta_event.persistence(),
+            ConversationEventPersistence::Unpersisted,
             "the intermediate tool-call fragment must not be persisted"
         );
-        let (tool_request, tool_request_persistence) = expect_single(&mut model_events).await;
+        let tool_request = expect_single(&mut model_events).await;
         assert!(matches!(
             &tool_request,
             ModelDriverOutput::ToolRequest(request)
                 if request.tool_name().as_str() == "shell"
         ));
-        assert_eq!(
-            tool_request_persistence,
-            ModelDriverOutputPersistence::Durable,
-            "the completed tool request must remain durable"
-        );
         if let ModelDriverOutput::ToolRequest(request) = &tool_request {
             assert_eq!(
                 request
@@ -2288,17 +2265,12 @@ mod tests {
                 "the durable tool request preserves the provider call id"
             );
         }
-        let (terminal, terminal_persistence) = expect_single(&mut model_events).await;
+        let terminal = expect_single(&mut model_events).await;
         assert!(matches!(
             terminal,
             ModelDriverOutput::ModelResponse(response)
                 if matches!(response.outcome(), ModelOutcome::Succeeded)
         ));
-        assert_eq!(
-            terminal_persistence,
-            ModelDriverOutputPersistence::Durable,
-            "the model outcome must remain durable"
-        );
         assert!(model_events.next().await.is_none());
         server.join().expect("the mock server should stop");
     }

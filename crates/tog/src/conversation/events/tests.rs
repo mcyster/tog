@@ -3,11 +3,11 @@ use std::str::FromStr;
 use serde_json::json;
 
 use super::{
-    AssistantResponse, Automation, Context, ConversationEventId, FailureCategory,
-    InvalidModelSpecificEvent, InvalidUser, ModelContinuation, ModelData, ModelId, ModelOutcome,
-    ModelRequest, ModelResponse, ModelSource, ModelSpecificEvent, OperationFailure, ProviderId,
-    Tool, ToolAvailability, ToolOutcome, ToolRequest, ToolResponse, Tools, TurnEnd, TurnOutcome,
-    TurnStart, User, UserContent,
+    AssistantResponse, Automation, Context, ConversationEventId, ConversationEventPersistence,
+    FailureCategory, InvalidModelSpecificEvent, InvalidUser, ModelContinuation, ModelData, ModelId,
+    ModelOutcome, ModelRequest, ModelResponse, ModelSource, ModelSpecificEvent, OperationFailure,
+    ProviderId, Tool, ToolAvailability, ToolOutcome, ToolRequest, ToolResponse, Tools, TurnEnd,
+    TurnOutcome, TurnStart, User, UserContent,
 };
 use crate::conversation::{ConversationEvent, ConversationEventPayload, ConversationId};
 use crate::conversation_event_store::ConversationEventRecord;
@@ -342,6 +342,67 @@ fn a_model_specific_event_rejects_an_empty_message() {
     .expect_err("an empty message should be rejected");
 
     assert_eq!(error, InvalidModelSpecificEvent::EmptyMessage);
+}
+
+#[test]
+fn a_model_specific_event_declares_its_own_persistence() {
+    let durable = ModelSpecificEvent::new(
+        ConversationEventId::new(),
+        "reasoning".to_owned(),
+        1,
+        json!({}),
+        Some("Thinking.".to_owned()),
+    )
+    .expect("the specific event should be valid");
+    let unpersisted = ModelSpecificEvent::new_unpersisted(
+        ConversationEventId::new(),
+        "content_delta".to_owned(),
+        1,
+        json!({}),
+        Some("Hello".to_owned()),
+    )
+    .expect("the specific event should be valid");
+
+    assert_eq!(durable.persistence(), ConversationEventPersistence::Durable);
+    assert_eq!(
+        unpersisted.persistence(),
+        ConversationEventPersistence::Unpersisted
+    );
+}
+
+#[test]
+fn a_conversation_event_exposes_its_persistence() {
+    let conversation_id = ConversationId::new();
+    let unpersisted = ConversationEvent::new(
+        conversation_id,
+        ConversationEventPayload::ModelSpecificEvent(
+            ModelSpecificEvent::new_unpersisted(
+                ConversationEventId::new(),
+                "content_delta".to_owned(),
+                1,
+                json!({}),
+                Some("Hello".to_owned()),
+            )
+            .expect("the specific event should be valid"),
+        ),
+    );
+    let assistant = ConversationEvent::new(
+        conversation_id,
+        ConversationEventPayload::AssistantResponse(
+            AssistantResponse::new(ConversationEventId::new(), "Hello.".to_owned())
+                .expect("the assistant response should be valid"),
+        ),
+    );
+
+    assert_eq!(
+        unpersisted.persistence(),
+        ConversationEventPersistence::Unpersisted
+    );
+    assert_eq!(
+        assistant.persistence(),
+        ConversationEventPersistence::Durable,
+        "non model-specific payloads are always durable"
+    );
 }
 
 #[test]
