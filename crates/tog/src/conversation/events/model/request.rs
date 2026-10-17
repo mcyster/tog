@@ -54,6 +54,10 @@ impl ModelRequest {
         self.retry_of
     }
 
+    pub fn source(&self) -> &ModelSource {
+        &self.source
+    }
+
     pub fn describe(&self) -> String {
         format!(
             "{}/{} input through {}",

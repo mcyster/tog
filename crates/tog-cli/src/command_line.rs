@@ -18,6 +18,7 @@ use tog_context::environment::Environment;
 use tog_context::toolset::ToolRegistry;
 use tog_driver_openai::OpenAiModelDriver;
 use tog_driver_openrouter_completions::OpenRouterCompletionsModelDriver;
+use tog_driver_openrouter_responses::OpenRouterResponsesModelDriver;
 use tog_engine::{ConversationSession, ConversationSessionProgress, ConversationSessionResult};
 use tog_store_local::{FileAssetStore, FileEventStore};
 use tog_tools::ShellTool;
@@ -29,7 +30,7 @@ use tog_tools::ShellTool;
     about = "Command-line access to agentic services",
     disable_help_subcommand = true,
     override_usage = "tog [:turn] [OPTIONS] <USER_PROMPT>...\n       tog :log [OPTIONS] [CONVERSATION_ID]\n       tog :asset add [OPTIONS] <SOURCE_PATH>\n       tog :asset list",
-    after_help = "When no command is specified, :turn is used. Select a driver with\ntog :turn --driver openai|openrouter-completions; see tog :turn --help\nfor all :turn options."
+    after_help = "When no command is specified, :turn is used. Select a driver with\ntog :turn --driver openai|openrouter-completions|openrouter-responses; see tog :turn --help\nfor all :turn options."
 )]
 pub(crate) struct CommandLine {
     #[command(subcommand)]
@@ -65,12 +66,19 @@ impl CommandLine {
                             ModelId::from_str(DEFAULT_OPENROUTER_MODEL)
                                 .expect("the OpenRouter default model should be valid")
                         }
+                        Driver::OpenRouterResponses => {
+                            ModelId::from_str(DEFAULT_OPENROUTER_RESPONSES_MODEL)
+                                .expect("the OpenRouter Responses default model should be valid")
+                        }
                     },
                 };
                 let model_driver: Box<dyn ModelDriver> = match arguments.driver {
                     Driver::OpenAi => Box::new(OpenAiModelDriver::from_environment(model)?),
                     Driver::OpenRouterCompletions => {
                         Box::new(OpenRouterCompletionsModelDriver::from_environment(model)?)
+                    }
+                    Driver::OpenRouterResponses => {
+                        Box::new(OpenRouterResponsesModelDriver::from_environment(model)?)
                     }
                 };
                 let mut tool_registry = ToolRegistry::default();
@@ -316,7 +324,7 @@ struct TurnArguments {
     #[arg(long)]
     conversation: Option<ConversationId>,
 
-    /// Model driver to use: openai or openrouter-completions.
+    /// Model driver to use: openai, openrouter-completions, or openrouter-responses.
     #[arg(long, value_enum, default_value = "openai")]
     driver: Driver,
 
@@ -333,15 +341,19 @@ struct TurnArguments {
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
+#[allow(clippy::enum_variant_names)]
 enum Driver {
     #[value(name = "openai")]
     OpenAi,
     #[value(name = "openrouter-completions")]
     OpenRouterCompletions,
+    #[value(name = "openrouter-responses")]
+    OpenRouterResponses,
 }
 
 const DEFAULT_OPENAI_MODEL: &str = "gpt-5.6";
 const DEFAULT_OPENROUTER_MODEL: &str = "openrouter/auto";
+const DEFAULT_OPENROUTER_RESPONSES_MODEL: &str = "deepseek/deepseek-v4.1-flash";
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum Verbosity {

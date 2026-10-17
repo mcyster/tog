@@ -17,6 +17,7 @@ tog = { path = "../tog" }
 tog-context = { path = "../tog-context" }
 tog-driver-openai = { path = "../tog-driver-openai" }
 tog-driver-openrouter-completions = { path = "../tog-driver-openrouter-completions" }
+tog-driver-openrouter-responses = { path = "../tog-driver-openrouter-responses" }
 tog-engine = { path = "../tog-engine" }
 tog-store-local = { path = "../tog-store-local" }
 tog-tools = { path = "../tog-tools" }

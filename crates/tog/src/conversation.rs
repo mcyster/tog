@@ -9,10 +9,11 @@ pub use events::{
     AssistantResponse, Context, ConversationEvent, ConversationEventId, ConversationEventPayload,
     ConversationEventPersistence, FailureCategory, InvalidAssistantResponse,
     InvalidConversationEvent, InvalidConversationEventId, InvalidModelResponse,
-    InvalidModelSpecificEvent, InvalidToolRequest, ModelContinuation, ModelData, ModelEvent,
-    ModelId, ModelOutcome, ModelRequest, ModelResponse, ModelSource, ModelSpecificEvent,
-    OperationFailure, ProviderId, Tool, ToolAvailability, ToolDefinition, ToolName, ToolOutcome,
-    ToolRequest, ToolResponse, Tools, TurnEnd, TurnOutcome, TurnStart, Usage, User, UserContent,
+    InvalidModelSpecificEvent, InvalidToolRequest, InvalidUsage, ModelContinuation, ModelData,
+    ModelEvent, ModelId, ModelOutcome, ModelRequest, ModelResponse, ModelSource,
+    ModelSpecificEvent, OperationFailure, ProviderId, Tool, ToolAvailability, ToolDefinition,
+    ToolName, ToolOutcome, ToolRequest, ToolResponse, Tools, TurnEnd, TurnOutcome, TurnStart,
+    Usage, User, UserContent,
 };
 pub use history::ConversationHistory;
 pub use id::ConversationId;

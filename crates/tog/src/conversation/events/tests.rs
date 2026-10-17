@@ -4,10 +4,10 @@ use serde_json::json;
 
 use super::{
     AssistantResponse, Automation, Context, ConversationEventId, ConversationEventPersistence,
-    FailureCategory, InvalidModelSpecificEvent, InvalidUser, ModelContinuation, ModelData, ModelId,
-    ModelOutcome, ModelRequest, ModelResponse, ModelSource, ModelSpecificEvent, OperationFailure,
-    ProviderId, Tool, ToolAvailability, ToolOutcome, ToolRequest, ToolResponse, Tools, TurnEnd,
-    TurnOutcome, TurnStart, User, UserContent,
+    FailureCategory, InvalidModelResponse, InvalidModelSpecificEvent, InvalidUsage, InvalidUser,
+    ModelContinuation, ModelData, ModelId, ModelOutcome, ModelRequest, ModelResponse, ModelSource,
+    ModelSpecificEvent, OperationFailure, ProviderId, Tool, ToolAvailability, ToolOutcome,
+    ToolRequest, ToolResponse, Tools, TurnEnd, TurnOutcome, TurnStart, Usage, User, UserContent,
 };
 use crate::conversation::{ConversationEvent, ConversationEventPayload, ConversationId};
 use crate::conversation_event_store::ConversationEventRecord;
@@ -806,4 +806,94 @@ fn a_tool_request_keeps_its_provider_call_identifier_as_opaque_data() {
             .content()["call_id"],
         "call_native"
     );
+}
+
+#[test]
+fn usage_round_trips_independently_optional_attributes() {
+    let usage = Usage::try_new(
+        Some(100),
+        Some(50),
+        Some(150),
+        Some(10),
+        Some(5),
+        Some(20),
+        Some(0.001234),
+    )
+    .expect("the usage should be valid");
+
+    let restored: Usage =
+        serde_json::from_value(serde_json::to_value(&usage).expect("the usage should serialize"))
+            .expect("the usage should deserialize");
+    assert_eq!(restored, usage);
+    assert_eq!(restored.input_tokens(), Some(100));
+    assert_eq!(restored.output_tokens(), Some(50));
+    assert_eq!(restored.total_tokens(), Some(150));
+    assert_eq!(restored.cache_read_input_tokens(), Some(10));
+    assert_eq!(restored.cache_write_input_tokens(), Some(5));
+    assert_eq!(restored.reasoning_output_tokens(), Some(20));
+    assert_eq!(restored.cost_usd(), Some(0.001234));
+}
+
+#[test]
+fn usage_keeps_missing_values_unknown_rather_than_zero() {
+    let usage = Usage::new(100, 50);
+
+    assert_eq!(usage.total_tokens(), None);
+    assert_eq!(usage.cache_read_input_tokens(), None);
+    assert_eq!(usage.cache_write_input_tokens(), None);
+    assert_eq!(usage.reasoning_output_tokens(), None);
+    assert_eq!(usage.cost_usd(), None);
+    assert_eq!(
+        serde_json::to_value(&usage).expect("the usage should serialize"),
+        json!({ "input_tokens": 100, "output_tokens": 50 })
+    );
+}
+
+#[test]
+fn usage_rejects_an_inconsistent_provider_report() {
+    assert_eq!(
+        Usage::try_new(Some(100), Some(50), Some(160), None, None, None, None),
+        Err(InvalidUsage::TotalTokensMismatch)
+    );
+    assert_eq!(
+        Usage::try_new(Some(10), None, None, Some(11), None, None, None),
+        Err(InvalidUsage::CacheTokensExceedInput)
+    );
+    assert_eq!(
+        Usage::try_new(Some(10), None, None, Some(6), Some(5), None, None),
+        Err(InvalidUsage::CacheTokensExceedInput)
+    );
+    assert_eq!(
+        Usage::try_new(None, Some(10), None, None, None, Some(11), None),
+        Err(InvalidUsage::ReasoningTokensExceedOutput)
+    );
+    assert_eq!(
+        Usage::try_new(None, None, None, None, None, None, Some(-1.0)),
+        Err(InvalidUsage::CostMustBeNonNegative)
+    );
+    assert!(matches!(
+        Usage::try_new(None, None, None, None, None, None, Some(f64::NAN)),
+        Err(InvalidUsage::CostMustBeNonNegative)
+    ));
+}
+
+#[test]
+fn a_model_response_rejects_usage_that_fails_reconstruction_validation() {
+    let id = ConversationEventId::new();
+    let value = json!({
+        "model_request_id": id.to_string(),
+        "output_event_ids": [],
+        "outcome": { "type": "succeeded" },
+        "continuation": { "type": "complete" },
+        "usage": { "input_tokens": 100, "output_tokens": 50, "total_tokens": 160 }
+    });
+    let restored: ModelResponse =
+        serde_json::from_value(value).expect("the response should deserialize");
+
+    assert!(matches!(
+        restored.ensure_valid(),
+        Err(InvalidModelResponse::Usage(
+            InvalidUsage::TotalTokensMismatch
+        ))
+    ));
 }

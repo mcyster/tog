@@ -5,11 +5,14 @@ and reported cost without knowing which driver ran the call. Every attribute is
 optional. Each driver supplies the values it can provide and translates them into
 the shared meanings below.
 
-Mark accepted this direction on 2026-10-03. This is an implementation plan.
-Today, `ModelResponse` already holds an optional `Usage`, but that value requires
-both input and output counts. The OpenAI driver records usage only when both
-counts are present. The additional attributes and independent optionality remain
-to be implemented.
+Mark accepted this direction on 2026-10-03. The `Usage` contract is now
+implemented: every attribute is independently optional, construction and
+reconstruction validate the subset and total relationships below, and the
+OpenRouter Responses driver maps each reported value, including `cost`.
+The OpenAI and OpenRouter chat-completions drivers still record usage only when
+both input and output counts are present; migrating their mappings is separate
+work. Cost is stored as an IEEE-754 double in US dollars and serialized as a JSON
+number.
 
 ## Boundary and behavior
 
@@ -78,11 +81,12 @@ Drivers may derive totals from known components under the same rule.
 
 ## Implementation and completion
 
-Extend the existing Usage contract and its immutable accessors, then update the
-OpenAI mapping to preserve each independently available value. Keep the shared
-contract independent of provider implementations. An inconsistent provider report
-needs an explicit handling policy during implementation; it must not silently
-become a valid but misleading usage record.
+The shared `Usage` contract and its immutable accessors are implemented, and the
+OpenRouter Responses driver maps each independently available value at the
+boundary. An inconsistent provider report is treated as unknown: the driver
+records no usage for the invocation rather than a valid-but-misleading record.
+Reconstruction validates stored usage the same way, so an inconsistent record
+fails loudly instead of entering a derived conversation.
 
 Verify absent versus zero values, independently reported attributes, subset
 relationships, serialization, and the driver's mapping with concrete provider
@@ -91,5 +95,5 @@ subsets or retries. No live paid model calls are needed for these checks.
 
 This plan is complete when model responses preserve supported reported values
 under this contract and readers can consume them without provider-specific
-knowledge. Usage display, price estimation, budgets, automatic retries, and new
-drivers are separate work.
+knowledge. Usage display, price estimation, budgets, automatic retries, and
+migrating the remaining driver mappings are separate work.
