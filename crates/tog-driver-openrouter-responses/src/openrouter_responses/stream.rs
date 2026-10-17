@@ -10,6 +10,7 @@ use super::{
     FailureStage, OpenRouterResponsesError, PROVIDER_PAYLOAD_VERSION, REASONING_ITEM_EVENT_TYPE,
     failed_outcome, is_context_limit_payload, provider_failure,
 };
+use crate::sse::{ServerSentEvent, ServerSentEventDecoder, SseError};
 use tog::conversation::{
     AssistantResponse, ConversationEventId, FailureCategory, InvalidAssistantResponse,
     InvalidModelResponse, InvalidModelSpecificEvent, InvalidToolRequest, ModelContinuation,
@@ -45,7 +46,7 @@ pub(crate) fn model_output_stream(
             if state.terminated {
                 return None;
             }
-            if let Some(server_sent_event) = state.decoder.events.pop_front() {
+            if let Some(server_sent_event) = state.decoder.next() {
                 match process_event(server_sent_event, model_request_id, &mut state.interpreter) {
                     Ok(ProcessEventResult::Batches(batches)) => {
                         if state.interpreter.completed {
@@ -54,7 +55,7 @@ pub(crate) fn model_output_stream(
                         state.pending_batches.extend(batches);
                     }
                     Ok(ProcessEventResult::Done) => {
-                        state.decoder.events.clear();
+                        state.decoder.clear();
                         state.response_end = Some(ResponseEnd::DoneSentinel);
                     }
                     Err(error) => {
@@ -89,9 +90,10 @@ pub(crate) fn model_output_stream(
                 Some(Ok(bytes)) => {
                     if let Err(error) = state.decoder.push(&bytes) {
                         state.terminated = true;
-                        state
-                            .pending_batches
-                            .push_back(failed_terminal_batch(model_request_id, &error));
+                        state.pending_batches.push_back(failed_terminal_batch(
+                            model_request_id,
+                            &invalid_sse(error),
+                        ));
                     }
                 }
                 Some(Err(error)) => {
@@ -103,9 +105,10 @@ pub(crate) fn model_output_stream(
                 None => {
                     if let Err(error) = state.decoder.finish() {
                         state.terminated = true;
-                        state
-                            .pending_batches
-                            .push_back(failed_terminal_batch(model_request_id, &error));
+                        state.pending_batches.push_back(failed_terminal_batch(
+                            model_request_id,
+                            &invalid_sse(error),
+                        ));
                     }
                     state.response_end = Some(ResponseEnd::BodyEnded);
                 }
@@ -197,80 +200,8 @@ fn invalid_model_response(error: InvalidModelResponse) -> OpenRouterResponsesErr
     OpenRouterResponsesError::InvalidResponse(error.to_string())
 }
 
-struct ServerSentEvent {
-    name: Option<String>,
-    data: String,
-}
-
-#[derive(Default)]
-struct ServerSentEventDecoder {
-    bytes: Vec<u8>,
-    event_name: Option<String>,
-    data_lines: Vec<String>,
-    events: VecDeque<ServerSentEvent>,
-}
-
-impl ServerSentEventDecoder {
-    fn push(&mut self, bytes: &[u8]) -> Result<(), OpenRouterResponsesError> {
-        self.bytes.extend_from_slice(bytes);
-        while let Some(newline_position) = self.bytes.iter().position(|byte| *byte == b'\n') {
-            let mut line = self.bytes.drain(..=newline_position).collect::<Vec<_>>();
-            line.pop();
-            if line.last() == Some(&b'\r') {
-                line.pop();
-            }
-            self.process_line(line)?;
-        }
-        Ok(())
-    }
-
-    fn finish(&mut self) -> Result<(), OpenRouterResponsesError> {
-        if !self.bytes.is_empty() {
-            let mut line = std::mem::take(&mut self.bytes);
-            if line.last() == Some(&b'\r') {
-                line.pop();
-            }
-            self.process_line(line)?;
-        }
-        self.dispatch_event();
-        Ok(())
-    }
-
-    fn process_line(&mut self, line: Vec<u8>) -> Result<(), OpenRouterResponsesError> {
-        let line = String::from_utf8(line)
-            .map_err(|error| OpenRouterResponsesError::InvalidResponse(error.to_string()))?;
-        if line.is_empty() {
-            self.dispatch_event();
-            return Ok(());
-        }
-        if line.starts_with(':') {
-            return Ok(());
-        }
-
-        let (field, value) = line
-            .split_once(':')
-            .map_or((line.as_str(), ""), |(field, value)| {
-                (field, value.strip_prefix(' ').unwrap_or(value))
-            });
-        match field {
-            "event" => self.event_name = Some(value.to_owned()),
-            "data" => self.data_lines.push(value.to_owned()),
-            _ => {}
-        }
-        Ok(())
-    }
-
-    fn dispatch_event(&mut self) {
-        if !self.data_lines.is_empty() {
-            self.events.push_back(ServerSentEvent {
-                name: self.event_name.take(),
-                data: self.data_lines.join("\n"),
-            });
-            self.data_lines.clear();
-        } else {
-            self.event_name = None;
-        }
-    }
+fn invalid_sse(error: SseError) -> OpenRouterResponsesError {
+    OpenRouterResponsesError::InvalidResponse(error.to_string())
 }
 
 struct OpenRouterResponsesStreamState {
@@ -823,9 +754,10 @@ mod tests {
 
     use super::{
         ConversationEventId, ModelDriverOutput, ModelDriverOutputBatch, OpenRouterResponsesError,
-        ProcessEventResult, ResponseByteStream, ServerSentEvent, StreamInterpreterState,
-        model_output_stream, process_event, resolve_event_type,
+        ProcessEventResult, ResponseByteStream, StreamInterpreterState, model_output_stream,
+        process_event, resolve_event_type,
     };
+    use crate::sse::ServerSentEvent;
     use tog::conversation::{
         AssistantResponse, ConversationEventPersistence, FailureCategory, ModelContinuation,
         ModelOutcome, ModelResponse, ToolRequest,
