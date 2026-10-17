@@ -353,7 +353,7 @@ enum Driver {
 
 const DEFAULT_OPENAI_MODEL: &str = "gpt-5.6";
 const DEFAULT_OPENROUTER_MODEL: &str = "openrouter/auto";
-const DEFAULT_OPENROUTER_RESPONSES_MODEL: &str = "openai/gpt-5.6";
+const DEFAULT_OPENROUTER_RESPONSES_MODEL: &str = "deepseek/deepseek-v4.1-flash";
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum Verbosity {

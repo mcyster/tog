@@ -968,6 +968,24 @@ fn openrouter_defaults_to_openai_driver() {
 }
 
 #[test]
+fn openrouter_responses_defaults_to_deepseek_flash() {
+    let server = MockOpenRouterServer::start(vec![OPENROUTER_RESPONSES_ANSWER_STREAM]);
+    let data_directory = temporary_data_directory();
+
+    let command_output = configured_openrouter_command(&server, &data_directory)
+        .args(["--driver", "openrouter-responses", "say", "hi"])
+        .output()
+        .expect("tog should run");
+
+    assert!(command_output.status.success());
+    let standard_error =
+        String::from_utf8(command_output.stderr).expect("standard error should be UTF-8");
+    assert!(standard_error.contains("## waiting for model deepseek/deepseek-v4.1-flash\n"));
+    let requests = server.finish();
+    assert_eq!(requests[0]["model"], "deepseek/deepseek-v4.1-flash");
+}
+
+#[test]
 fn openrouter_stream_emits_partial_content_events_at_medium_verbosity() {
     let server = MockOpenRouterServer::start(vec![OPENROUTER_CHAT_STREAM]);
     let data_directory = temporary_data_directory();
