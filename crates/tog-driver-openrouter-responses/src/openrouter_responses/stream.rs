@@ -11,15 +11,13 @@ use super::{
     failed_outcome, is_context_limit_payload, provider_failure,
 };
 use tog::conversation::{
-    AssistantResponse, ConversationEventId, ConversationEventPersistence, FailureCategory,
-    InvalidAssistantResponse, InvalidModelResponse, InvalidModelSpecificEvent, InvalidToolRequest,
-    ModelContinuation, ModelData, ModelOutcome, ModelResponse, ModelSpecificEvent, ToolName,
-    ToolRequest, Usage,
+    AssistantResponse, ConversationEventId, FailureCategory, InvalidAssistantResponse,
+    InvalidModelResponse, InvalidModelSpecificEvent, InvalidToolRequest, ModelContinuation,
+    ModelData, ModelOutcome, ModelResponse, ModelSpecificEvent, ToolName, ToolRequest, Usage,
 };
 use tog::model_driver::{ModelDriverOutput, ModelDriverOutputBatch, ModelOutputStream};
 
 type ResponseByteStream = BoxStream<'static, Result<Vec<u8>, OpenRouterResponsesError>>;
-type ProviderOutputStream = BoxStream<'static, Result<ModelDriverEvent, OpenRouterResponsesError>>;
 
 const CONTENT_DELTA_EVENT_TYPE: &str = "content_delta";
 const REASONING_DELTA_EVENT_TYPE: &str = "reasoning_delta";
@@ -30,23 +28,102 @@ pub(crate) fn model_output_stream(
     response_bytes: ResponseByteStream,
     model_request_id: ConversationEventId,
 ) -> ModelOutputStream {
-    conversation_event_stream(model_event_stream(response_bytes), model_request_id)
+    let state = OpenRouterResponsesStreamState {
+        response_bytes,
+        decoder: ServerSentEventDecoder::default(),
+        interpreter: StreamInterpreterState::default(),
+        pending_batches: VecDeque::new(),
+        response_end: None,
+        terminated: false,
+    };
+
+    stream::unfold(state, move |mut state| async move {
+        loop {
+            if let Some(batch) = state.pending_batches.pop_front() {
+                return Some((Ok(batch), state));
+            }
+            if state.terminated {
+                return None;
+            }
+            if let Some(server_sent_event) = state.decoder.events.pop_front() {
+                match process_event(server_sent_event, model_request_id, &mut state.interpreter) {
+                    Ok(ProcessEventResult::Batches(batches)) => {
+                        if state.interpreter.completed {
+                            state.terminated = true;
+                        }
+                        state.pending_batches.extend(batches);
+                    }
+                    Ok(ProcessEventResult::Done) => {
+                        state.decoder.events.clear();
+                        state.response_end = Some(ResponseEnd::DoneSentinel);
+                    }
+                    Err(error) => {
+                        state.terminated = true;
+                        state
+                            .pending_batches
+                            .push_back(failed_terminal_batch(model_request_id, &error));
+                    }
+                }
+                continue;
+            }
+            if let Some(response_end) = state.response_end {
+                state.terminated = true;
+                if state.interpreter.completed {
+                    return None;
+                }
+                let error = match response_end {
+                    ResponseEnd::BodyEnded => OpenRouterResponsesError::StreamInterrupted(
+                        "the response body ended before a terminal response event".to_owned(),
+                    ),
+                    ResponseEnd::DoneSentinel => OpenRouterResponsesError::InvalidResponse(
+                        "the stream ended before a terminal response event".to_owned(),
+                    ),
+                };
+                state
+                    .pending_batches
+                    .push_back(failed_terminal_batch(model_request_id, &error));
+                continue;
+            }
+
+            match state.response_bytes.next().await {
+                Some(Ok(bytes)) => {
+                    if let Err(error) = state.decoder.push(&bytes) {
+                        state.terminated = true;
+                        state
+                            .pending_batches
+                            .push_back(failed_terminal_batch(model_request_id, &error));
+                    }
+                }
+                Some(Err(error)) => {
+                    state.terminated = true;
+                    state
+                        .pending_batches
+                        .push_back(failed_terminal_batch(model_request_id, &error));
+                }
+                None => {
+                    if let Err(error) = state.decoder.finish() {
+                        state.terminated = true;
+                        state
+                            .pending_batches
+                            .push_back(failed_terminal_batch(model_request_id, &error));
+                    }
+                    state.response_end = Some(ResponseEnd::BodyEnded);
+                }
+            }
+        }
+    })
+    .boxed()
 }
 
 pub(crate) fn context_limit_stream(model_request_id: ConversationEventId) -> ModelOutputStream {
-    terminal_model_output(
-        stream::once(async move {
-            Ok(ModelDriverEvent::Terminal {
-                outcome: failed_outcome(
-                    FailureCategory::ContextLimitExceeded,
-                    "The model context limit was exceeded.",
-                ),
-                continuation: ModelContinuation::Complete,
-                usage: None,
-            })
-        })
-        .boxed(),
+    terminal_only_stream(
         model_request_id,
+        failed_outcome(
+            FailureCategory::ContextLimitExceeded,
+            "The model context limit was exceeded.",
+        ),
+        ModelContinuation::Complete,
+        None,
     )
 }
 
@@ -56,115 +133,43 @@ pub(crate) fn failed_terminal_stream(
     error: OpenRouterResponsesError,
 ) -> ModelOutputStream {
     let (category, message) = provider_failure(&error, failure_stage);
-    terminal_model_output(
-        stream::once(async move {
-            Ok(ModelDriverEvent::Terminal {
-                outcome: failed_outcome(category, &message),
-                continuation: ModelContinuation::Complete,
-                usage: None,
-            })
-        })
-        .boxed(),
+    terminal_only_stream(
         model_request_id,
+        failed_outcome(category, &message),
+        ModelContinuation::Complete,
+        None,
     )
 }
 
-#[derive(Clone)]
-enum ModelDriverEvent {
-    AssistantResponse {
-        content: String,
-    },
-    ModelSpecificEvent {
-        event_type: String,
-        payload: Value,
-        message: Option<String>,
-        persistence: ConversationEventPersistence,
-    },
-    ToolRequest {
-        tool_name: ToolName,
-        arguments: Value,
-        provider_call_id: Option<String>,
-    },
-    Terminal {
-        outcome: ModelOutcome,
-        continuation: ModelContinuation,
-        usage: Option<Usage>,
-    },
-}
-
-fn terminal_model_output(
-    provider_events: ProviderOutputStream,
+fn terminal_only_stream(
     model_request_id: ConversationEventId,
+    outcome: ModelOutcome,
+    continuation: ModelContinuation,
+    usage: Option<Usage>,
 ) -> ModelOutputStream {
-    conversation_event_stream(provider_events, model_request_id)
-}
-
-struct ConversationEventStreamState {
-    provider_events: ProviderOutputStream,
-    model_request_id: ConversationEventId,
-    pending_batches: VecDeque<ModelDriverOutputBatch>,
-    terminated: bool,
-}
-
-fn conversation_event_stream(
-    provider_events: ProviderOutputStream,
-    model_request_id: ConversationEventId,
-) -> ModelOutputStream {
-    stream::unfold(
-        ConversationEventStreamState {
-            provider_events,
-            model_request_id,
-            pending_batches: VecDeque::new(),
-            terminated: false,
-        },
-        |mut state| async move {
-            if let Some(batch) = state.pending_batches.pop_front() {
-                return Some((Ok(batch), state));
-            }
-            if state.terminated {
-                return None;
-            }
-            match state.provider_events.next().await {
-                Some(Ok(driver_event)) => {
-                    if let Err(error) = translate_model_driver_event(
-                        driver_event,
-                        state.model_request_id,
-                        &mut state,
-                    ) {
-                        fail_stream(&mut state, error);
-                    }
-                    state
-                        .pending_batches
-                        .pop_front()
-                        .map(|batch| (Ok(batch), state))
-                }
-                Some(Err(error)) => {
-                    fail_stream(&mut state, error);
-                    state
-                        .pending_batches
-                        .pop_front()
-                        .map(|batch| (Ok(batch), state))
-                }
-                None => None,
-            }
-        },
-    )
+    let response = terminal_model_response(model_request_id, outcome, continuation, usage)
+        .expect("the terminal model response should be valid");
+    stream::once(async move {
+        Ok(ModelDriverOutputBatch::from(
+            ModelDriverOutput::ModelResponse(response),
+        ))
+    })
     .boxed()
 }
 
-fn fail_stream(state: &mut ConversationEventStreamState, error: OpenRouterResponsesError) {
-    let (category, message) = provider_failure(&error, FailureStage::DuringStream);
+fn failed_terminal_batch(
+    model_request_id: ConversationEventId,
+    error: &OpenRouterResponsesError,
+) -> ModelDriverOutputBatch {
+    let (category, message) = provider_failure(error, FailureStage::DuringStream);
     let response = terminal_model_response(
-        state.model_request_id,
+        model_request_id,
         failed_outcome(category, &message),
         ModelContinuation::Complete,
         None,
     )
     .expect("the failed terminal model response should be valid");
-    state.pending_batches = VecDeque::from([ModelDriverOutputBatch::from(
-        ModelDriverOutput::ModelResponse(response),
-    )]);
-    state.terminated = true;
+    ModelDriverOutputBatch::from(ModelDriverOutput::ModelResponse(response))
 }
 
 fn terminal_model_response(
@@ -174,80 +179,6 @@ fn terminal_model_response(
     usage: Option<Usage>,
 ) -> Result<ModelResponse, InvalidModelResponse> {
     ModelResponse::new(model_request_id, Vec::new(), outcome, continuation, usage)
-}
-
-fn translate_model_driver_event(
-    driver_event: ModelDriverEvent,
-    model_request_id: ConversationEventId,
-    state: &mut ConversationEventStreamState,
-) -> Result<(), OpenRouterResponsesError> {
-    let output = match driver_event {
-        ModelDriverEvent::AssistantResponse { content } => ModelDriverOutput::AssistantResponse(
-            AssistantResponse::new(model_request_id, content)
-                .map_err(invalid_assistant_response)?,
-        ),
-        ModelDriverEvent::ModelSpecificEvent {
-            event_type,
-            payload,
-            message,
-            persistence,
-        } => {
-            let specific_event = match persistence {
-                ConversationEventPersistence::Durable => ModelSpecificEvent::new(
-                    model_request_id,
-                    event_type,
-                    PROVIDER_PAYLOAD_VERSION,
-                    payload,
-                    message,
-                ),
-                ConversationEventPersistence::Unpersisted => ModelSpecificEvent::new_unpersisted(
-                    model_request_id,
-                    event_type,
-                    PROVIDER_PAYLOAD_VERSION,
-                    payload,
-                    message,
-                ),
-            }
-            .map_err(invalid_model_specific_event)?;
-            ModelDriverOutput::ModelSpecificEvent(specific_event)
-        }
-        ModelDriverEvent::ToolRequest {
-            tool_name,
-            arguments,
-            provider_call_id,
-        } => {
-            let data = provider_call_id
-                .map(|call_id| {
-                    ModelData::new(Map::from_iter([(
-                        "call_id".to_owned(),
-                        Value::String(call_id),
-                    )]))
-                })
-                .transpose()
-                .map_err(|error| OpenRouterResponsesError::InvalidResponse(error.to_string()))?;
-            ModelDriverOutput::ToolRequest(
-                ToolRequest::try_new(model_request_id, tool_name, arguments, data)
-                    .map_err(invalid_tool_request)?,
-            )
-        }
-        ModelDriverEvent::Terminal {
-            outcome,
-            continuation,
-            usage,
-        } => {
-            let response = terminal_model_response(model_request_id, outcome, continuation, usage)
-                .map_err(invalid_model_response)?;
-            state.pending_batches = VecDeque::from([ModelDriverOutputBatch::from(
-                ModelDriverOutput::ModelResponse(response),
-            )]);
-            state.terminated = true;
-            return Ok(());
-        }
-    };
-    state
-        .pending_batches
-        .push_back(ModelDriverOutputBatch::from(output));
-    Ok(())
 }
 
 fn invalid_assistant_response(error: InvalidAssistantResponse) -> OpenRouterResponsesError {
@@ -346,7 +277,7 @@ struct OpenRouterResponsesStreamState {
     response_bytes: ResponseByteStream,
     decoder: ServerSentEventDecoder,
     interpreter: StreamInterpreterState,
-    model_outputs: VecDeque<ModelDriverEvent>,
+    pending_batches: VecDeque<ModelDriverOutputBatch>,
     response_end: Option<ResponseEnd>,
     terminated: bool,
 }
@@ -357,85 +288,8 @@ enum ResponseEnd {
     DoneSentinel,
 }
 
-fn model_event_stream(response_bytes: ResponseByteStream) -> ProviderOutputStream {
-    let state = OpenRouterResponsesStreamState {
-        response_bytes,
-        decoder: ServerSentEventDecoder::default(),
-        interpreter: StreamInterpreterState::default(),
-        model_outputs: VecDeque::new(),
-        response_end: None,
-        terminated: false,
-    };
-
-    stream::unfold(state, |mut state| async move {
-        loop {
-            if let Some(model_output) = state.model_outputs.pop_front() {
-                return Some((Ok(model_output), state));
-            }
-            if state.terminated {
-                return None;
-            }
-            if let Some(server_sent_event) = state.decoder.events.pop_front() {
-                match process_event(server_sent_event, &mut state.interpreter) {
-                    Ok(ProcessEventResult::Outputs(model_outputs)) => {
-                        if state.interpreter.completed {
-                            state.terminated = true;
-                        }
-                        state.model_outputs.extend(model_outputs);
-                    }
-                    Ok(ProcessEventResult::Done) => {
-                        state.decoder.events.clear();
-                        state.response_end = Some(ResponseEnd::DoneSentinel);
-                    }
-                    Err(error) => {
-                        state.terminated = true;
-                        return Some((Err(error), state));
-                    }
-                }
-                continue;
-            }
-            if let Some(response_end) = state.response_end {
-                state.terminated = true;
-                if state.interpreter.completed {
-                    return None;
-                }
-                let error = match response_end {
-                    ResponseEnd::BodyEnded => OpenRouterResponsesError::StreamInterrupted(
-                        "the response body ended before a terminal response event".to_owned(),
-                    ),
-                    ResponseEnd::DoneSentinel => OpenRouterResponsesError::InvalidResponse(
-                        "the stream ended before a terminal response event".to_owned(),
-                    ),
-                };
-                return Some((Err(error), state));
-            }
-
-            match state.response_bytes.next().await {
-                Some(Ok(bytes)) => {
-                    if let Err(error) = state.decoder.push(&bytes) {
-                        state.terminated = true;
-                        return Some((Err(error), state));
-                    }
-                }
-                Some(Err(error)) => {
-                    state.terminated = true;
-                    return Some((Err(error), state));
-                }
-                None => {
-                    if let Err(error) = state.decoder.finish() {
-                        state.terminated = true;
-                        return Some((Err(error), state));
-                    }
-                    state.response_end = Some(ResponseEnd::BodyEnded);
-                }
-            }
-        }
-    })
-    .boxed()
-}
-
 enum ProcessEventResult {
-    Outputs(Vec<ModelDriverEvent>),
+    Batches(Vec<ModelDriverOutputBatch>),
     Done,
 }
 
@@ -447,6 +301,7 @@ struct StreamInterpreterState {
 
 fn process_event(
     server_sent_event: ServerSentEvent,
+    model_request_id: ConversationEventId,
     state: &mut StreamInterpreterState,
 ) -> Result<ProcessEventResult, OpenRouterResponsesError> {
     if server_sent_event.data == "[DONE]" {
@@ -457,49 +312,55 @@ fn process_event(
         .map_err(|error| OpenRouterResponsesError::InvalidResponse(error.to_string()))?;
     let event_type = resolve_event_type(&payload, server_sent_event.name)?;
 
-    let model_events = match event_type.as_str() {
+    let batches = match event_type.as_str() {
         "response.output_text.delta" | "response.content_part.delta" => {
-            text_delta_progress(&payload)
+            one_batch_per_output(text_delta_progress(model_request_id, &payload)?)
         }
-        "response.reasoning_text.delta" => delta_progress(
+        "response.reasoning_text.delta" => one_batch_per_output(delta_progress(
+            model_request_id,
             REASONING_DELTA_EVENT_TYPE,
             payload
                 .get("delta")
                 .and_then(Value::as_str)
                 .unwrap_or_default(),
-        ),
-        "response.reasoning_summary_text.delta" => delta_progress(
+        )?),
+        "response.reasoning_summary_text.delta" => one_batch_per_output(delta_progress(
+            model_request_id,
             REASONING_SUMMARY_DELTA_EVENT_TYPE,
             payload
                 .get("delta")
                 .and_then(Value::as_str)
                 .unwrap_or_default(),
-        ),
+        )?),
         "response.function_call_arguments.delta" => {
-            tool_argument_delta_progress(&payload, &state.function_call_call_ids)?
+            one_batch_per_output(tool_argument_delta_progress(
+                model_request_id,
+                &payload,
+                &state.function_call_call_ids,
+            )?)
         }
         "response.output_item.added" => {
             track_function_call(&payload, &mut state.function_call_call_ids)?;
             Vec::new()
         }
         "response.completed" | "response.done" => {
-            let model_events = final_outputs(&payload)?;
+            let completed = completed_response(model_request_id, &payload)?;
             state.completed = true;
-            model_events
+            response_batches(model_request_id, completed)?
         }
         "response.incomplete" => {
-            let model_events = incomplete_terminal(&payload)?;
+            let completed = incomplete_response(&payload)?;
             state.completed = true;
-            model_events
+            response_batches(model_request_id, completed)?
         }
         "error" | "response.failed" => {
-            let model_events = failed_terminal(&payload)?;
+            let completed = failed_response(&payload)?;
             state.completed = true;
-            model_events
+            response_batches(model_request_id, completed)?
         }
         _ => Vec::new(),
     };
-    Ok(ProcessEventResult::Outputs(model_events))
+    Ok(ProcessEventResult::Batches(batches))
 }
 
 fn resolve_event_type(
@@ -528,19 +389,33 @@ fn resolve_event_type(
         .unwrap_or_else(|| "unknown".to_owned()))
 }
 
-fn delta_progress(event_type: &str, delta: &str) -> Vec<ModelDriverEvent> {
-    if delta.is_empty() {
-        Vec::new()
-    } else {
-        vec![progress_event(
-            event_type,
-            json!({}),
-            Some(delta.to_owned()),
-        )]
-    }
+fn one_batch_per_output(outputs: Vec<ModelDriverOutput>) -> Vec<ModelDriverOutputBatch> {
+    outputs
+        .into_iter()
+        .map(ModelDriverOutputBatch::from)
+        .collect()
 }
 
-fn text_delta_progress(payload: &Value) -> Vec<ModelDriverEvent> {
+fn delta_progress(
+    model_request_id: ConversationEventId,
+    event_type: &str,
+    delta: &str,
+) -> Result<Vec<ModelDriverOutput>, OpenRouterResponsesError> {
+    if delta.is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(vec![progress_output(
+        model_request_id,
+        event_type,
+        json!({}),
+        Some(delta.to_owned()),
+    )?])
+}
+
+fn text_delta_progress(
+    model_request_id: ConversationEventId,
+    payload: &Value,
+) -> Result<Vec<ModelDriverOutput>, OpenRouterResponsesError> {
     let delta = payload
         .get("delta")
         .and_then(Value::as_str)
@@ -552,22 +427,32 @@ fn text_delta_progress(payload: &Value) -> Vec<ModelDriverEvent> {
                 .and_then(Value::as_str)
         })
         .unwrap_or_default();
-    delta_progress(CONTENT_DELTA_EVENT_TYPE, delta)
+    delta_progress(model_request_id, CONTENT_DELTA_EVENT_TYPE, delta)
 }
 
-fn progress_event(event_type: &str, payload: Value, message: Option<String>) -> ModelDriverEvent {
-    ModelDriverEvent::ModelSpecificEvent {
-        event_type: event_type.to_owned(),
-        payload,
-        message,
-        persistence: ConversationEventPersistence::Unpersisted,
-    }
+fn progress_output(
+    model_request_id: ConversationEventId,
+    event_type: &str,
+    payload: Value,
+    message: Option<String>,
+) -> Result<ModelDriverOutput, OpenRouterResponsesError> {
+    Ok(ModelDriverOutput::ModelSpecificEvent(
+        ModelSpecificEvent::new_unpersisted(
+            model_request_id,
+            event_type.to_owned(),
+            PROVIDER_PAYLOAD_VERSION,
+            payload,
+            message,
+        )
+        .map_err(invalid_model_specific_event)?,
+    ))
 }
 
 fn tool_argument_delta_progress(
+    model_request_id: ConversationEventId,
     payload: &Value,
     function_call_call_ids: &HashMap<String, String>,
-) -> Result<Vec<ModelDriverEvent>, OpenRouterResponsesError> {
+) -> Result<Vec<ModelDriverOutput>, OpenRouterResponsesError> {
     let delta = payload
         .get("delta")
         .and_then(Value::as_str)
@@ -579,11 +464,12 @@ fn tool_argument_delta_progress(
         .get(&correlation_key(payload)?)
         .map(|call_id| json!({ "call_id": call_id }))
         .unwrap_or_else(|| json!({}));
-    Ok(vec![progress_event(
+    Ok(vec![progress_output(
+        model_request_id,
         TOOL_CALL_ARGUMENTS_DELTA_EVENT_TYPE,
         correlation,
         Some(delta.to_owned()),
-    )])
+    )?])
 }
 
 fn track_function_call(
@@ -621,7 +507,44 @@ fn correlation_key(payload: &Value) -> Result<String, OpenRouterResponsesError> 
     }
 }
 
-fn final_outputs(payload: &Value) -> Result<Vec<ModelDriverEvent>, OpenRouterResponsesError> {
+struct CompletedResponse {
+    outputs: Vec<ModelDriverOutput>,
+    outcome: ModelOutcome,
+    continuation: ModelContinuation,
+    usage: Option<Usage>,
+}
+
+fn response_batches(
+    model_request_id: ConversationEventId,
+    completed: CompletedResponse,
+) -> Result<Vec<ModelDriverOutputBatch>, OpenRouterResponsesError> {
+    let mut batches = Vec::new();
+    if !completed.outputs.is_empty() {
+        batches.push(
+            ModelDriverOutputBatch::try_new(completed.outputs).map_err(|_| {
+                OpenRouterResponsesError::InvalidResponse(
+                    "the completed response contained no model message".to_owned(),
+                )
+            })?,
+        );
+    }
+    let terminal = ModelDriverOutput::ModelResponse(
+        terminal_model_response(
+            model_request_id,
+            completed.outcome,
+            completed.continuation,
+            completed.usage,
+        )
+        .map_err(invalid_model_response)?,
+    );
+    batches.push(ModelDriverOutputBatch::from(terminal));
+    Ok(batches)
+}
+
+fn completed_response(
+    model_request_id: ConversationEventId,
+    payload: &Value,
+) -> Result<CompletedResponse, OpenRouterResponsesError> {
     let response = payload.get("response").ok_or_else(|| {
         OpenRouterResponsesError::InvalidResponse(
             "the terminal response event did not contain a response object".to_owned(),
@@ -644,7 +567,7 @@ fn final_outputs(payload: &Value) -> Result<Vec<ModelDriverEvent>, OpenRouterRes
     })?;
     let usage = parsed_usage(payload);
 
-    let mut model_events = Vec::new();
+    let mut outputs = Vec::new();
     let mut has_assistant = false;
     let mut has_tool_request = false;
     let mut has_reasoning = false;
@@ -652,8 +575,8 @@ fn final_outputs(payload: &Value) -> Result<Vec<ModelDriverEvent>, OpenRouterRes
     for item in output {
         match item.get("type").and_then(Value::as_str) {
             Some("reasoning") => {
-                if let Some(event) = reasoning_replay_event(item) {
-                    model_events.push(event);
+                if let Some(output) = reasoning_replay_output(model_request_id, item)? {
+                    outputs.push(output);
                 }
                 has_reasoning = true;
             }
@@ -662,12 +585,12 @@ fn final_outputs(payload: &Value) -> Result<Vec<ModelDriverEvent>, OpenRouterRes
                 if let Some(text) = message_refusal {
                     refusal = Some(text);
                 } else if let Some(text) = assistant_text {
-                    model_events.push(ModelDriverEvent::AssistantResponse { content: text });
+                    outputs.push(assistant_response_output(model_request_id, text)?);
                     has_assistant = true;
                 }
             }
             Some("function_call") => {
-                model_events.push(function_call_event(item)?);
+                outputs.push(tool_request_output(model_request_id, item)?);
                 has_tool_request = true;
             }
             _ => {}
@@ -675,11 +598,12 @@ fn final_outputs(payload: &Value) -> Result<Vec<ModelDriverEvent>, OpenRouterRes
     }
 
     if let Some(text) = refusal {
-        return Ok(vec![ModelDriverEvent::Terminal {
+        return Ok(CompletedResponse {
+            outputs: Vec::new(),
             outcome: failed_outcome(FailureCategory::Refusal, &text),
             continuation: ModelContinuation::Complete,
             usage,
-        }]);
+        });
     }
     if !has_assistant && !has_tool_request && !has_reasoning {
         return Err(OpenRouterResponsesError::InvalidResponse(
@@ -691,12 +615,120 @@ fn final_outputs(payload: &Value) -> Result<Vec<ModelDriverEvent>, OpenRouterRes
     } else {
         ModelContinuation::Complete
     };
-    model_events.push(ModelDriverEvent::Terminal {
+    Ok(CompletedResponse {
+        outputs,
         outcome: ModelOutcome::Succeeded,
         continuation,
         usage,
-    });
-    Ok(model_events)
+    })
+}
+
+fn incomplete_response(payload: &Value) -> Result<CompletedResponse, OpenRouterResponsesError> {
+    let failed_reason = payload
+        .pointer("/response/incomplete_details/reason")
+        .or_else(|| payload.pointer("/incomplete_details/reason"))
+        .or_else(|| payload.pointer("/response/incomplete_details/failed_reason"))
+        .or_else(|| payload.pointer("/incomplete_details/failed_reason"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let (category, continuation) = if failed_reason == "content_filter" {
+        (FailureCategory::Refusal, ModelContinuation::Complete)
+    } else {
+        (
+            FailureCategory::ProviderFailure,
+            ModelContinuation::Complete,
+        )
+    };
+    Ok(CompletedResponse {
+        outputs: Vec::new(),
+        outcome: failed_outcome(
+            category,
+            "The model response was cut off before completing.",
+        ),
+        continuation,
+        usage: parsed_usage(payload),
+    })
+}
+
+fn failed_response(payload: &Value) -> Result<CompletedResponse, OpenRouterResponsesError> {
+    let (category, message) = if is_context_limit_payload(payload) {
+        (
+            FailureCategory::ContextLimitExceeded,
+            "The model context limit was exceeded.",
+        )
+    } else {
+        (
+            FailureCategory::ProviderFailure,
+            "The model provider failed the invocation.",
+        )
+    };
+    Ok(CompletedResponse {
+        outputs: Vec::new(),
+        outcome: failed_outcome(category, message),
+        continuation: ModelContinuation::Complete,
+        usage: parsed_usage(payload),
+    })
+}
+
+fn assistant_response_output(
+    model_request_id: ConversationEventId,
+    content: String,
+) -> Result<ModelDriverOutput, OpenRouterResponsesError> {
+    Ok(ModelDriverOutput::AssistantResponse(
+        AssistantResponse::new(model_request_id, content).map_err(invalid_assistant_response)?,
+    ))
+}
+
+fn tool_request_output(
+    model_request_id: ConversationEventId,
+    item: &Value,
+) -> Result<ModelDriverOutput, OpenRouterResponsesError> {
+    let name = item.get("name").and_then(Value::as_str).ok_or_else(|| {
+        OpenRouterResponsesError::InvalidResponse(
+            "a completed function call did not contain a name".to_owned(),
+        )
+    })?;
+    let arguments = item
+        .get("arguments")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            OpenRouterResponsesError::InvalidResponse(
+                "a completed function call did not contain string arguments".to_owned(),
+            )
+        })?;
+    let arguments = parse_function_call_arguments(arguments)?;
+    let data = item
+        .get("call_id")
+        .and_then(Value::as_str)
+        .map(|call_id| {
+            ModelData::new(Map::from_iter([(
+                "call_id".to_owned(),
+                Value::String(call_id.to_owned()),
+            )]))
+        })
+        .transpose()
+        .map_err(|error| OpenRouterResponsesError::InvalidResponse(error.to_string()))?;
+    Ok(ModelDriverOutput::ToolRequest(
+        ToolRequest::try_new(
+            model_request_id,
+            ToolName::try_new(name.to_owned())
+                .map_err(|error| OpenRouterResponsesError::InvalidResponse(error.to_string()))?,
+            arguments,
+            data,
+        )
+        .map_err(invalid_tool_request)?,
+    ))
+}
+
+fn parse_function_call_arguments(arguments: &str) -> Result<Value, OpenRouterResponsesError> {
+    if arguments.trim().is_empty() {
+        return Ok(Value::Object(Map::new()));
+    }
+    serde_json::from_str(arguments).map_err(|error| {
+        OpenRouterResponsesError::InvalidResponse(format!(
+            "a function call contained invalid JSON arguments: {error}"
+        ))
+    })
 }
 
 fn message_outputs(
@@ -734,44 +766,13 @@ fn message_outputs(
     Ok((assistant_text, refusal))
 }
 
-fn function_call_event(item: &Value) -> Result<ModelDriverEvent, OpenRouterResponsesError> {
-    let name = item.get("name").and_then(Value::as_str).ok_or_else(|| {
-        OpenRouterResponsesError::InvalidResponse(
-            "a completed function call did not contain a name".to_owned(),
-        )
-    })?;
-    let arguments = item
-        .get("arguments")
-        .and_then(Value::as_str)
-        .ok_or_else(|| {
-            OpenRouterResponsesError::InvalidResponse(
-                "a completed function call did not contain string arguments".to_owned(),
-            )
-        })?;
-    Ok(ModelDriverEvent::ToolRequest {
-        tool_name: ToolName::try_new(name.to_owned())
-            .map_err(|error| OpenRouterResponsesError::InvalidResponse(error.to_string()))?,
-        arguments: parse_function_call_arguments(arguments)?,
-        provider_call_id: item
-            .get("call_id")
-            .and_then(Value::as_str)
-            .map(str::to_owned),
-    })
-}
-
-fn parse_function_call_arguments(arguments: &str) -> Result<Value, OpenRouterResponsesError> {
-    if arguments.trim().is_empty() {
-        return Ok(Value::Object(Map::new()));
-    }
-    serde_json::from_str(arguments).map_err(|error| {
-        OpenRouterResponsesError::InvalidResponse(format!(
-            "a function call contained invalid JSON arguments: {error}"
-        ))
-    })
-}
-
-fn reasoning_replay_event(item: &Value) -> Option<ModelDriverEvent> {
-    let item_id = item.get("id").and_then(Value::as_str)?;
+fn reasoning_replay_output(
+    model_request_id: ConversationEventId,
+    item: &Value,
+) -> Result<Option<ModelDriverOutput>, OpenRouterResponsesError> {
+    let Some(item_id) = item.get("id").and_then(Value::as_str) else {
+        return Ok(None);
+    };
     let summary = match item.get("summary") {
         None => Vec::new(),
         Some(Value::Array(summary)) if summary.iter().all(is_summary_text) => summary.clone(),
@@ -782,7 +783,7 @@ fn reasoning_replay_event(item: &Value) -> Option<ModelDriverEvent> {
         .and_then(Value::as_str)
         .filter(|content| !content.is_empty());
     if summary.is_empty() && encrypted_content.is_none() {
-        return None;
+        return Ok(None);
     }
     let mut payload = Map::new();
     payload.insert("item_id".to_owned(), Value::String(item_id.to_owned()));
@@ -794,12 +795,16 @@ fn reasoning_replay_event(item: &Value) -> Option<ModelDriverEvent> {
     }
     let message = joined_summary_texts(&summary);
     payload.insert("summary".to_owned(), Value::Array(summary));
-    Some(ModelDriverEvent::ModelSpecificEvent {
-        event_type: REASONING_ITEM_EVENT_TYPE.to_owned(),
-        payload: Value::Object(payload),
-        message,
-        persistence: ConversationEventPersistence::Durable,
-    })
+    Ok(Some(ModelDriverOutput::ModelSpecificEvent(
+        ModelSpecificEvent::new(
+            model_request_id,
+            REASONING_ITEM_EVENT_TYPE.to_owned(),
+            PROVIDER_PAYLOAD_VERSION,
+            Value::Object(payload),
+            message,
+        )
+        .map_err(invalid_model_specific_event)?,
+    )))
 }
 
 fn joined_summary_texts(summary: &[Value]) -> Option<String> {
@@ -811,63 +816,20 @@ fn joined_summary_texts(summary: &[Value]) -> Option<String> {
     (!message.is_empty()).then_some(message)
 }
 
-fn incomplete_terminal(payload: &Value) -> Result<Vec<ModelDriverEvent>, OpenRouterResponsesError> {
-    let failed_reason = payload
-        .pointer("/response/incomplete_details/reason")
-        .or_else(|| payload.pointer("/incomplete_details/reason"))
-        .or_else(|| payload.pointer("/response/incomplete_details/failed_reason"))
-        .or_else(|| payload.pointer("/incomplete_details/failed_reason"))
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let (category, continuation) = if failed_reason == "content_filter" {
-        (FailureCategory::Refusal, ModelContinuation::Complete)
-    } else {
-        (
-            FailureCategory::ProviderFailure,
-            ModelContinuation::Complete,
-        )
-    };
-    Ok(vec![ModelDriverEvent::Terminal {
-        outcome: failed_outcome(
-            category,
-            "The model response was cut off before completing.",
-        ),
-        continuation,
-        usage: parsed_usage(payload),
-    }])
-}
-
-fn failed_terminal(payload: &Value) -> Result<Vec<ModelDriverEvent>, OpenRouterResponsesError> {
-    let (category, message) = if is_context_limit_payload(payload) {
-        (
-            FailureCategory::ContextLimitExceeded,
-            "The model context limit was exceeded.",
-        )
-    } else {
-        (
-            FailureCategory::ProviderFailure,
-            "The model provider failed the invocation.",
-        )
-    };
-    Ok(vec![ModelDriverEvent::Terminal {
-        outcome: failed_outcome(category, message),
-        continuation: ModelContinuation::Complete,
-        usage: parsed_usage(payload),
-    }])
-}
-
 #[cfg(test)]
 mod tests {
     use futures_util::StreamExt;
     use serde_json::json;
 
     use super::{
-        ConversationEventPersistence, ModelDriverEvent, OpenRouterResponsesError,
+        ConversationEventId, ModelDriverOutput, ModelDriverOutputBatch, OpenRouterResponsesError,
         ProcessEventResult, ResponseByteStream, ServerSentEvent, StreamInterpreterState,
-        model_event_stream, model_output_stream, process_event, resolve_event_type,
+        model_output_stream, process_event, resolve_event_type,
     };
-    use tog::conversation::{ModelContinuation, ModelOutcome};
-    use tog::model_driver::{ModelDriverOutput, ModelOutputStream};
+    use tog::conversation::{
+        AssistantResponse, ConversationEventPersistence, FailureCategory, ModelContinuation,
+        ModelOutcome, ModelResponse, ToolRequest,
+    };
 
     fn response_byte_stream(chunks: Vec<Vec<u8>>) -> ResponseByteStream {
         futures_util::stream::iter(
@@ -878,14 +840,6 @@ mod tests {
         .boxed()
     }
 
-    async fn collect_event_stream(
-        input: &str,
-    ) -> Vec<Result<ModelDriverEvent, OpenRouterResponsesError>> {
-        model_event_stream(response_byte_stream(vec![input.as_bytes().to_vec()]))
-            .collect()
-            .await
-    }
-
     fn event(input: &str) -> ServerSentEvent {
         ServerSentEvent {
             name: None,
@@ -893,45 +847,93 @@ mod tests {
         }
     }
 
+    fn batched_outputs(batches: Vec<ModelDriverOutputBatch>) -> Vec<ModelDriverOutput> {
+        batches
+            .into_iter()
+            .flat_map(|batch| batch.into_outputs())
+            .collect()
+    }
+
+    async fn collect_stream(input: &str) -> Vec<ModelDriverOutput> {
+        let mut stream = model_output_stream(
+            response_byte_stream(vec![input.as_bytes().to_vec()]),
+            ConversationEventId::new(),
+        );
+        let mut outputs = Vec::new();
+        while let Some(batch) = stream.next().await {
+            outputs.extend(batch.expect("the batch should be valid").into_outputs());
+        }
+        outputs
+    }
+
+    fn assistant(output: &ModelDriverOutput) -> Option<&AssistantResponse> {
+        match output {
+            ModelDriverOutput::AssistantResponse(response) => Some(response),
+            _ => None,
+        }
+    }
+
+    fn specific(output: &ModelDriverOutput) -> Option<&tog::conversation::ModelSpecificEvent> {
+        match output {
+            ModelDriverOutput::ModelSpecificEvent(event) => Some(event),
+            _ => None,
+        }
+    }
+
+    fn tool_request(output: &ModelDriverOutput) -> Option<&ToolRequest> {
+        match output {
+            ModelDriverOutput::ToolRequest(request) => Some(request),
+            _ => None,
+        }
+    }
+
+    fn model_response(output: &ModelDriverOutput) -> Option<&ModelResponse> {
+        match output {
+            ModelDriverOutput::ModelResponse(response) => Some(response),
+            _ => None,
+        }
+    }
+
     #[test]
-    fn delta_events_emit_unpersisted_progress_only() {
+    fn delta_events_emit_single_unpersisted_progress_batches() {
         let mut state = StreamInterpreterState::default();
-        let results = process_event(event(
-            "{\"type\":\"response.output_text.delta\",\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0,\"delta\":\"Hello\"}",
-        ), &mut state)
+        let results = process_event(
+            event(
+                "{\"type\":\"response.output_text.delta\",\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0,\"delta\":\"Hello\"}",
+            ),
+            ConversationEventId::new(),
+            &mut state,
+        )
         .expect("the delta should process");
-        let ProcessEventResult::Outputs(outputs) = results else {
+        let ProcessEventResult::Batches(batches) = results else {
             panic!("the delta should not end the stream");
         };
+        let outputs = batched_outputs(batches);
         assert_eq!(outputs.len(), 1);
         assert!(matches!(
-            &outputs[0],
-            ModelDriverEvent::ModelSpecificEvent {
-                event_type,
-                persistence,
-                message: Some(message),
-                ..
-            } if event_type == "content_delta"
-                && *persistence == ConversationEventPersistence::Unpersisted
-                && message == "Hello"
+            specific(&outputs[0]),
+            Some(event) if event.provider_event_type() == "content_delta"
+                && event.persistence() == ConversationEventPersistence::Unpersisted
+                && event.message() == Some("Hello")
         ));
     }
 
     #[test]
-    fn output_text_done_events_are_ignored_for_durability() {
+    fn intermediate_done_events_are_ignored() {
         let mut state = StreamInterpreterState::default();
         let results = process_event(
             event(
                 "{\"type\":\"response.output_text.done\",\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0,\"text\":\"Hello\"}",
             ),
+            ConversationEventId::new(),
             &mut state,
         )
         .expect("the done event should process");
-        let ProcessEventResult::Outputs(outputs) = results else {
+        let ProcessEventResult::Batches(batches) = results else {
             panic!("the done event should not end the stream");
         };
         assert!(
-            outputs.is_empty(),
+            batches.is_empty(),
             "intermediate done events must not produce durable output"
         );
     }
@@ -946,41 +948,24 @@ mod tests {
             "data: [DONE]\n\n"
         );
 
-        let events = collect_event_stream(input)
-            .await
-            .into_iter()
-            .collect::<Result<Vec<_>, _>>()
-            .expect("the response stream should parse");
-
-        assert_eq!(events.len(), 4, "two deltas, answer, then terminal");
+        let outputs = collect_stream(input).await;
+        assert_eq!(outputs.len(), 4, "two deltas, answer, then terminal");
         for (position, expected_text) in [(0, "Hello "), (1, "world")] {
             assert!(matches!(
-                &events[position],
-                ModelDriverEvent::ModelSpecificEvent {
-                    event_type,
-                    persistence,
-                    message: Some(message),
-                    ..
-                } if event_type == "content_delta"
-                    && *persistence == ConversationEventPersistence::Unpersisted
-                    && message == expected_text
+                specific(&outputs[position]),
+                Some(event) if event.provider_event_type() == "content_delta"
+                    && event.persistence() == ConversationEventPersistence::Unpersisted
+                    && event.message() == Some(expected_text)
             ));
         }
         assert!(matches!(
-            &events[2],
-            ModelDriverEvent::AssistantResponse { content } if content == "Hello world"
+            assistant(&outputs[2]),
+            Some(response) if response.content() == "Hello world"
         ));
-        let ModelDriverEvent::Terminal {
-            outcome,
-            continuation,
-            usage,
-        } = &events[3]
-        else {
-            panic!("the final event should be a terminal");
-        };
-        assert!(matches!(outcome, ModelOutcome::Succeeded));
-        assert_eq!(*continuation, ModelContinuation::Complete);
-        let usage = usage.as_ref().expect("usage should be recorded");
+        let terminal = model_response(&outputs[3]).expect("the final output should be a terminal");
+        assert!(matches!(terminal.outcome(), ModelOutcome::Succeeded));
+        assert_eq!(terminal.continuation(), ModelContinuation::Complete);
+        let usage = terminal.usage().expect("usage should be recorded");
         assert_eq!(usage.input_tokens(), Some(10));
         assert_eq!(usage.output_tokens(), Some(5));
         assert_eq!(usage.total_tokens(), Some(15));
@@ -1000,52 +985,33 @@ mod tests {
             "data: [DONE]\n\n"
         );
 
-        let events = collect_event_stream(input)
-            .await
-            .into_iter()
-            .collect::<Result<Vec<_>, _>>()
-            .expect("the response stream should parse");
-
+        let outputs = collect_stream(input).await;
         assert_eq!(
-            events.len(),
+            outputs.len(),
             4,
             "reasoning replay, answer, tool request, then terminal"
         );
         assert!(matches!(
-            &events[0],
-            ModelDriverEvent::ModelSpecificEvent {
-                event_type,
-                payload,
-                persistence,
-                message,
-            } if event_type == "response_reasoning_item"
-                && *persistence == ConversationEventPersistence::Durable
-                && payload["item_id"] == "rs_1"
-                && payload["encrypted_content"] == "gAAAA-secret"
-                && message.as_deref() == Some("Thinking.")
+            specific(&outputs[0]),
+            Some(event) if event.provider_event_type() == "response_reasoning_item"
+                && event.persistence() == ConversationEventPersistence::Durable
+                && event.payload()["item_id"] == "rs_1"
+                && event.message() == Some("Thinking.")
         ));
         assert!(matches!(
-            &events[1],
-            ModelDriverEvent::AssistantResponse { content } if content == "Answer"
+            assistant(&outputs[1]),
+            Some(response) if response.content() == "Answer"
         ));
         assert!(matches!(
-            &events[2],
-            ModelDriverEvent::ToolRequest {
-                tool_name,
-                arguments,
-                provider_call_id,
-            } if tool_name.as_str() == "shell"
-                && arguments == &json!({ "command": "pwd" })
-                && provider_call_id.as_deref() == Some("call_1")
+            tool_request(&outputs[2]),
+            Some(request) if request.tool_name().as_str() == "shell"
+                && request.arguments() == &json!({ "command": "pwd" })
+                && request.data().and_then(|data| data.content().get("call_id")).and_then(serde_json::Value::as_str)
+                    == Some("call_1")
         ));
-        assert!(matches!(
-            &events[3],
-            ModelDriverEvent::Terminal {
-                outcome: ModelOutcome::Succeeded,
-                continuation: ModelContinuation::Continue,
-                ..
-            }
-        ));
+        let terminal = model_response(&outputs[3]).expect("the final output should be a terminal");
+        assert!(matches!(terminal.outcome(), ModelOutcome::Succeeded));
+        assert_eq!(terminal.continuation(), ModelContinuation::Continue);
     }
 
     #[tokio::test]
@@ -1057,30 +1023,15 @@ mod tests {
             "data: [DONE]\n\n"
         );
 
-        let events = collect_event_stream(input)
-            .await
-            .into_iter()
-            .collect::<Result<Vec<_>, _>>()
-            .expect("the reasoning stream should parse");
-
-        assert_eq!(events.len(), 2, "reasoning replay then terminal");
+        let outputs = collect_stream(input).await;
+        assert_eq!(outputs.len(), 2, "reasoning replay then terminal");
         assert!(matches!(
-            &events[0],
-            ModelDriverEvent::ModelSpecificEvent {
-                event_type,
-                persistence,
-                ..
-            } if event_type == "response_reasoning_item"
-                && *persistence == ConversationEventPersistence::Durable
+            specific(&outputs[0]),
+            Some(event) if event.persistence() == ConversationEventPersistence::Durable
         ));
-        assert!(matches!(
-            &events[1],
-            ModelDriverEvent::Terminal {
-                outcome: ModelOutcome::Succeeded,
-                continuation: ModelContinuation::Continue,
-                ..
-            }
-        ));
+        let terminal = model_response(&outputs[1]).expect("the terminal should be present");
+        assert!(matches!(terminal.outcome(), ModelOutcome::Succeeded));
+        assert_eq!(terminal.continuation(), ModelContinuation::Continue);
     }
 
     #[tokio::test]
@@ -1092,25 +1043,15 @@ mod tests {
             "data: [DONE]\n\n"
         );
 
-        let events = collect_event_stream(input)
-            .await
-            .into_iter()
-            .collect::<Result<Vec<_>, _>>()
-            .expect("the reasoning stream should parse");
-
+        let outputs = collect_stream(input).await;
         assert_eq!(
-            events.len(),
+            outputs.len(),
             1,
             "only the terminal, no replay state to persist"
         );
-        assert!(matches!(
-            &events[0],
-            ModelDriverEvent::Terminal {
-                outcome: ModelOutcome::Succeeded,
-                continuation: ModelContinuation::Continue,
-                ..
-            }
-        ));
+        let terminal = model_response(&outputs[0]).expect("the terminal should be present");
+        assert!(matches!(terminal.outcome(), ModelOutcome::Succeeded));
+        assert_eq!(terminal.continuation(), ModelContinuation::Continue);
     }
 
     #[tokio::test]
@@ -1122,91 +1063,70 @@ mod tests {
             "data: [DONE]\n\n"
         );
 
-        let events = collect_event_stream(input)
-            .await
-            .into_iter()
-            .collect::<Result<Vec<_>, _>>()
-            .expect("the tool call stream should parse");
-
-        assert_eq!(events.len(), 3, "argument delta, request, then terminal");
+        let outputs = collect_stream(input).await;
+        assert_eq!(outputs.len(), 3, "argument delta, request, then terminal");
         assert!(matches!(
-            &events[0],
-            ModelDriverEvent::ModelSpecificEvent {
-                event_type,
-                payload,
-                persistence,
-                message: Some(message),
-            } if event_type == "tool_call_arguments_delta"
-                && payload["call_id"] == "call_1"
-                && *persistence == ConversationEventPersistence::Unpersisted
-                && message == "{\"command\":\"pwd\"}"
+            specific(&outputs[0]),
+            Some(event) if event.provider_event_type() == "tool_call_arguments_delta"
+                && event.payload()["call_id"] == "call_1"
+                && event.persistence() == ConversationEventPersistence::Unpersisted
+                && event.message() == Some("{\"command\":\"pwd\"}")
         ));
         assert!(matches!(
-            &events[1],
-            ModelDriverEvent::ToolRequest {
-                arguments,
-                provider_call_id,
-                ..
-            } if arguments == &json!({ "command": "pwd" })
-                && provider_call_id.as_deref() == Some("call_1")
+            tool_request(&outputs[1]),
+            Some(request) if request.data().and_then(|data| data.content().get("call_id")).and_then(serde_json::Value::as_str)
+                == Some("call_1")
         ));
-        assert!(matches!(
-            &events[2],
-            ModelDriverEvent::Terminal {
-                outcome: ModelOutcome::Succeeded,
-                continuation: ModelContinuation::Continue,
-                ..
-            }
-        ));
+        let terminal = model_response(&outputs[2]).expect("the terminal should be present");
+        assert_eq!(terminal.continuation(), ModelContinuation::Continue);
     }
 
     #[tokio::test]
-    async fn premature_body_end_yields_only_progress_and_an_interruption() {
+    async fn premature_body_end_records_a_failure_without_durable_outputs() {
         let input = "data: {\"type\":\"response.output_text.delta\",\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0,\"delta\":\"Hello\"}\n\n";
-        let mut events = model_event_stream(response_byte_stream(vec![input.as_bytes().to_vec()]));
 
+        let outputs = collect_stream(input).await;
+        assert_eq!(outputs.len(), 2, "the progress event then the failure");
         assert!(matches!(
-            events.next().await,
-            Some(Ok(ModelDriverEvent::ModelSpecificEvent { message: Some(message), .. }))
-                if message == "Hello"
+            specific(&outputs[0]),
+            Some(event) if event.persistence() == ConversationEventPersistence::Unpersisted
         ));
+        let terminal = model_response(&outputs[1]).expect("the failure should be a terminal");
         assert!(matches!(
-            events.next().await,
-            Some(Err(OpenRouterResponsesError::StreamInterrupted(_)))
+            terminal.outcome(),
+            ModelOutcome::Failed { failure } if failure.category() == FailureCategory::StreamInterrupted
         ));
         assert!(
-            events.next().await.is_none(),
-            "no durable output may follow an interrupted stream"
+            !outputs
+                .iter()
+                .any(|output| { assistant(output).is_some() || tool_request(output).is_some() }),
+            "no durable output may be reconstructed from an interrupted stream"
         );
     }
 
     #[tokio::test]
-    async fn a_done_sentinel_before_a_terminal_is_an_invalid_response() {
+    async fn a_done_sentinel_before_a_terminal_is_recorded_as_a_failure() {
         let input = concat!(
             "data: {\"type\":\"response.output_text.delta\",\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0,\"delta\":\"Hello\"}\n\n",
             "data: [DONE]\n\n"
         );
-        let mut events = model_event_stream(response_byte_stream(vec![input.as_bytes().to_vec()]));
 
+        let outputs = collect_stream(input).await;
+        assert_eq!(outputs.len(), 2);
+        let terminal = model_response(&outputs[1]).expect("the failure should be a terminal");
         assert!(matches!(
-            events.next().await,
-            Some(Ok(ModelDriverEvent::ModelSpecificEvent { .. }))
+            terminal.outcome(),
+            ModelOutcome::Failed { failure } if failure.category() == FailureCategory::InvalidProviderResponse
         ));
-        assert!(matches!(
-            events.next().await,
-            Some(Err(OpenRouterResponsesError::InvalidResponse(_)))
-        ));
-        assert!(events.next().await.is_none());
     }
 
     #[tokio::test]
-    async fn malformed_json_is_a_stream_error() {
-        let mut events =
-            model_event_stream(response_byte_stream(vec![b"data: not-json\n\n".to_vec()]));
-
+    async fn malformed_json_is_recorded_as_a_failure() {
+        let outputs = collect_stream("data: not-json\n\n").await;
+        let terminal = model_response(&outputs[0]).expect("the failure should be a terminal");
         assert!(matches!(
-            events.next().await,
-            Some(Err(OpenRouterResponsesError::InvalidResponse(_)))
+            terminal.outcome(),
+            ModelOutcome::Failed { failure } if failure.category() == FailureCategory::InvalidProviderResponse
         ));
     }
 
@@ -1217,24 +1137,16 @@ mod tests {
             "data: [DONE]\n\n"
         );
 
-        let events = collect_event_stream(input)
-            .await
-            .into_iter()
-            .collect::<Result<Vec<_>, _>>()
-            .expect("the provider failure should produce a terminal");
-
+        let outputs = collect_stream(input).await;
         assert_eq!(
-            events.len(),
+            outputs.len(),
             1,
             "a failed response produces no durable outputs"
         );
+        let terminal = model_response(&outputs[0]).expect("the failure should be a terminal");
         assert!(matches!(
-            &events[0],
-            ModelDriverEvent::Terminal {
-                outcome: ModelOutcome::Failed { failure },
-                continuation: ModelContinuation::Complete,
-                ..
-            } if failure.category() == tog::conversation::FailureCategory::ProviderFailure
+            terminal.outcome(),
+            ModelOutcome::Failed { failure } if failure.category() == FailureCategory::ProviderFailure
         ));
     }
 
@@ -1245,18 +1157,11 @@ mod tests {
             "data: [DONE]\n\n"
         );
 
-        let events = collect_event_stream(input)
-            .await
-            .into_iter()
-            .collect::<Result<Vec<_>, _>>()
-            .expect("the context limit error should produce a terminal");
-
+        let outputs = collect_stream(input).await;
+        let terminal = model_response(&outputs[0]).expect("the failure should be a terminal");
         assert!(matches!(
-            &events[0],
-            ModelDriverEvent::Terminal {
-                outcome: ModelOutcome::Failed { failure },
-                ..
-            } if failure.category() == tog::conversation::FailureCategory::ContextLimitExceeded
+            terminal.outcome(),
+            ModelOutcome::Failed { failure } if failure.category() == FailureCategory::ContextLimitExceeded
         ));
     }
 
@@ -1267,21 +1172,14 @@ mod tests {
             "data: [DONE]\n\n"
         );
 
-        let events = collect_event_stream(input)
-            .await
-            .into_iter()
-            .collect::<Result<Vec<_>, _>>()
-            .expect("the incomplete response should parse");
-
-        assert_eq!(events.len(), 1);
+        let outputs = collect_stream(input).await;
+        assert_eq!(outputs.len(), 1);
+        let terminal = model_response(&outputs[0]).expect("the failure should be a terminal");
         assert!(matches!(
-            &events[0],
-            ModelDriverEvent::Terminal {
-                outcome: ModelOutcome::Failed { failure },
-                continuation: ModelContinuation::Complete,
-                ..
-            } if failure.category() == tog::conversation::FailureCategory::ProviderFailure
+            terminal.outcome(),
+            ModelOutcome::Failed { failure } if failure.category() == FailureCategory::ProviderFailure
         ));
+        assert_eq!(terminal.continuation(), ModelContinuation::Complete);
     }
 
     #[test]
@@ -1297,47 +1195,5 @@ mod tests {
             )
             .is_err()
         );
-    }
-
-    #[tokio::test]
-    async fn interrupted_stream_translates_to_a_failed_terminal_without_durable_outputs() {
-        let mut stream = model_output_stream(
-            response_byte_stream(vec![concat!(
-                "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"shell\",\"arguments\":\"\"}}\n\n",
-                "data: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_1\",\"output_index\":0,\"delta\":\"{\\\"command\\\":\\\"pwd\\\"}\"}\n\n"
-            )
-            .as_bytes()
-            .to_vec()]),
-            tog::conversation::ConversationEventId::new(),
-        );
-
-        let outputs = collect_outputs(&mut stream).await;
-        assert_eq!(outputs.len(), 2, "unpersisted progress then the failure");
-        assert!(matches!(
-            &outputs[0],
-            ModelDriverOutput::ModelSpecificEvent(event)
-                if event.persistence() == ConversationEventPersistence::Unpersisted
-        ));
-        assert!(matches!(
-            &outputs[1],
-            ModelDriverOutput::ModelResponse(response)
-                if matches!(response.outcome(), ModelOutcome::Failed { .. })
-        ));
-        assert!(
-            !outputs.iter().any(|output| matches!(
-                output,
-                ModelDriverOutput::ToolRequest(_) | ModelDriverOutput::AssistantResponse(_)
-            )),
-            "no durable output may be reconstructed from an interrupted stream"
-        );
-    }
-
-    async fn collect_outputs(stream: &mut ModelOutputStream) -> Vec<ModelDriverOutput> {
-        let mut outputs = Vec::new();
-        while let Some(batch) = stream.next().await {
-            let batch = batch.expect("the batch should be valid");
-            outputs.extend(batch.into_outputs());
-        }
-        outputs
     }
 }
