@@ -27,7 +27,8 @@ interprets pipes, redirects, variable expansion, and command sequences.
 - Filesystem changes and other external effects remain shared.
 - Omitted `shell_context_id` always means independent execution, including later.
 - Reserve the optional context parameter. Reject supplied IDs in phase 1.
-- Stdin support is proposed below. PTYs remain outside phase 1.
+- Keep stdin closed in phase 1. Stdin support is deferred to phase 3.
+- PTYs remain outside this plan.
 
 Retaining `/bin/sh` is the smallest initial interpreter choice. Confirm that
 choice before implementation; Bash-specific setup requires Bash explicitly.
@@ -119,11 +120,37 @@ Use the Conversation API for tool results. Live UI progress through conversation
 events remains a separate choice. Do not introduce a parallel event bus or label
 shell output as model-specific data.
 
-## Proposed stdin support
+## Phase 2: shell contexts
+
+Keep `environment` for tog. A `shell_context` would hold a live, prepared shell.
+A separate operation could change its directory, variables, functions, and
+options. Ordinary commands would run in real subshells of that context so their
+shell-state changes do not alter it.
+
+Context mutations and command launches need serialization. Running commands keep
+their inherited state. Failed setup may leave partial changes. Replaying setup
+cannot guarantee restoration of arbitrary shell state after the context dies.
+These are phase 2 concerns, not phase 1 implementation requirements.
+
+## Phase 3: stdin support
+
+Add stdin support after shell contexts. This is outside phase 1 and phase 2.
+The following API remains a proposal for review.
 
 Make stdin opt-in when starting execution, for example `stdin: true`.
 Default to closed stdin so commands that consume input can finish without a
 second tool call. When requested, return an optional `stdin_stream_id`.
+
+Proposed additions:
+
+```text
+shell_execute(..., stdin?)
+  -> existing fields
+     stdin_stream_id?
+
+stream_write(stream_id, content, close?)
+  -> write result (delivery and failure semantics to be settled)
+```
 
 Use `stream_write(stream_id, content, close?)` to send input. With `close: true`,
 close the pipe after writing the supplied content so the command observes EOF.
@@ -139,28 +166,15 @@ An open stdin pipe does not provide terminal behavior. Programs requiring a TTY
 may still need separate support. The opt-in flag and write result/timeout contract
 remain proposals for review.
 
-## Later: shell contexts
-
-Keep `environment` for tog. A `shell_context` would hold a live, prepared shell.
-A separate operation could change its directory, variables, functions, and
-options. Ordinary commands would run in real subshells of that context so their
-shell-state changes do not alter it.
-
-Context mutations and command launches need serialization. Running commands keep
-their inherited state. Failed setup may leave partial changes. Replaying setup
-cannot guarantee restoration of arbitrary shell state after the context dies.
-These are phase 2 concerns, not phase 1 implementation requirements.
-
-## Proposed tool contracts
+## Phase 1 tool contracts
 
 Use explicit time and size units in the final schemas. Select defaults so ordinary
 commands require only the command string.
 
 ```text
 shell_execute(commands, shell_context_id?, directory?,
-              wait_time?, timeout?, output_limit?, stdin?)
+              wait_time?, timeout?, output_limit?)
   -> execution_id
-     stdin_stream_id?
      stdout_stream_id
      stderr_stream_id
      output_stream_id
@@ -171,9 +185,6 @@ shell_wait(execution_id, offset, wait_time?, output_limit?)
 
 shell_cancel(execution_id)
   -> cancellation acknowledgement
-
-stream_write(stream_id, content, close?)
-  -> write result (delivery and failure semantics to be settled)
 
 ExecutionState
   output
