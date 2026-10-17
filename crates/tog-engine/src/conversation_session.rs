@@ -449,7 +449,7 @@ mod tests {
     use tog_context::toolset::ExecutableTool;
     use tog_context::toolset::ToolRegistry;
     use tog_store_local::FileEventStore;
-    use tog_tools::ShellTool;
+    use tog_tools::ShellTools;
 
     fn source() -> ModelSource {
         ModelSource::new(
@@ -731,7 +731,7 @@ mod tests {
 
     fn shell_registry() -> ToolRegistry {
         let mut registry = ToolRegistry::default();
-        registry.register(ShellTool::new());
+        ShellTools::register(&mut registry);
         registry
     }
 
@@ -891,14 +891,21 @@ mod tests {
                 _ => None,
             })
             .expect("the tools declaration should be persisted");
-        assert_eq!(tools_event.tools().len(), 1);
+        assert_eq!(tools_event.tools().len(), 4);
         assert!(
             tools_event
                 .tools()
                 .iter()
                 .all(|tool| tool.availability() == ToolAvailability::Immediate)
         );
-        assert_eq!(tools_event.tools()[0].definition().name().as_str(), "shell");
+        assert_eq!(
+            tools_event
+                .tools()
+                .iter()
+                .map(|tool| tool.definition().name().as_str())
+                .collect::<Vec<_>>(),
+            ["shell_execute", "shell_wait", "shell_cancel", "stream_read"]
+        );
     }
 
     #[tokio::test]
@@ -992,7 +999,7 @@ mod tests {
         let directory = temporary_directory();
         let driver = Arc::new(ScriptedDriver::new(vec![
             vec![
-                tool_request("shell", json!({ "command": "printf hello" })),
+                tool_request("shell_execute", json!({ "commands": "printf hello" })),
                 continuing_response(),
             ],
             vec![assistant_response(), completed_response()],
@@ -1020,17 +1027,22 @@ mod tests {
             .lock()
             .expect("the invocation list should lock");
         assert_eq!(invocations.len(), 2);
-        assert_eq!(invocations[1].available_tools, ["shell"]);
+        assert_eq!(
+            invocations[1].available_tools,
+            ["shell_execute", "shell_wait", "shell_cancel", "stream_read"]
+        );
         assert!(invocations[1].tool_responses.iter().any(|outcome| matches!(
             outcome,
-            ToolOutcome::Succeeded { value } if value["stdout"] == "hello" && value["exit_status"]["code"] == 0
+            ToolOutcome::Succeeded { value } if value["state"]["output"] == "hello"
+                && value["state"]["status"] == "complete"
+                && value["state"]["exit_status"]["code"] == 0
         )));
         drop(invocations);
         let events = loaded_events(&directory, conversation_id);
         assert!(events.iter().any(|event| matches!(
             event.event().payload(),
             ConversationEventPayload::ToolResponse(response)
-                if matches!(response.outcome(), ToolOutcome::Succeeded { value } if value["stdout"] == "hello")
+                if matches!(response.outcome(), ToolOutcome::Succeeded { value } if value["state"]["output"] == "hello")
         )));
     }
 

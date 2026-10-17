@@ -1,8 +1,8 @@
 # Tools
 
 This document describes the first end-to-end tool-calling slice: a portable
-tool contract owned by the conversation, a caller-owned execution loop, and one
-concrete shell tool.
+tool contract owned by the conversation, a caller-owned execution loop, and the
+concrete shell tools.
 
 ## Ownership
 
@@ -67,57 +67,99 @@ driver event batch is committed atomically; tool execution and result appends
 remain sequential and outside that transaction, so re-executing shell commands
 after a crash is not crash-safe.
 
-## Shell tool
+## Shell tools
 
-The `shell` tool runs `/bin/sh -c COMMAND`. Parameters:
+Phase 1 of the [shell-tools plan](plans/shell-tools.md) replaces the former
+`shell` tool with four tools: `shell_execute`, `shell_wait`, `shell_cancel`,
+and `stream_read`. They provide independent command execution, bounded inline
+output, and readable output streams.
 
-| Parameter | Required | Default |
-| --- | --- | --- |
-| `command` | yes | none; blank commands are invalid arguments |
-| `working_directory` | no | the directory of the `tog` process |
-| `timeout_seconds` | no | `30` |
+Each execution starts a fresh `/bin/sh -c COMMAND` with tog's inherited
+environment and current working directory. A `directory` parameter overrides
+the working directory for one call. Stdin is closed. Setup commands and
+exported variables affect only that execution. Supplied `shell_context_id`
+values are rejected; shell contexts are planned, not implemented.
 
-A successful shell result contains `stdout`, `stderr`, `exit_status`,
-`stdout_truncated`, and `stderr_truncated`. `exit_status` is either
-`{ "type": "exited", "code": N }` or `{ "type": "signaled", "signal": N }`. A
-normal nonzero exit status is a valid result; signal termination is represented
-explicitly rather than as an invented exit code.
+### Execution state
 
-Output is captured incrementally so the child cannot deadlock on full pipes,
-and each stream retains at most 64 KiB. Truncation is reported through the
-explicit boolean flags; output is never silently truncated.
+`shell_execute(commands, directory?, wait_time_seconds?, timeout_seconds?,
+output_limit_bytes?, shell_context_id?)` starts the command and waits up to
+`wait_time_seconds` (default 30 seconds) for it to finish. The result contains:
 
-A timeout is an execution problem, not a shell result. On timeout the tool
-terminates the child's process group, reaps the child, and returns a problem of
-kind `timed_out` whose details include the timeout duration, the partial
-`stdout` and `stderr` captured so far, and their truncation flags. The result
-schema does not contain a timeout field.
+- `execution_id`
+- `stdout_stream_id`, `stderr_stream_id`, and `output_stream_id`
+- `state`, the combined-stream execution state
 
-An execution problem records a portable `kind`, a `message`, and optional
-tool-specific `details`:
+The execution state distinguishes a completed process from its captured
+output:
 
-- kind `invalid_arguments` for missing, mistyped, or blank parameters
-- kind `unknown_tool` when no registered implementation matches the requested
-  name
-- kind `timed_out` when the tool exceeded its allowed duration
-- kind `execution_failed` when the tool process could not be started or
-  completed
+- `status`: `running` or `complete`
+- `output` and `next_offset`: the returned bytes of the combined stream, in
+  byte offsets
+- `output_eof`: true only when the combined stream is closed and the returned
+  read reaches its end
+- `exit_status`: `{ "type": "exited", "code": N }` or
+  `{ "type": "signaled", "signal": N }` for a naturally ended process
+- `error`: `{ "kind": "timed_out" | "cancelled" | "capture_failed",
+  "message": "..." }`
 
-The kind and message carry the portable meaning; understanding the failure never
-requires interpreting details. Details are optional diagnostics, so another
-tool can report a timeout with different details or none at all. The shell tool
-defines its own timeout details locally rather than requiring them from the
-shared `timed_out` category.
+A nonzero exit code is a normal result. Signal termination is explicit. When
+tog ends an execution for timeout or cancellation, `exit_status` is omitted and
+`error` carries the reason. A capture failure reports `capture_failed`.
 
-Strings are an explicitly accepted limitation of this first implementation.
-There are no file handles, artifact storage, or output-reference abstractions.
-There are no approval prompts, sandbox policy, allowlists, or automatic
-retries.
+`shell_wait(execution_id, offset, wait_time_seconds?, output_limit_bytes?)`
+returns the execution state from the given byte offset. It returns when output
+beyond the offset is available, when the execution completes, or when the wait
+time elapses.
+
+`shell_cancel(execution_id)` terminates the execution's process group and
+returns `{ "cancelled": true }`. It is safe to repeat. A later `shell_wait`
+reports the cancelled final state.
+
+Tool-call failures remain `OperationFailure` problems. Launch failure is kind
+`execution_failed`; a timeout or cancellation applies to the execution and is
+reported in the state, not as a tool-call problem.
+
+### Streams
+
+`stream_read(stream_id, offset?, limit_bytes?, timeout_seconds?)` reads a
+stream by byte offset and returns `content`, `next_offset`, and `eof`.
+`content` is the UTF-8 lossy decoding of the requested byte range; a read may
+split a multibyte character. A read returns available data immediately and may
+wait up to `timeout_seconds` (default 30 seconds) at the live end of an open
+stream.
+
+Each execution exposes stdout, stderr, and a combined stream. The combined
+stream holds bytes in the order tog observes them. It cannot promise exact
+write order across the child's separate pipes.
+
+Captured bytes are retained in memory and spill to a temporary file when a
+stream passes its 64 KiB in-memory threshold, through
+[`tempfile::SpooledTempFile`](https://docs.rs/tempfile). Stream identifiers and
+byte offsets remain valid across the spill. Inline responses are bounded by
+`output_limit_bytes` but never discard retained output; the model reads the
+remainder with `stream_read`. Phase 1 has no total capture limit.
+
+### Lifecycle
+
+Executions and streams live for the life of the tog process. A completed
+execution stays identifiable and its retained output stays readable. A new
+process cannot reference an execution or stream from an earlier process;
+unknown identifiers are invalid-argument errors. Dropping the shell tool state
+terminates any still-running executions.
+
+Spill files are anonymous temporary files removed when their stream is
+released. No temporary path or stream identifier is a durable content
+reference. Phase 1 does not promote completed output to assets. There are no
+approval prompts, sandbox policies, allowlists, or automatic retries.
 
 ## Dependencies
 
 - `schemars` derives JSON Schema from Rust types, as described above.
 - `nix` provides safe process-group signalling. The standard library has no
   safe process-group kill, and `tog` forbids unsafe code.
-- `tokio` gains the `process`, `time`, and `io-util` features for asynchronous
-  child execution, bounded draining, and timeouts.
+- `tempfile` provides `SpooledTempFile` memory-to-disk rollover. The standard
+  library has no spooling type, and the crate handles private temporary-file
+  creation and removal.
+- `tokio` gains the `process`, `time`, `sync`, and `io-util` features for
+  asynchronous child execution, stream capture, and output waiting.

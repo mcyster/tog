@@ -104,21 +104,25 @@ description under the conversation header:
 cargo run -- :log --readable
 # conversation cnv_aaaa
 ## user test 123
-## tool_request shell {"command":"echo \"test 123\""}
-## tool_response {"type":"exited","code":0,"stdout":"test 123\n","stdout_truncated":false}
+## tool_request shell_execute {"commands":"echo \"test 123\""}
+## tool_response {"execution_id":"exec_1","stdout_stream_id":"stream_1","stderr_stream_id":"stream_2","output_stream_id":"stream_3","state":{"output":"test 123\n","next_offset":9,"output_eof":true,"status":"complete","exit_status":{"type":"exited","code":0}}}
 ## assistant_response test 123
 ```
 
 ## Tools
 
-A turn may request tools. The current build registers one `shell` tool that
-runs a command through `/bin/sh -c` without an approval prompt, in the current
-directory unless `working_directory` is given, with a 30-second timeout unless
-`timeout_seconds` is given. Standard output and standard error are captured up
-to 64 KiB each with explicit truncation flags. Nonzero exits are results;
-timeouts, unknown tools, invalid arguments, and launch failures are returned to
-the model as typed execution problems. Tool definitions, requests, and
-responses are recorded in the conversation log. See [Tools](docs/tools.md).
+A turn may request tools. The current build registers `shell_execute`,
+`shell_wait`, `shell_cancel`, and `stream_read`. A command runs through
+`/bin/sh -c` without an approval prompt, in the current directory unless a
+`directory` is given. `shell_execute` waits up to 30 seconds and returns a
+bounded slice of the combined output; a longer command returns a running
+execution that a model can wait on and cancel. Capture stays in memory until a
+stream passes 64 KiB, then spills to a temporary file, and `stream_read` reads
+any stream by byte offset. Nonzero exits, signals, timeouts, and cancellation
+are reported in the execution state; invalid arguments, unknown identifiers,
+and launch failures are returned as typed tool-call problems. Tool definitions,
+requests, and responses are recorded in the conversation log. See
+[Tools](docs/tools.md).
 
 ## Build
 
