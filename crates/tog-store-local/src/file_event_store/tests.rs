@@ -297,8 +297,8 @@ fn corruption_inside_committed_history_is_rejected() {
 #[test]
 fn event_store_round_trips_tool_definitions_requests_and_responses() {
     use crate::conversation::{
-        ModelId, ModelOutcome, ModelRequest, ModelResponse, ModelSource, ProviderId, TurnEnd,
-        TurnOutcome, TurnStart,
+        ModelContinuation, ModelId, ModelOutcome, ModelRequest, ModelResponse, ModelSource,
+        ProviderId, TurnEnd, TurnOutcome, TurnStart,
     };
     use std::str::FromStr;
     let store = temporary_store();
@@ -381,6 +381,7 @@ fn event_store_round_trips_tool_definitions_requests_and_responses() {
                             model_request_id,
                             vec![tool_request_id],
                             ModelOutcome::Succeeded,
+                            ModelContinuation::Complete,
                             None,
                         )
                         .expect("the model response should be valid"),

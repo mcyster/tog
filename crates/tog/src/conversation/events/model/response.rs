@@ -10,6 +10,7 @@ pub struct ModelResponse {
     model_request_id: ConversationEventId,
     output_event_ids: Vec<ConversationEventId>,
     outcome: ModelOutcome,
+    continuation: ModelContinuation,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     usage: Option<Usage>,
 }
@@ -19,12 +20,14 @@ impl ModelResponse {
         model_request_id: ConversationEventId,
         output_event_ids: Vec<ConversationEventId>,
         outcome: ModelOutcome,
+        continuation: ModelContinuation,
         usage: Option<Usage>,
     ) -> Result<Self, InvalidModelResponse> {
         let response = Self {
             model_request_id,
             output_event_ids,
             outcome,
+            continuation,
             usage,
         };
         response.ensure_valid()?;
@@ -43,6 +46,10 @@ impl ModelResponse {
         &self.outcome
     }
 
+    pub fn continuation(&self) -> ModelContinuation {
+        self.continuation
+    }
+
     pub fn usage(&self) -> Option<&Usage> {
         self.usage.as_ref()
     }
@@ -50,9 +57,22 @@ impl ModelResponse {
     pub fn describe(&self) -> String {
         match &self.outcome {
             ModelOutcome::Succeeded => {
-                format!("succeeded with {} outputs", self.output_event_ids.len())
+                let continuation = match self.continuation {
+                    ModelContinuation::Complete => "complete",
+                    ModelContinuation::Continue => "continue",
+                };
+                format!(
+                    "succeeded {continuation} with {} outputs",
+                    self.output_event_ids.len()
+                )
             }
-            ModelOutcome::Failed { failure } => format!("failed: {}", failure.message()),
+            ModelOutcome::Failed { failure } => {
+                let continuation = match self.continuation {
+                    ModelContinuation::Complete => "complete",
+                    ModelContinuation::Continue => "continue",
+                };
+                format!("failed {continuation}: {}", failure.message())
+            }
         }
     }
 
@@ -64,6 +84,13 @@ impl ModelResponse {
         }
         Ok(())
     }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ModelContinuation {
+    Complete,
+    Continue,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]

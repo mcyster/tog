@@ -26,14 +26,32 @@ text automatically becomes model input.
 ## Calls and turns
 
 A model response closes one attempt. The session records its ordered output
-references and observed outcome. Assistant text can accompany tool requests or
-be absent from a successful call; it cannot by itself decide completion.
+references, its observed outcome, and the driver's continuation decision.
 
-The current session waits for the model stream, then executes requested tools
-sequentially after a successful call and records their results before continuing.
-It bounds continuation rounds. A failed model response ends the turn as failed;
-a successful response with no remaining tool requests completes it successfully.
-Normal stream exhaustion without a terminal response is recorded as failure.
+Every terminal response records a continuation:
+
+- `complete`: the turn should end.
+- `continue`: execute the requested tools, then invoke the model again.
+
+The driver derives the decision from provider semantics. A failed attempt may
+also request continuation. Assistant text can accompany tool requests. It can
+also be absent from a successful call. Neither text nor the absence of tool
+requests decides completion.
+
+The session follows the recorded continuation:
+
+- `continue`: the session executes the requested tools sequentially. It records
+  their results. It invokes the model again. It bounds continuation rounds.
+- `complete`: the session ends the turn. A successful response ends it as
+  `succeeded`. A failed response ends it as `failed`. Assistant text is not
+  required.
+
+A `complete` response can leave requested tools unexecuted. The session
+preserves the response. It answers each unexecuted tool request with a durable
+failure. Then it ends the turn.
+
+The session records normal stream exhaustion without a terminal response as
+failure.
 
 This does not promise complete recovery from every interruption. Invocation or
 stream errors can escape before a terminal event is written. Automatic retries,

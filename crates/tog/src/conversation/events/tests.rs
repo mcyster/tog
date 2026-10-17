@@ -4,9 +4,9 @@ use serde_json::json;
 
 use super::{
     AssistantResponse, Automation, Context, ConversationEventId, FailureCategory,
-    InvalidModelSpecificEvent, InvalidUser, ModelData, ModelId, ModelOutcome, ModelRequest,
-    ModelResponse, ModelSource, ModelSpecificEvent, OperationFailure, ProviderId, Tool,
-    ToolAvailability, ToolOutcome, ToolRequest, ToolResponse, Tools, TurnEnd, TurnOutcome,
+    InvalidModelSpecificEvent, InvalidUser, ModelContinuation, ModelData, ModelId, ModelOutcome,
+    ModelRequest, ModelResponse, ModelSource, ModelSpecificEvent, OperationFailure, ProviderId,
+    Tool, ToolAvailability, ToolOutcome, ToolRequest, ToolResponse, Tools, TurnEnd, TurnOutcome,
     TurnStart, User, UserContent,
 };
 use crate::conversation::{ConversationEvent, ConversationEventPayload, ConversationId};
@@ -119,8 +119,14 @@ fn every_event_kind_keeps_its_stable_discriminator() {
         ),
         (
             ConversationEventPayload::ModelResponse(
-                ModelResponse::new(id, Vec::new(), ModelOutcome::Succeeded, None)
-                    .expect("the model response should be valid"),
+                ModelResponse::new(
+                    id,
+                    Vec::new(),
+                    ModelOutcome::Succeeded,
+                    ModelContinuation::Complete,
+                    None,
+                )
+                .expect("the model response should be valid"),
             ),
             "model_response",
         ),
@@ -430,10 +436,16 @@ fn event_payloads_describe_themselves_concisely() {
         ),
         (
             ConversationEventPayload::ModelResponse(
-                ModelResponse::new(id, Vec::new(), ModelOutcome::Succeeded, None)
-                    .expect("the model response should be valid"),
+                ModelResponse::new(
+                    id,
+                    Vec::new(),
+                    ModelOutcome::Succeeded,
+                    ModelContinuation::Complete,
+                    None,
+                )
+                .expect("the model response should be valid"),
             ),
-            "model_response succeeded with 0 outputs",
+            "model_response succeeded complete with 0 outputs",
         ),
         (
             ConversationEventPayload::ModelSpecificEvent(
@@ -506,6 +518,7 @@ fn failed_event_payloads_describe_their_failure() {
                     ModelOutcome::Failed {
                         failure: failure.clone(),
                     },
+                    ModelContinuation::Complete,
                     None,
                 )
                 .expect("the model response should be valid"),
@@ -525,11 +538,106 @@ fn failed_event_payloads_describe_their_failure() {
     ];
 
     for (kind, description) in cases {
-        assert_eq!(
-            description,
+        let expected = if kind == "model_response" {
+            "model_response failed complete: the shell command timed out".to_owned()
+        } else {
             format!("{kind} failed: the shell command timed out")
-        );
+        };
+        assert_eq!(description, expected);
     }
+}
+
+#[test]
+fn a_model_response_round_trips_its_outcome_and_continuation_every_time() {
+    let id = ConversationEventId::new();
+    let completed = ModelResponse::new(
+        id,
+        Vec::new(),
+        ModelOutcome::Succeeded,
+        ModelContinuation::Complete,
+        None,
+    )
+    .expect("the completed response should be valid");
+    let continuing = ModelResponse::new(
+        id,
+        Vec::new(),
+        ModelOutcome::Succeeded,
+        ModelContinuation::Continue,
+        None,
+    )
+    .expect("the continuing response should be valid");
+    let failed = ModelResponse::new(
+        id,
+        Vec::new(),
+        ModelOutcome::Failed {
+            failure: OperationFailure::try_new(
+                FailureCategory::ProviderFailure,
+                "the model failed".to_owned(),
+                None,
+            )
+            .expect("the failure should be valid"),
+        },
+        ModelContinuation::Complete,
+        None,
+    )
+    .expect("the failed response should be valid");
+
+    let completed_value = serde_json::to_value(&completed).expect("the response should serialize");
+    assert_eq!(completed_value["continuation"]["type"], "complete");
+    let restored: ModelResponse =
+        serde_json::from_value(completed_value).expect("the completed response should deserialize");
+    assert_eq!(restored, completed);
+    assert_eq!(restored.continuation(), ModelContinuation::Complete);
+
+    let continuing_value =
+        serde_json::to_value(&continuing).expect("the response should serialize");
+    assert_eq!(continuing_value["continuation"]["type"], "continue");
+    let restored: ModelResponse = serde_json::from_value(continuing_value)
+        .expect("the continuing response should deserialize");
+    assert_eq!(restored.continuation(), ModelContinuation::Continue);
+
+    let failed_value = serde_json::to_value(&failed).expect("the response should serialize");
+    assert_eq!(
+        failed_value["continuation"]["type"], "complete",
+        "a failed response still records its continuation"
+    );
+    let restored: ModelResponse =
+        serde_json::from_value(failed_value).expect("the failed response should deserialize");
+    assert_eq!(restored, failed);
+    assert_eq!(restored.continuation(), ModelContinuation::Complete);
+
+    assert_eq!(completed.describe(), "succeeded complete with 0 outputs");
+    assert_eq!(continuing.describe(), "succeeded continue with 0 outputs");
+    assert_eq!(failed.describe(), "failed complete: the model failed");
+}
+
+#[test]
+fn a_failed_model_response_may_also_request_continuation() {
+    let id = ConversationEventId::new();
+    let failed_continuing = ModelResponse::new(
+        id,
+        Vec::new(),
+        ModelOutcome::Failed {
+            failure: OperationFailure::try_new(
+                FailureCategory::RateLimited,
+                "the model rate-limited the attempt".to_owned(),
+                None,
+            )
+            .expect("the failure should be valid"),
+        },
+        ModelContinuation::Continue,
+        None,
+    )
+    .expect("a failed response may request continuation");
+
+    assert_eq!(
+        failed_continuing.continuation(),
+        ModelContinuation::Continue
+    );
+    assert_eq!(
+        failed_continuing.describe(),
+        "failed continue: the model rate-limited the attempt"
+    );
 }
 
 #[test]

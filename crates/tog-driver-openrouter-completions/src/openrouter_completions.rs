@@ -13,8 +13,8 @@ use serde_json::{Map, Value, json};
 use tog::conversation::{
     AssistantResponse, ConversationEventId, ConversationEventPayload, FailureCategory,
     InvalidAssistantResponse, InvalidModelResponse, InvalidModelSpecificEvent, InvalidToolRequest,
-    ModelData, ModelId, ModelOutcome, ModelResponse, ModelSource, ModelSpecificEvent,
-    OperationFailure, ProviderId, ToolRequest, Usage, UserContent,
+    ModelContinuation, ModelData, ModelId, ModelOutcome, ModelResponse, ModelSource,
+    ModelSpecificEvent, OperationFailure, ProviderId, ToolRequest, Usage, UserContent,
 };
 use tog::conversation::{ToolAvailability, ToolName};
 use tog::conversation_event_store::ConversationEventRecord;
@@ -79,17 +79,9 @@ enum ModelDriverEvent {
         provider_call_id: Option<String>,
     },
     Terminal {
-        outcome: TerminalModelOutcome,
+        outcome: ModelOutcome,
+        continuation: ModelContinuation,
         usage: Option<Usage>,
-    },
-}
-
-#[derive(Clone)]
-enum TerminalModelOutcome {
-    Succeeded,
-    Failed {
-        category: FailureCategory,
-        message: String,
     },
 }
 
@@ -401,10 +393,11 @@ fn context_limit_stream(model_request_id: ConversationEventId) -> ModelOutputStr
     terminal_model_output(
         stream::once(async move {
             Ok(ModelDriverEvent::Terminal {
-                outcome: TerminalModelOutcome::Failed {
-                    category: FailureCategory::ContextLimitExceeded,
-                    message: "The model context limit was exceeded.".to_owned(),
-                },
+                outcome: failed_outcome(
+                    FailureCategory::ContextLimitExceeded,
+                    "The model context limit was exceeded.",
+                ),
+                continuation: ModelContinuation::Complete,
                 usage: None,
             })
         })
@@ -428,13 +421,21 @@ fn failed_terminal_stream(
     terminal_model_output(
         stream::once(async move {
             Ok(ModelDriverEvent::Terminal {
-                outcome: TerminalModelOutcome::Failed { category, message },
+                outcome: failed_outcome(category, &message),
+                continuation: ModelContinuation::Complete,
                 usage: None,
             })
         })
         .boxed(),
         model_request_id,
     )
+}
+
+fn failed_outcome(category: FailureCategory, message: &str) -> ModelOutcome {
+    ModelOutcome::Failed {
+        failure: OperationFailure::try_new(category, message.to_owned(), None)
+            .expect("the terminal failure should be valid"),
+    }
 }
 
 fn provider_failure(
@@ -543,11 +544,10 @@ fn terminal_model_output(
 
 fn fail_stream(state: &mut ConversationEventStreamState, error: OpenRouterCompletionsError) {
     let (category, message) = provider_failure(&error, FailureStage::DuringStream);
-    let outcome = TerminalModelOutcome::Failed { category, message };
-    let response = ModelResponse::new(
+    let response = terminal_model_response(
         state.model_request_id,
-        Vec::new(),
-        terminal_model_outcome(outcome),
+        failed_outcome(category, &message),
+        ModelContinuation::Complete,
         None,
     )
     .expect("the failed terminal model response should be valid");
@@ -557,14 +557,13 @@ fn fail_stream(state: &mut ConversationEventStreamState, error: OpenRouterComple
     state.terminated = true;
 }
 
-fn terminal_model_outcome(outcome: TerminalModelOutcome) -> ModelOutcome {
-    match outcome {
-        TerminalModelOutcome::Succeeded => ModelOutcome::Succeeded,
-        TerminalModelOutcome::Failed { category, message } => ModelOutcome::Failed {
-            failure: OperationFailure::try_new(category, message, None)
-                .expect("the terminal failure should be valid"),
-        },
-    }
+fn terminal_model_response(
+    model_request_id: ConversationEventId,
+    outcome: ModelOutcome,
+    continuation: ModelContinuation,
+    usage: Option<Usage>,
+) -> Result<ModelResponse, InvalidModelResponse> {
+    ModelResponse::new(model_request_id, Vec::new(), outcome, continuation, usage)
 }
 
 fn translate_model_driver_event(
@@ -610,14 +609,13 @@ fn translate_model_driver_event(
                     .map_err(invalid_tool_request)?,
             )
         }
-        ModelDriverEvent::Terminal { outcome, usage } => {
-            let response = ModelResponse::new(
-                model_request_id,
-                Vec::new(),
-                terminal_model_outcome(outcome),
-                usage,
-            )
-            .map_err(invalid_model_response)?;
+        ModelDriverEvent::Terminal {
+            outcome,
+            continuation,
+            usage,
+        } => {
+            let response = terminal_model_response(model_request_id, outcome, continuation, usage)
+                .map_err(invalid_model_response)?;
             state.pending_batches = VecDeque::from([ModelDriverOutputBatch::from(
                 ModelDriverOutput::ModelResponse(response),
             )]);
@@ -730,7 +728,7 @@ struct OpenRouterStreamState {
     tool_calls: Vec<AccumulatedToolCall>,
     usage: Option<Usage>,
     finish_reason: Option<String>,
-    pending_terminal: Option<TerminalModelOutcome>,
+    pending_terminal: Option<(ModelOutcome, ModelContinuation)>,
     model_outputs: VecDeque<ModelDriverEvent>,
     stream_end: Option<ResponseEnd>,
     terminated: bool,
@@ -781,9 +779,10 @@ fn model_output_stream(response_bytes: ResponseByteStream) -> ProviderOutputStre
                 continue;
             }
             if let Some(stream_end) = state.stream_end {
-                if let Some(outcome) = state.pending_terminal.take() {
+                if let Some((outcome, continuation)) = state.pending_terminal.take() {
                     state.model_outputs.push_back(ModelDriverEvent::Terminal {
                         outcome,
+                        continuation,
                         usage: state.usage.take(),
                     });
                     state.terminated = true;
@@ -1012,12 +1011,13 @@ fn finalize_response(
     finish_reason: &str,
 ) -> Result<Vec<ModelDriverEvent>, OpenRouterCompletionsError> {
     let mut model_events = Vec::new();
-    match finish_reason {
+    let continuation = match finish_reason {
         "stop" => {
             let content = std::mem::take(&mut state.assistant_outputs);
             if !content.trim().is_empty() {
                 model_events.push(ModelDriverEvent::AssistantResponse { content });
             }
+            ModelContinuation::Complete
         }
         "tool_calls" => {
             let content = std::mem::take(&mut state.assistant_outputs);
@@ -1045,19 +1045,26 @@ fn finalize_response(
                     provider_call_id: tool_call.call_id,
                 });
             }
+            ModelContinuation::Continue
         }
         "length" => {
-            state.pending_terminal = Some(TerminalModelOutcome::Failed {
-                category: FailureCategory::ProviderFailure,
-                message: "The model response was cut off before completing.".to_owned(),
-            });
+            state.pending_terminal = Some((
+                failed_outcome(
+                    FailureCategory::ProviderFailure,
+                    "The model response was cut off before completing.",
+                ),
+                ModelContinuation::Complete,
+            ));
             return Ok(model_events);
         }
         "content_filter" => {
-            state.pending_terminal = Some(TerminalModelOutcome::Failed {
-                category: FailureCategory::Refusal,
-                message: "The model response was filtered by the provider.".to_owned(),
-            });
+            state.pending_terminal = Some((
+                failed_outcome(
+                    FailureCategory::Refusal,
+                    "The model response was filtered by the provider.",
+                ),
+                ModelContinuation::Complete,
+            ));
             return Ok(model_events);
         }
         other => {
@@ -1065,7 +1072,7 @@ fn finalize_response(
                 "OpenRouter stream finished with the unsupported finish_reason {other}"
             )));
         }
-    }
+    };
 
     let has_model_output = model_events.iter().any(|event| {
         matches!(
@@ -1078,7 +1085,7 @@ fn finalize_response(
             "the completed OpenRouter response contained no model message".to_owned(),
         ));
     }
-    state.pending_terminal = Some(TerminalModelOutcome::Succeeded);
+    state.pending_terminal = Some((ModelOutcome::Succeeded, continuation));
     Ok(model_events)
 }
 
@@ -1106,9 +1113,9 @@ mod tests {
 
     use tog::conversation::{
         AssistantResponse, Conversation, ConversationEvent, ConversationEventId,
-        ConversationEventPayload, ConversationHistory, ConversationId, FailureCategory, ModelData,
-        ModelId, ModelOutcome, ModelRequest, ModelSource, ProviderId, ToolOutcome, ToolRequest,
-        ToolResponse, TurnStart, User, UserContent,
+        ConversationEventPayload, ConversationHistory, ConversationId, FailureCategory,
+        ModelContinuation, ModelData, ModelId, ModelOutcome, ModelRequest, ModelSource, ProviderId,
+        ToolOutcome, ToolRequest, ToolResponse, TurnStart, User, UserContent,
     };
     use tog::conversation::{ToolDefinition, ToolName};
     use tog::conversation_event_store::ConversationEventRecord;
@@ -1116,8 +1123,8 @@ mod tests {
 
     use super::{
         ModelDriverEvent, OpenRouterCompletionsError, OpenRouterCompletionsModelDriver,
-        ResponseByteStream, TerminalModelOutcome, chat_messages, classify_response_failure,
-        model_output_stream, provider_tool,
+        ResponseByteStream, chat_messages, classify_response_failure, model_output_stream,
+        provider_tool,
     };
 
     fn conversation_event(
@@ -1502,7 +1509,8 @@ mod tests {
         assert!(matches!(
             &events[3],
             ModelDriverEvent::Terminal {
-                outcome: TerminalModelOutcome::Succeeded,
+                outcome: ModelOutcome::Succeeded,
+                continuation: ModelContinuation::Complete,
                 usage: Some(_),
             }
         ));
@@ -1537,7 +1545,8 @@ mod tests {
         assert!(matches!(
             &events[2],
             ModelDriverEvent::Terminal {
-                outcome: TerminalModelOutcome::Succeeded,
+                outcome: ModelOutcome::Succeeded,
+                continuation: ModelContinuation::Complete,
                 ..
             }
         ));
@@ -1574,7 +1583,8 @@ mod tests {
         assert!(matches!(
             &events[2],
             ModelDriverEvent::Terminal {
-                outcome: TerminalModelOutcome::Succeeded,
+                outcome: ModelOutcome::Succeeded,
+                continuation: ModelContinuation::Continue,
                 ..
             }
         ));
@@ -1623,7 +1633,8 @@ mod tests {
         assert!(matches!(
             &events[4],
             ModelDriverEvent::Terminal {
-                outcome: TerminalModelOutcome::Succeeded,
+                outcome: ModelOutcome::Succeeded,
+                continuation: ModelContinuation::Complete,
                 ..
             }
         ));
@@ -1651,7 +1662,8 @@ mod tests {
         assert!(matches!(
             terminal,
             ModelDriverEvent::Terminal {
-                outcome: TerminalModelOutcome::Succeeded,
+                outcome: ModelOutcome::Succeeded,
+                continuation: ModelContinuation::Complete,
                 usage: Some(_),
             }
         ));
@@ -1701,7 +1713,8 @@ mod tests {
         assert!(matches!(
             &events[2],
             ModelDriverEvent::Terminal {
-                outcome: TerminalModelOutcome::Succeeded,
+                outcome: ModelOutcome::Succeeded,
+                continuation: ModelContinuation::Continue,
                 ..
             }
         ));
@@ -1769,7 +1782,8 @@ mod tests {
         assert!(matches!(
             &events[4],
             ModelDriverEvent::Terminal {
-                outcome: TerminalModelOutcome::Succeeded,
+                outcome: ModelOutcome::Succeeded,
+                continuation: ModelContinuation::Continue,
                 ..
             }
         ));
@@ -2025,12 +2039,10 @@ mod tests {
         assert!(matches!(
             &events[1],
             ModelDriverEvent::Terminal {
-                outcome: TerminalModelOutcome::Failed {
-                    category: FailureCategory::ProviderFailure,
-                    ..
-                },
+                outcome: ModelOutcome::Failed { failure },
+                continuation: ModelContinuation::Complete,
                 ..
-            }
+            } if failure.category() == FailureCategory::ProviderFailure
         ));
     }
 
@@ -2050,12 +2062,10 @@ mod tests {
         assert!(matches!(
             &events[0],
             ModelDriverEvent::Terminal {
-                outcome: TerminalModelOutcome::Failed {
-                    category: FailureCategory::Refusal,
-                    ..
-                },
+                outcome: ModelOutcome::Failed { failure },
+                continuation: ModelContinuation::Complete,
                 ..
-            }
+            } if failure.category() == FailureCategory::Refusal
         ));
     }
 

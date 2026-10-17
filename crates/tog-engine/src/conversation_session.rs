@@ -6,9 +6,9 @@ use futures_util::StreamExt;
 
 use tog::conversation::{
     Conversation, ConversationEvent, ConversationEventId, ConversationEventPayload,
-    ConversationHistory, ConversationId, FailureCategory, ModelOutcome, ModelRequest,
-    ModelResponse, OperationFailure, ToolResponse, TurnEnd, TurnOutcome, TurnStart, User,
-    UserContent, latest_tools,
+    ConversationHistory, ConversationId, FailureCategory, ModelContinuation, ModelOutcome,
+    ModelRequest, ModelResponse, OperationFailure, ToolOutcome, ToolResponse, TurnEnd, TurnOutcome,
+    TurnStart, User, UserContent, latest_tools,
 };
 use tog::conversation_event_store::ConversationEventStore;
 use tog::model_driver::{ModelDriver, ModelDriverError, ModelDriverOutput, TurnInput};
@@ -16,7 +16,7 @@ use tog_context::toolset::{ToolRegistry, Toolset};
 
 pub type ConversationSessionResult<T> = Result<T, Box<dyn Error>>;
 
-pub const MAXIMUM_TOOL_CONTINUATION_ROUNDS: u32 = 8;
+pub const MAXIMUM_CONTINUATION_ROUNDS: u32 = 8;
 
 pub enum ConversationSessionProgress {
     InvocationStarted { model: String },
@@ -94,7 +94,7 @@ impl<Store: ConversationEventStore> ConversationSession<Store> {
         let turn_id = turn_records[0].event().id();
 
         let mut depends_on = Vec::new();
-        let mut completed_tool_rounds = 0_u32;
+        let mut continuation_rounds = 0_u32;
 
         loop {
             let desired_tools = Toolset::immediate(self.tool_registry.definitions()).into_tools();
@@ -162,6 +162,7 @@ impl<Store: ConversationEventStore> ConversationSession<Store> {
                         model_request_id,
                         std::mem::take(&mut outputs_for_request),
                         driver_response.outcome().clone(),
+                        driver_response.continuation(),
                         driver_response.usage().cloned(),
                     )
                     .map_err(Box::new)?;
@@ -244,6 +245,7 @@ impl<Store: ConversationEventStore> ConversationSession<Store> {
                         model_request_id,
                         std::mem::take(&mut outputs_for_request),
                         ModelOutcome::Failed { failure },
+                        ModelContinuation::Complete,
                         None,
                     )
                     .map_err(Box::new)?;
@@ -260,26 +262,40 @@ impl<Store: ConversationEventStore> ConversationSession<Store> {
                 }
             };
 
-            let succeeded = matches!(terminal_response.outcome(), ModelOutcome::Succeeded);
-            if !succeeded || tool_requests.is_empty() {
-                let outcome = if succeeded {
-                    TurnOutcome::Succeeded
-                } else {
-                    TurnOutcome::Failed {
-                        failure: match terminal_response.outcome() {
-                            ModelOutcome::Failed { failure } => failure.clone(),
-                            ModelOutcome::Succeeded => {
-                                unreachable!("a failed outcome is matched above")
-                            }
-                        },
+            let continues = matches!(
+                terminal_response.continuation(),
+                ModelContinuation::Continue
+            );
+            if !continues {
+                if !tool_requests.is_empty() {
+                    let tool_failure = OperationFailure::try_new(
+                        FailureCategory::ExecutionFailed,
+                        "The tool was not executed because the model response completed the turn."
+                            .to_owned(),
+                        None,
+                    )
+                    .map_err(Box::new)?;
+                    for (tool_request_id, _) in &tool_requests {
+                        self.event_store.append(
+                            self.conversation_id,
+                            vec![self.complete_event(ConversationEventPayload::ToolResponse(
+                                ToolResponse::new(
+                                    *tool_request_id,
+                                    ToolOutcome::Failed {
+                                        failure: tool_failure.clone(),
+                                    },
+                                ),
+                            ))],
+                        )?;
                     }
+                }
+                let outcome = match terminal_response.outcome() {
+                    ModelOutcome::Succeeded => TurnOutcome::Succeeded,
+                    ModelOutcome::Failed { failure } => TurnOutcome::Failed {
+                        failure: failure.clone(),
+                    },
                 };
-                self.event_store.append(
-                    self.conversation_id,
-                    vec![self.complete_event(ConversationEventPayload::TurnEnd(
-                        TurnEnd::new(turn_id, outcome.clone()).map_err(Box::new)?,
-                    ))],
-                )?;
+                self.record_turn_end(turn_id, outcome.clone())?;
                 return Ok(outcome);
             }
 
@@ -293,26 +309,21 @@ impl<Store: ConversationEventStore> ConversationSession<Store> {
                 )?;
             }
             depends_on = tool_requests.iter().map(|(id, _)| *id).collect();
-            completed_tool_rounds += 1;
-            if completed_tool_rounds >= MAXIMUM_TOOL_CONTINUATION_ROUNDS {
+            continuation_rounds += 1;
+            if continuation_rounds >= MAXIMUM_CONTINUATION_ROUNDS {
                 let failure = OperationFailure::try_new(
                     FailureCategory::ExecutionFailed,
                     format!(
-                        "the tool continuation limit of {MAXIMUM_TOOL_CONTINUATION_ROUNDS} rounds was reached"
+                        "the continuation limit of {MAXIMUM_CONTINUATION_ROUNDS} rounds was reached"
                     ),
                     None,
                 )
                 .map_err(Box::new)?;
                 let outcome = TurnOutcome::Failed { failure };
-                self.event_store.append(
-                    self.conversation_id,
-                    vec![self.complete_event(ConversationEventPayload::TurnEnd(
-                        TurnEnd::new(turn_id, outcome.clone()).map_err(Box::new)?,
-                    ))],
-                )?;
+                self.record_turn_end(turn_id, outcome.clone())?;
                 return Err(Box::new(
-                    ConversationSessionError::ToolContinuationLimitReached {
-                        limit: MAXIMUM_TOOL_CONTINUATION_ROUNDS,
+                    ConversationSessionError::ContinuationLimitReached {
+                        limit: MAXIMUM_CONTINUATION_ROUNDS,
                     },
                 ));
             }
@@ -327,6 +338,20 @@ impl<Store: ConversationEventStore> ConversationSession<Store> {
 
     fn complete_event(&self, content: ConversationEventPayload) -> ConversationEvent {
         ConversationEvent::new(self.conversation_id, content)
+    }
+
+    fn record_turn_end(
+        &self,
+        turn_id: ConversationEventId,
+        outcome: TurnOutcome,
+    ) -> ConversationSessionResult<()> {
+        self.event_store.append(
+            self.conversation_id,
+            vec![self.complete_event(ConversationEventPayload::TurnEnd(
+                TurnEnd::new(turn_id, outcome).map_err(Box::new)?,
+            ))],
+        )?;
+        Ok(())
     }
 
     fn ensure_request_reference<T: tog::conversation::ModelEvent>(
@@ -379,15 +404,15 @@ fn last_position(conversation: &ConversationHistory) -> u64 {
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum ConversationSessionError {
-    ToolContinuationLimitReached { limit: u32 },
+    ContinuationLimitReached { limit: u32 },
 }
 
 impl Display for ConversationSessionError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::ToolContinuationLimitReached { limit } => write!(
+            Self::ContinuationLimitReached { limit } => write!(
                 formatter,
-                "the tool continuation limit of {limit} rounds was reached"
+                "the continuation limit of {limit} rounds was reached"
             ),
         }
     }
@@ -408,11 +433,11 @@ mod tests {
     use schemars::json_schema;
     use serde_json::{Value, json};
 
-    use super::{ConversationSession, MAXIMUM_TOOL_CONTINUATION_ROUNDS};
+    use super::{ConversationSession, MAXIMUM_CONTINUATION_ROUNDS};
     use tog::conversation::{
-        AssistantResponse, ConversationEventId, ConversationEventPayload, FailureCategory, ModelId,
-        ModelOutcome, ModelResponse, ModelSource, ModelSpecificEvent, OperationFailure, ProviderId,
-        ToolOutcome, ToolRequest, TurnOutcome, UserContent,
+        AssistantResponse, ConversationEventId, ConversationEventPayload, FailureCategory,
+        ModelContinuation, ModelId, ModelOutcome, ModelResponse, ModelSource, ModelSpecificEvent,
+        OperationFailure, ProviderId, ToolOutcome, ToolRequest, TurnOutcome, UserContent,
     };
     use tog::conversation::{ToolAvailability, ToolDefinition, ToolName};
     use tog::conversation_event_store::{ConversationEventRecord, ConversationEventStore};
@@ -447,15 +472,29 @@ mod tests {
         )
     }
 
-    fn terminated_response() -> ModelDriverOutput {
+    fn completed_response() -> ModelDriverOutput {
         ModelDriverOutput::ModelResponse(
             ModelResponse::new(
                 ConversationEventId::new(),
                 Vec::new(),
                 ModelOutcome::Succeeded,
+                ModelContinuation::Complete,
                 None,
             )
             .expect("the terminal response should be valid"),
+        )
+    }
+
+    fn continuing_response() -> ModelDriverOutput {
+        ModelDriverOutput::ModelResponse(
+            ModelResponse::new(
+                ConversationEventId::new(),
+                Vec::new(),
+                ModelOutcome::Succeeded,
+                ModelContinuation::Continue,
+                None,
+            )
+            .expect("the continuing terminal response should be valid"),
         )
     }
 
@@ -472,9 +511,30 @@ mod tests {
                     )
                     .expect("the failure should be valid"),
                 },
+                ModelContinuation::Complete,
                 None,
             )
             .expect("the failed terminal response should be valid"),
+        )
+    }
+
+    fn failed_continuing_response(failure: FailureCategory) -> ModelDriverOutput {
+        ModelDriverOutput::ModelResponse(
+            ModelResponse::new(
+                ConversationEventId::new(),
+                Vec::new(),
+                ModelOutcome::Failed {
+                    failure: OperationFailure::try_new(
+                        failure,
+                        "the provider failed".to_owned(),
+                        None,
+                    )
+                    .expect("the failure should be valid"),
+                },
+                ModelContinuation::Continue,
+                None,
+            )
+            .expect("the failed continuing response should be valid"),
         )
     }
 
@@ -542,6 +602,7 @@ mod tests {
                         model_request_id,
                         Vec::new(),
                         response.outcome().clone(),
+                        response.continuation(),
                         response.usage().cloned(),
                     )
                     .expect("the terminal response should be valid"),
@@ -726,7 +787,7 @@ mod tests {
         let driver = Arc::new(ScriptedDriver::new(vec![vec![
             reasoning_event(),
             assistant_response(),
-            terminated_response(),
+            completed_response(),
         ]]));
         let session = ConversationSession::create(
             FileEventStore::new(directory.clone()).expect("the store should be created"),
@@ -777,7 +838,7 @@ mod tests {
         let directory = temporary_directory();
         let driver = Arc::new(ScriptedDriver::new(vec![vec![
             assistant_response(),
-            terminated_response(),
+            completed_response(),
         ]]));
         let session = ConversationSession::create(
             FileEventStore::new(directory.clone()).expect("the store should be created"),
@@ -878,7 +939,7 @@ mod tests {
     #[tokio::test]
     async fn a_terminal_response_followed_by_more_output_is_a_contract_error() {
         let driver = Arc::new(ScriptedDriver::new(vec![vec![
-            terminated_response(),
+            completed_response(),
             assistant_response(),
         ]]));
         let session = ConversationSession::create(
@@ -903,9 +964,9 @@ mod tests {
         let driver = Arc::new(ScriptedDriver::new(vec![
             vec![
                 tool_request("shell", json!({ "command": "printf hello" })),
-                terminated_response(),
+                continuing_response(),
             ],
-            vec![assistant_response(), terminated_response()],
+            vec![assistant_response(), completed_response()],
         ]));
         let session = ConversationSession::create(
             FileEventStore::new(directory.clone()).expect("the store should be created"),
@@ -956,9 +1017,9 @@ mod tests {
             vec![
                 tool_request("observe", json!({ "order": "first" })),
                 tool_request("observe", json!({ "order": "second" })),
-                terminated_response(),
+                continuing_response(),
             ],
-            vec![assistant_response(), terminated_response()],
+            vec![assistant_response(), completed_response()],
         ]));
         let session = ConversationSession::create(
             FileEventStore::new(directory.clone()).expect("the store should be created"),
@@ -1003,9 +1064,9 @@ mod tests {
             vec![
                 assistant_response(),
                 tool_request("observe", json!({ "order": "first" })),
-                terminated_response(),
+                continuing_response(),
             ],
-            vec![assistant_response(), terminated_response()],
+            vec![assistant_response(), completed_response()],
         ]));
         let session = ConversationSession::create(
             FileEventStore::new(directory.clone()).expect("the store should be created"),
@@ -1056,9 +1117,9 @@ mod tests {
         let driver = Arc::new(ScriptedDriver::new(vec![
             vec![
                 tool_request("missing", json!({ "command": "pwd" })),
-                terminated_response(),
+                continuing_response(),
             ],
-            vec![assistant_response(), terminated_response()],
+            vec![assistant_response(), completed_response()],
         ]));
         let session = ConversationSession::create(
             FileEventStore::new(directory.clone()).expect("the store should be created"),
@@ -1115,13 +1176,205 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reaching_the_tool_continuation_limit_is_reported_explicitly() {
+    async fn a_continue_without_tool_requests_invokes_the_model_again() {
         let directory = temporary_directory();
-        let script = (0..MAXIMUM_TOOL_CONTINUATION_ROUNDS)
+        let driver = Arc::new(ScriptedDriver::new(vec![
+            vec![continuing_response()],
+            vec![assistant_response(), completed_response()],
+        ]));
+        let session = ConversationSession::create(
+            FileEventStore::new(directory.clone()).expect("the store should be created"),
+            Box::new(SharedScriptedDriver(Arc::clone(&driver))),
+            ToolRegistry::default(),
+        );
+        let conversation_id = session.id();
+        session
+            .add_user_request(user_content("keep thinking"))
+            .expect("the request should be recorded");
+
+        assert_eq!(
+            session
+                .invoke(|_| Ok(()))
+                .await
+                .expect("the continuing turn should complete"),
+            TurnOutcome::Succeeded
+        );
+
+        let invocations = driver
+            .invocations
+            .lock()
+            .expect("the invocation list should lock");
+        assert_eq!(
+            invocations.len(),
+            2,
+            "a continuation without tool requests still invokes the model again"
+        );
+        assert!(
+            invocations[1].tool_responses.is_empty(),
+            "no tools were requested to execute"
+        );
+        drop(invocations);
+        let events = loaded_events(&directory, conversation_id);
+        assert!(
+            events.iter().all(|event| !matches!(
+                event.event().payload(),
+                ConversationEventPayload::ToolResponse(_)
+            )),
+            "no tool responses are recorded without tool requests"
+        );
+        assert!(matches!(
+            events.last().map(|event| event.event().payload()),
+            Some(ConversationEventPayload::TurnEnd(turn_end))
+                if matches!(turn_end.outcome(), TurnOutcome::Succeeded)
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_failed_attempt_can_request_continuation_and_the_turn_still_succeeds() {
+        let directory = temporary_directory();
+        let driver = Arc::new(ScriptedDriver::new(vec![
+            vec![failed_continuing_response(FailureCategory::ProviderFailure)],
+            vec![assistant_response(), completed_response()],
+        ]));
+        let session = ConversationSession::create(
+            FileEventStore::new(directory.clone()).expect("the store should be created"),
+            Box::new(SharedScriptedDriver(Arc::clone(&driver))),
+            ToolRegistry::default(),
+        );
+        let conversation_id = session.id();
+        session
+            .add_user_request(user_content("recover"))
+            .expect("the request should be recorded");
+
+        assert_eq!(
+            session
+                .invoke(|_| Ok(()))
+                .await
+                .expect("the recovering turn should complete"),
+            TurnOutcome::Succeeded
+        );
+
+        let invocations = driver
+            .invocations
+            .lock()
+            .expect("the invocation list should lock");
+        assert_eq!(
+            invocations.len(),
+            2,
+            "a failed continuation still invokes the model again"
+        );
+        drop(invocations);
+        let events = loaded_events(&directory, conversation_id);
+        let model_responses = events
+            .iter()
+            .filter_map(|event| match event.event().payload() {
+                ConversationEventPayload::ModelResponse(response) => {
+                    Some((response.outcome().clone(), response.continuation()))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            model_responses
+                .iter()
+                .map(|(_, continuation)| *continuation)
+                .collect::<Vec<_>>(),
+            vec![ModelContinuation::Continue, ModelContinuation::Complete,],
+            "the failed round records a continuation and the turn ends complete"
+        );
+        assert!(matches!(model_responses[0].0, ModelOutcome::Failed { .. }));
+        assert!(matches!(model_responses[1].0, ModelOutcome::Succeeded));
+        assert!(matches!(
+            events.last().map(|event| event.event().payload()),
+            Some(ConversationEventPayload::TurnEnd(turn_end))
+                if matches!(turn_end.outcome(), TurnOutcome::Succeeded)
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_complete_response_answers_unexecuted_tool_requests_with_durable_failures() {
+        let directory = temporary_directory();
+        let mut registry = ToolRegistry::default();
+        registry.register(ObservingTool::new());
+        let driver = Arc::new(ScriptedDriver::new(vec![vec![
+            tool_request("observe", json!({ "order": "first" })),
+            completed_response(),
+        ]]));
+        let session = ConversationSession::create(
+            FileEventStore::new(directory.clone()).expect("the store should be created"),
+            Box::new(SharedScriptedDriver(Arc::clone(&driver))),
+            registry,
+        );
+        let conversation_id = session.id();
+        session
+            .add_user_request(user_content("finish"))
+            .expect("the request should be recorded");
+
+        assert_eq!(
+            session
+                .invoke(|_| Ok(()))
+                .await
+                .expect("the completed turn should end"),
+            TurnOutcome::Succeeded
+        );
+
+        let invocations = driver
+            .invocations
+            .lock()
+            .expect("the invocation list should lock");
+        assert_eq!(
+            invocations.len(),
+            1,
+            "the completing response does not invoke the model again"
+        );
+        drop(invocations);
+        let events = loaded_events(&directory, conversation_id);
+        let model_response = events
+            .iter()
+            .find_map(|event| match event.event().payload() {
+                ConversationEventPayload::ModelResponse(response) => Some(response),
+                _ => None,
+            })
+            .expect("the terminal model response should be recorded");
+        assert!(
+            matches!(model_response.outcome(), ModelOutcome::Succeeded)
+                && model_response.continuation() == ModelContinuation::Complete,
+            "the driver's completing response is preserved"
+        );
+        let tool_responses = events
+            .iter()
+            .filter_map(|event| match event.event().payload() {
+                ConversationEventPayload::ToolResponse(response) => Some(response),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            tool_responses.len(),
+            1,
+            "every unexecuted tool request receives a durable explanation"
+        );
+        assert!(matches!(
+            tool_responses[0].outcome(),
+            ToolOutcome::Failed { failure }
+                if failure.category() == FailureCategory::ExecutionFailed
+                    && failure.message()
+                        == "The tool was not executed because the model response completed the turn."
+        ));
+        assert!(matches!(
+            events.last().map(|event| event.event().payload()),
+            Some(ConversationEventPayload::TurnEnd(turn_end))
+                if matches!(turn_end.outcome(), TurnOutcome::Succeeded)
+        ));
+    }
+
+    #[tokio::test]
+    async fn reaching_the_continuation_limit_is_reported_explicitly() {
+        let directory = temporary_directory();
+        let script = (0..MAXIMUM_CONTINUATION_ROUNDS)
             .map(|round| {
                 vec![
                     tool_request("missing", json!({ "round": round })),
-                    terminated_response(),
+                    continuing_response(),
                 ]
             })
             .collect();
@@ -1141,9 +1394,7 @@ mod tests {
             .expect_err("the continuation limit should be reported");
         assert_eq!(
             error.to_string(),
-            format!(
-                "the tool continuation limit of {MAXIMUM_TOOL_CONTINUATION_ROUNDS} rounds was reached"
-            )
+            format!("the continuation limit of {MAXIMUM_CONTINUATION_ROUNDS} rounds was reached")
         );
         let events = loaded_events(&directory, conversation_id);
         assert!(matches!(
@@ -1158,7 +1409,7 @@ mod tests {
         let directory = temporary_directory();
         let first_driver = Arc::new(ScriptedDriver::new(vec![vec![
             assistant_response(),
-            terminated_response(),
+            completed_response(),
         ]]));
         let session = ConversationSession::create(
             FileEventStore::new(directory.clone()).expect("the store should be created"),
@@ -1179,7 +1430,7 @@ mod tests {
 
         let second_driver = Arc::new(ScriptedDriver::new(vec![vec![
             assistant_response(),
-            terminated_response(),
+            completed_response(),
         ]]));
         let reopened = ConversationSession::open(
             conversation_id,
@@ -1249,9 +1500,9 @@ mod tests {
         let driver = Arc::new(ScriptedDriver::new(vec![
             vec![
                 tool_request("observe", json!({ "order": "first" })),
-                terminated_response(),
+                continuing_response(),
             ],
-            vec![assistant_response(), terminated_response()],
+            vec![assistant_response(), completed_response()],
         ]));
         let session = ConversationSession::create(
             FileEventStore::new(directory.clone()).expect("the store should be created"),

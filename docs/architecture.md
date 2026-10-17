@@ -18,9 +18,12 @@ boundaries and future changes.
 | Storage | Persist events and immutable assets behind contracts; keep filesystem mechanics outside event meaning |
 | Application | Choose implementations and provide the command-line or other user interface |
 
-A model driver requests tool work through events; it does not execute tools or
-own the turn. Assistant text is content, not a completion signal. A model attempt
-and the turn containing it have separate outcomes.
+A model driver requests tool work through events. It does not execute tools.
+It does not own the turn.
+
+Assistant text is content. It is not a completion signal. Every terminal model
+response records whether the turn should end or the model needs another
+invocation. A model attempt and the turn have separate outcomes.
 
 Recorded history is the source for reconstruction. Replaying it must not execute
 external work. Model-visible semantic state belongs in events or immutable
