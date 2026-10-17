@@ -40,9 +40,10 @@ tools sequentially, records their results, and invokes the model again, bounding
 continuation rounds; `complete` ends the turn with `succeeded` for a successful
 response and `failed` for a failed one, with or without assistant text. A
 response that records `complete` while this call also requested tools is a
-driver contract error: the session records that attempt as failed rather than
-completing a successful turn with work left unanswered. Normal stream
-exhaustion without a terminal response is recorded as failure.
+driver contract error: the session preserves the response, answers each
+unexecuted tool request with a durable failure, and fails the turn rather than
+completing it with work left unanswered. Normal stream exhaustion without a
+terminal response is recorded as failure.
 
 This does not promise complete recovery from every interruption. Invocation or
 stream errors can escape before a terminal event is written. Automatic retries,

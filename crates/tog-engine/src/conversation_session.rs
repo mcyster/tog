@@ -7,8 +7,8 @@ use futures_util::StreamExt;
 use tog::conversation::{
     Conversation, ConversationEvent, ConversationEventId, ConversationEventPayload,
     ConversationHistory, ConversationId, FailureCategory, ModelContinuation, ModelOutcome,
-    ModelRequest, ModelResponse, OperationFailure, ToolResponse, TurnEnd, TurnOutcome, TurnStart,
-    User, UserContent, latest_tools,
+    ModelRequest, ModelResponse, OperationFailure, ToolOutcome, ToolResponse, TurnEnd, TurnOutcome,
+    TurnStart, User, UserContent, latest_tools,
 };
 use tog::conversation_event_store::ConversationEventStore;
 use tog::model_driver::{ModelDriver, ModelDriverError, ModelDriverOutput, TurnInput};
@@ -158,39 +158,14 @@ impl<Store: ConversationEventStore> ConversationSession<Store> {
                         unreachable!("the terminal response output was just identified");
                     };
                     self.ensure_request_reference(&driver_response, model_request_id)?;
-                    let driver_outcome = driver_response.outcome().clone();
-                    let driver_continuation = driver_response.continuation();
-                    let driver_usage = driver_response.usage().cloned();
-                    let completed_with_unanswered_tools = matches!(
-                        (&driver_outcome, driver_continuation),
-                        (ModelOutcome::Succeeded, ModelContinuation::Complete)
-                    ) && !tool_requests.is_empty();
-                    let response = if completed_with_unanswered_tools {
-                        let failure = OperationFailure::try_new(
-                            FailureCategory::InvalidProviderResponse,
-                            "A model response that completes the turn left requested tools unexecuted."
-                                .to_owned(),
-                            None,
-                        )
-                        .map_err(Box::new)?;
-                        ModelResponse::new(
-                            model_request_id,
-                            std::mem::take(&mut outputs_for_request),
-                            ModelOutcome::Failed { failure },
-                            driver_continuation,
-                            driver_usage,
-                        )
-                        .map_err(Box::new)?
-                    } else {
-                        ModelResponse::new(
-                            model_request_id,
-                            std::mem::take(&mut outputs_for_request),
-                            driver_outcome,
-                            driver_continuation,
-                            driver_usage,
-                        )
-                        .map_err(Box::new)?
-                    };
+                    let response = ModelResponse::new(
+                        model_request_id,
+                        std::mem::take(&mut outputs_for_request),
+                        driver_response.outcome().clone(),
+                        driver_response.continuation(),
+                        driver_response.usage().cloned(),
+                    )
+                    .map_err(Box::new)?;
                     let records = self.event_store.append(
                         self.conversation_id,
                         vec![self.complete_event(ConversationEventPayload::ModelResponse(
@@ -292,6 +267,40 @@ impl<Store: ConversationEventStore> ConversationSession<Store> {
                 ModelContinuation::Continue
             );
             if !continues {
+                if matches!(terminal_response.outcome(), ModelOutcome::Succeeded)
+                    && !tool_requests.is_empty()
+                {
+                    let tool_failure = OperationFailure::try_new(
+                        FailureCategory::ExecutionFailed,
+                        "The tool was not executed because the model response completed the turn."
+                            .to_owned(),
+                        None,
+                    )
+                    .map_err(Box::new)?;
+                    for (tool_request_id, _) in &tool_requests {
+                        self.event_store.append(
+                            self.conversation_id,
+                            vec![self.complete_event(ConversationEventPayload::ToolResponse(
+                                ToolResponse::new(
+                                    *tool_request_id,
+                                    ToolOutcome::Failed {
+                                        failure: tool_failure.clone(),
+                                    },
+                                ),
+                            ))],
+                        )?;
+                    }
+                    let failure = OperationFailure::try_new(
+                        FailureCategory::InvalidProviderResponse,
+                        "A model response that completed the turn left requested tools unexecuted."
+                            .to_owned(),
+                        None,
+                    )
+                    .map_err(Box::new)?;
+                    let outcome = TurnOutcome::Failed { failure };
+                    self.record_turn_end(turn_id, outcome.clone())?;
+                    return Ok(outcome);
+                }
                 let outcome = match terminal_response.outcome() {
                     ModelOutcome::Succeeded => TurnOutcome::Succeeded,
                     ModelOutcome::Failed { failure } => TurnOutcome::Failed {
@@ -1332,13 +1341,6 @@ mod tests {
         );
         drop(invocations);
         let events = loaded_events(&directory, conversation_id);
-        assert!(
-            events.iter().all(|event| !matches!(
-                event.event().payload(),
-                ConversationEventPayload::ToolResponse(_)
-            )),
-            "unanswered tool requests are never executed"
-        );
         let model_response = events
             .iter()
             .find_map(|event| match event.event().payload() {
@@ -1346,17 +1348,39 @@ mod tests {
                 _ => None,
             })
             .expect("the terminal model response should be recorded");
+        assert!(
+            matches!(model_response.outcome(), ModelOutcome::Succeeded)
+                && model_response.continuation() == ModelContinuation::Complete,
+            "the driver's completing response is preserved"
+        );
+        let tool_responses = events
+            .iter()
+            .filter_map(|event| match event.event().payload() {
+                ConversationEventPayload::ToolResponse(response) => Some(response),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            tool_responses.len(),
+            1,
+            "every unanswered tool request receives a durable explanation"
+        );
         assert!(matches!(
-            model_response.outcome(),
-            ModelOutcome::Failed { failure }
-                if failure.category() == FailureCategory::InvalidProviderResponse
+            tool_responses[0].outcome(),
+            ToolOutcome::Failed { failure }
+                if failure.category() == FailureCategory::ExecutionFailed
                     && failure.message()
-                        == "A model response that completes the turn left requested tools unexecuted."
+                        == "The tool was not executed because the model response completed the turn."
         ));
         assert!(matches!(
             events.last().map(|event| event.event().payload()),
             Some(ConversationEventPayload::TurnEnd(turn_end))
-                if matches!(turn_end.outcome(), TurnOutcome::Failed { .. })
+                if matches!(turn_end.outcome(),
+                    TurnOutcome::Failed { failure }
+                        if failure.category() == FailureCategory::InvalidProviderResponse
+                            && failure.message()
+                                == "A model response that completed the turn left requested tools unexecuted."
+                )
         ));
     }
 

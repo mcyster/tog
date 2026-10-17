@@ -195,8 +195,9 @@ the model again, which also permits reasoning-only or provider-side tool work
 without a final answer. A failed attempt may request continuation as a bounded
 escape hatch; the engine decides the turn from the attempt outcome only when
 the response records `complete`. A successful response that records `complete`
-while requesting tools is a driver contract error: the engine records that
-attempt as failed rather than leaving requested work unanswered. Only one
+while requesting tools is a driver contract error: the engine keeps the
+response, records a failed `ToolResponse` explaining each unexecuted request,
+and fails the turn rather than leaving requested work unanswered. Only one
 terminal response exists per model request. A stream that ends without a
 terminal response is closed by the engine as a failed `ModelResponse`; it is
 never treated as success.
