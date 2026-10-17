@@ -306,17 +306,24 @@ const OPENROUTER_TOOL_CALL_STREAM: &str = concat!(
 
 const OPENROUTER_RESPONSES_ANSWER_STREAM: &str = concat!(
     "data: {\"type\":\"response.output_text.delta\",\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0,\"delta\":\"Hello\"}\n\n",
-    "data: {\"type\":\"response.output_text.done\",\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0,\"text\":\"Hello\"}\n\n",
-    "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_answer\",\"status\":\"completed\",\"usage\":{\"input_tokens\":8,\"output_tokens\":4,\"total_tokens\":12,\"cost\":0.0003}}}\n\n",
+    "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_answer\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"id\":\"msg_1\",\"status\":\"completed\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Hello\",\"annotations\":[]}]}],\"usage\":{\"input_tokens\":8,\"output_tokens\":4,\"total_tokens\":12,\"cost\":0.0003}}}\n\n",
     "data: [DONE]\n\n"
 );
 
 const OPENROUTER_RESPONSES_REASONING_TOOL_STREAM: &str = concat!(
     "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"rs_1\",\"type\":\"reasoning\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"Running pwd.\"}]}}\n\n",
-    "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"id\":\"rs_1\",\"type\":\"reasoning\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"Running pwd.\"}],\"encrypted_content\":\"gAAAA-continue\"}}\n\n",
     "data: {\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"call_id\":\"call_pwd\",\"name\":\"shell\",\"arguments\":\"\"}}\n\n",
-    "data: {\"type\":\"response.function_call_arguments.done\",\"item_id\":\"fc_1\",\"output_index\":1,\"arguments\":\"{\\\"command\\\":\\\"pwd\\\"}\"}\n\n",
-    "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_tool\",\"status\":\"completed\"}}\n\n",
+    "data: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_1\",\"output_index\":1,\"delta\":\"{\\\"command\\\":\\\"pwd\\\"}\"}\n\n",
+    "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_tool\",\"status\":\"completed\",\"output\":[",
+    "{\"type\":\"reasoning\",\"id\":\"rs_1\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"Running pwd.\"}],\"encrypted_content\":\"gAAAA-continue\"},",
+    "{\"type\":\"function_call\",\"id\":\"fc_1\",\"call_id\":\"call_pwd\",\"name\":\"shell\",\"arguments\":\"{\\\"command\\\":\\\"pwd\\\"}\"}",
+    "]}}\n\n",
+    "data: [DONE]\n\n"
+);
+
+const OPENROUTER_RESPONSES_INTERRUPTED_STREAM: &str = concat!(
+    "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"call_id\":\"call_pwd\",\"name\":\"shell\",\"arguments\":\"\"}}\n\n",
+    "data: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_1\",\"output_index\":0,\"delta\":\"{\\\"command\\\":\\\"pwd\\\"}\"}\n\n",
     "data: [DONE]\n\n"
 );
 
@@ -1188,6 +1195,45 @@ fn openrouter_responses_tool_round_replays_reasoning_and_outputs_into_the_next_r
             .expect("the restarted input should end with the new request")["content"][0]["text"],
         "continue"
     );
+}
+
+#[test]
+fn interrupted_responses_stream_fails_without_persisting_outputs_or_executing_tools() {
+    let server = MockOpenRouterServer::start(vec![OPENROUTER_RESPONSES_INTERRUPTED_STREAM]);
+    let data_directory = temporary_data_directory();
+
+    let command_output = configured_openrouter_command(&server, &data_directory)
+        .args(["--driver", "openrouter-responses", "run pwd"])
+        .output()
+        .expect("tog should run");
+
+    assert!(!command_output.status.success());
+    let standard_error =
+        String::from_utf8(command_output.stderr.clone()).expect("standard error should be UTF-8");
+    assert!(standard_error.contains("## waiting for model deepseek/deepseek-v4.1-flash\n"));
+    let conversation_id = reported_conversation_id(&command_output.stderr);
+    let events = persisted_events(&data_directory, &conversation_id);
+    assert!(
+        !events.iter().any(|event| event["type"] == "tool_request"),
+        "a partial tool request must not be persisted"
+    );
+    assert!(
+        !events.iter().any(|event| event["type"] == "tool_response"),
+        "no tool may execute before its request is persisted"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| event["type"] == "assistant_response"),
+        "no durable answer may be reconstructed from streamed progress"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| event["type"] == "model_response" && event["outcome"]["type"] == "failed"),
+        "an interrupted stream must record a failed model response"
+    );
+    server.finish();
 }
 
 #[test]
