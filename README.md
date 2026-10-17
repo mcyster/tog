@@ -1,13 +1,14 @@
 # tog
 
-`tog` provides durable command-line conversations through OpenAI's Responses API
-or OpenRouter's OpenAI-compatible chat completions API.
+`tog` provides durable command-line conversations through OpenAI's Responses API,
+OpenRouter's OpenAI-compatible chat completions API, or OpenRouter's Responses API.
 
 ## Prerequisites
 
 The supported development environment uses [Nix](https://nixos.org/) with flakes
 enabled. You also need an API key for the driver you select: an OpenAI API key for
-the `openai` driver, or an OpenRouter API key for the `openrouter-completions` driver.
+the `openai` driver, or an OpenRouter API key for the `openrouter-completions`
+and `openrouter-responses` drivers.
 
 Enter the environment directly:
 
@@ -54,11 +55,15 @@ model with `--model`, and select a driver with `--driver`:
 ```console
 cargo run -- --model MODEL_NAME "Explain ownership in Rust"
 cargo run -- --driver openrouter-completions --model openrouter/auto "Explain ownership in Rust"
+cargo run -- --driver openrouter-responses --model openai/gpt-5.6 "Explain ownership in Rust"
 ```
 
 Selecting the `openrouter-completions` driver uses the chat completions API and reads
 `OPENROUTER_API_KEY` (and an optional `TOG_OPENROUTER_BASE_URL`). The OpenRouter
-driver's default model is `openrouter/auto`.
+driver's default model is `openrouter/auto`. Selecting the `openrouter-responses`
+driver uses the same credentials against OpenRouter's Responses API and defaults to
+`openai/gpt-5.6`. It streams progress and provider-reported usage and cost on each
+model response.
 
 CLI verbosity defaults to `low`. It controls the model events described on
 standard error. Select `low`, `medium`, or `high` to print progressively more

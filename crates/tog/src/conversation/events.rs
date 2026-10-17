@@ -24,9 +24,9 @@ pub use context::{Context, InvalidContext};
 pub use failure::{FailureCategory, InvalidOperationFailure, OperationFailure};
 pub use model::{
     AssistantResponse, InvalidAssistantResponse, InvalidModelRequest, InvalidModelResponse,
-    InvalidModelSpecificEvent, InvalidToolRequest, ModelContinuation, ModelData, ModelEvent,
-    ModelId, ModelOutcome, ModelRequest, ModelResponse, ModelSource, ModelSpecificEvent,
-    ProviderId, ToolRequest, Usage,
+    InvalidModelSpecificEvent, InvalidToolRequest, InvalidUsage, ModelContinuation, ModelData,
+    ModelEvent, ModelId, ModelOutcome, ModelRequest, ModelResponse, ModelSource,
+    ModelSpecificEvent, ProviderId, ToolRequest, Usage,
 };
 pub use tool_response::{InvalidToolOutcome, ToolOutcome, ToolResponse};
 pub use tools::{InvalidTools, Tool, ToolAvailability, ToolDefinition, ToolName, Tools};

@@ -20,7 +20,7 @@ pub const MAXIMUM_CONTINUATION_ROUNDS: u32 = 8;
 
 pub enum ConversationSessionProgress {
     InvocationStarted { model: String },
-    EventCompleted { event: ConversationEvent },
+    EventCompleted { event: Box<ConversationEvent> },
 }
 
 pub struct ConversationSession<Store: ConversationEventStore> {
@@ -173,7 +173,7 @@ impl<Store: ConversationEventStore> ConversationSession<Store> {
                         ))],
                     )?;
                     report_progress(ConversationSessionProgress::EventCompleted {
-                        event: records[0].event().clone(),
+                        event: Box::new(records[0].event().clone()),
                     })?;
                     terminal_response = Some(response);
                     continue;
@@ -226,7 +226,9 @@ impl<Store: ConversationEventStore> ConversationSession<Store> {
                         ConversationEventPayload::ModelSpecificEvent(_) => {}
                         _ => {}
                     }
-                    report_progress(ConversationSessionProgress::EventCompleted { event })?;
+                    report_progress(ConversationSessionProgress::EventCompleted {
+                        event: Box::new(event),
+                    })?;
                 }
             }
 
@@ -255,7 +257,7 @@ impl<Store: ConversationEventStore> ConversationSession<Store> {
                         ))],
                     )?;
                     report_progress(ConversationSessionProgress::EventCompleted {
-                        event: records[0].event().clone(),
+                        event: Box::new(records[0].event().clone()),
                     })?;
                     response
                 }
@@ -1590,7 +1592,7 @@ mod tests {
             session
                 .invoke(|progress| {
                     if let ConversationSessionProgress::EventCompleted { event } = progress {
-                        live_events.push(event);
+                        live_events.push(*event);
                     }
                     Ok(())
                 })

@@ -19,6 +19,7 @@ and the current [architecture overview](../architecture.md).
 | `tog` | Conversations and events, the model-driver interface, asset definitions, and conversation/asset storage interfaces |
 | `tog-driver-openai` | The OpenAI Responses API model-driver provider |
 | `tog-driver-openrouter-completions` | The OpenRouter chat-completions model-driver provider |
+| `tog-driver-openrouter-responses` | The OpenRouter Responses-API model-driver provider |
 | `tog-context` | Environment, session, workspace, and toolset; resolving the context and capabilities available for work |
 | `tog-engine` | Executing conversations: invoking models, dispatching tools, recording results, and coordinating lifecycle, cancellation, and retries |
 | `tog-tools` | Concrete tool implementations |
@@ -103,11 +104,11 @@ existing responsibilities are moved. Keep the CLI as the composition point.
 Do not create empty crates for future applications or capabilities.
 
 Treat `tog` plus its driver crates as the reusable library offering. Use one
-crate per provider integration — `tog-driver-openai` and
-`tog-driver-openrouter-completions`
-are the current ones — so an integration adds, updates, or removes a provider
-without touching the others and each provider's dependencies stay contained.
-Publishing packages is separate from establishing the workspace.
+crate per provider integration — `tog-driver-openai`,
+`tog-driver-openrouter-completions`, and `tog-driver-openrouter-responses` are the
+current ones — so an integration adds, updates, or removes a provider without
+touching the others and each provider's dependencies stay contained. Publishing
+packages is separate from establishing the workspace.
 
 The split is complete when Cargo dependencies enforce the stated boundaries,
 a consumer can use conversations and a model driver without the engine or CLI,

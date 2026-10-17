@@ -304,6 +304,22 @@ const OPENROUTER_TOOL_CALL_STREAM: &str = concat!(
     "data: [DONE]\n\n"
 );
 
+const OPENROUTER_RESPONSES_ANSWER_STREAM: &str = concat!(
+    "data: {\"type\":\"response.output_text.delta\",\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0,\"delta\":\"Hello\"}\n\n",
+    "data: {\"type\":\"response.output_text.done\",\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0,\"text\":\"Hello\"}\n\n",
+    "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_answer\",\"status\":\"completed\",\"usage\":{\"input_tokens\":8,\"output_tokens\":4,\"total_tokens\":12,\"cost\":0.0003}}}\n\n",
+    "data: [DONE]\n\n"
+);
+
+const OPENROUTER_RESPONSES_REASONING_TOOL_STREAM: &str = concat!(
+    "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"rs_1\",\"type\":\"reasoning\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"Running pwd.\"}]}}\n\n",
+    "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"id\":\"rs_1\",\"type\":\"reasoning\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"Running pwd.\"}],\"encrypted_content\":\"gAAAA-continue\"}}\n\n",
+    "data: {\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"call_id\":\"call_pwd\",\"name\":\"shell\",\"arguments\":\"\"}}\n\n",
+    "data: {\"type\":\"response.function_call_arguments.done\",\"item_id\":\"fc_1\",\"output_index\":1,\"arguments\":\"{\\\"command\\\":\\\"pwd\\\"}\"}\n\n",
+    "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_tool\",\"status\":\"completed\"}}\n\n",
+    "data: [DONE]\n\n"
+);
+
 fn reported_conversation_id(standard_error: &[u8]) -> String {
     String::from_utf8(standard_error.to_vec())
         .expect("standard error should be UTF-8")
@@ -990,6 +1006,170 @@ fn openrouter_stream_emits_partial_content_events_at_medium_verbosity() {
         .expect("the completed assistant output should be persisted");
     assert_eq!(assistant["content"], "Hello");
     server.finish();
+}
+
+#[test]
+fn openrouter_responses_driver_streams_an_answer_and_records_usage_and_cost() {
+    let server = MockOpenRouterServer::start(vec![OPENROUTER_RESPONSES_ANSWER_STREAM]);
+    let data_directory = temporary_data_directory();
+
+    let command_output = configured_openrouter_command(&server, &data_directory)
+        .args([
+            "--driver",
+            "openrouter-responses",
+            "--model",
+            "openai/gpt-5.6",
+            "--verbosity",
+            "high",
+            "say",
+            "hi",
+        ])
+        .output()
+        .expect("tog should run");
+
+    assert!(command_output.status.success());
+    assert_eq!(
+        String::from_utf8(command_output.stdout).expect("standard output should be UTF-8"),
+        "Hello\n"
+    );
+    let standard_error =
+        String::from_utf8(command_output.stderr.clone()).expect("standard error should be UTF-8");
+    assert!(standard_error.contains("## waiting for model openai/gpt-5.6\n"));
+    assert!(
+        standard_error.contains("## model_specific_event content_delta: Hello\n"),
+        "the streamed progress must reach live subscribers"
+    );
+    let conversation_id = reported_conversation_id(&command_output.stderr);
+    let events = persisted_events(&data_directory, &conversation_id);
+    assert!(
+        !events
+            .iter()
+            .any(|event| event["type"] == "model_specific_event"),
+        "the progress events must not be persisted"
+    );
+    let model_response = events
+        .iter()
+        .find(|event| event["type"] == "model_response")
+        .expect("the terminal model response should be persisted");
+    assert_eq!(model_response["usage"]["input_tokens"], 8);
+    assert_eq!(model_response["usage"]["output_tokens"], 4);
+    assert_eq!(model_response["usage"]["total_tokens"], 12);
+    assert_eq!(model_response["usage"]["cost_usd"], 0.0003);
+    let requests = server.finish();
+    assert_eq!(requests[0]["model"], "openai/gpt-5.6");
+    assert_eq!(requests[0]["stream"], true);
+    assert_eq!(requests[0]["reasoning"]["summary"], "auto");
+    assert!(
+        requests[0].get("store").is_none(),
+        "the stateless Responses API must not be asked to store the response"
+    );
+    assert_eq!(requests[0]["input"][0]["type"], "message");
+    assert_eq!(requests[0]["input"][0]["content"][0]["text"], "say hi");
+}
+
+#[test]
+fn openrouter_responses_tool_round_replays_reasoning_and_outputs_into_the_next_request() {
+    let server = MockOpenRouterServer::start(vec![
+        OPENROUTER_RESPONSES_REASONING_TOOL_STREAM,
+        OPENROUTER_RESPONSES_ANSWER_STREAM,
+        OPENROUTER_RESPONSES_ANSWER_STREAM,
+    ]);
+    let data_directory = temporary_data_directory();
+
+    let command_output = configured_openrouter_command(&server, &data_directory)
+        .args([
+            "--driver",
+            "openrouter-responses",
+            "--model",
+            "openai/gpt-5.6",
+            "run pwd",
+        ])
+        .output()
+        .expect("tog should run");
+
+    assert!(command_output.status.success());
+    assert_eq!(
+        String::from_utf8(command_output.stdout).expect("standard output should be UTF-8"),
+        "Hello\n"
+    );
+    let conversation_id = reported_conversation_id(&command_output.stderr);
+
+    let restarted_output = tog_command()
+        .env("OPENROUTER_API_KEY", "test-key")
+        .env("TOG_OPENROUTER_BASE_URL", &server.base_url)
+        .env("TOG_DATA_DIR", &data_directory)
+        .args([
+            "--conversation",
+            &conversation_id,
+            "--driver",
+            "openrouter-responses",
+            "--model",
+            "openai/gpt-5.6",
+            "continue",
+        ])
+        .output()
+        .expect("the reopened session should run");
+    assert!(restarted_output.status.success());
+
+    let requests = server.finish();
+    assert_eq!(requests.len(), 3, "tool round, continuation, then restart");
+    let continuation_input = requests[1]["input"]
+        .as_array()
+        .expect("the follow-up request should carry input items");
+    assert_eq!(
+        continuation_input
+            .iter()
+            .map(|item| item["type"].as_str().unwrap_or_default())
+            .collect::<Vec<_>>(),
+        [
+            "message",
+            "reasoning",
+            "function_call",
+            "function_call_output"
+        ],
+        "reasoning is replayed before the completed call and its result"
+    );
+    let reasoned = continuation_input
+        .iter()
+        .find(|item| item["type"] == "reasoning")
+        .expect("the follow-up request should replay the reasoning item");
+    assert_eq!(reasoned["id"], "rs_1");
+    assert_eq!(reasoned["encrypted_content"], "gAAAA-continue");
+    let function_call = continuation_input
+        .iter()
+        .find(|item| item["type"] == "function_call")
+        .expect("the follow-up request should replay the function call");
+    assert_eq!(function_call["call_id"], "call_pwd");
+    let function_output = continuation_input
+        .iter()
+        .find(|item| item["type"] == "function_call_output")
+        .expect("the follow-up request should replay the tool result");
+    assert_eq!(function_output["call_id"], "call_pwd");
+
+    let restarted_input = requests[2]["input"]
+        .as_array()
+        .expect("the restart request should carry input items");
+    assert_eq!(
+        restarted_input
+            .iter()
+            .map(|item| item["type"].as_str().unwrap_or_default())
+            .collect::<Vec<_>>(),
+        [
+            "message",
+            "reasoning",
+            "function_call",
+            "function_call_output",
+            "message",
+            "message"
+        ],
+        "a restarted session rebuilds the full history, then appends the new request"
+    );
+    assert_eq!(
+        restarted_input
+            .last()
+            .expect("the restarted input should end with the new request")["content"][0]["text"],
+        "continue"
+    );
 }
 
 #[test]

@@ -6,7 +6,9 @@ mod tool_request;
 
 pub use assistant_response::{AssistantResponse, InvalidAssistantResponse};
 pub use request::{InvalidModelRequest, ModelRequest};
-pub use response::{InvalidModelResponse, ModelContinuation, ModelOutcome, ModelResponse, Usage};
+pub use response::{
+    InvalidModelResponse, InvalidUsage, ModelContinuation, ModelOutcome, ModelResponse, Usage,
+};
 pub use specific::{InvalidModelSpecificEvent, ModelSpecificEvent};
 pub use tool_request::{InvalidToolRequest, ToolRequest};
 
