@@ -20,10 +20,7 @@ Keep PR descriptions short. Use only the structure the change needs.
 
 ## Use simple, precise language
 
-- Write short sentences with one idea each.
-- Use active voice and consistent terms.
-- Prefer concrete statements over vague claims.
-- Use bullets and short sub-bullets to group related details. Avoid dense paragraphs.
+Apply the [human-readable](human-readable/SKILL.md) skill for sentence-level style.
 
 ## Leave implementation detail in the code
 

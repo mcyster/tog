@@ -10,6 +10,12 @@ Spend the reasoning effort and tokens needed to make the result easy for human
 collaborators to understand, assess, and build on. Apply specialist skills
 alongside it for their domain and artifact conventions.
 
+## Prose
+
+Apply the [`human-readable`](.agents/skills/human-readable/SKILL.md) skill to all
+repository prose: documentation, skills, code comments, user-facing messages, PR
+descriptions, and review comments.
+
 ## Project Direction
 
 Before choosing an approach to repository work, read

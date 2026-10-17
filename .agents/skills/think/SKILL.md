@@ -68,9 +68,7 @@ would not materially improve correctness or a collaborator's understanding.
 ## Write from that understanding
 
 Lead with the central idea, then develop the consequences in the order a reader
-needs them. Give each section and paragraph a clear purpose. Keep the facts,
-reasoning, examples, and evidence needed to understand, assess, or apply the claim.
-Move investigation history elsewhere only when it distracts from that purpose.
+needs them. Give each section and paragraph a clear purpose.
 
 Preserve conditions, exceptions, scope, and uncertainty even when they complicate
 the explanation. Keep quotations, logs, code, identifiers, and data faithful to
@@ -80,6 +78,7 @@ Revise for understanding rather than word count. A shorter text can still hide t
 idea; a longer explanation can earn its space. Before finishing, check whether the
 reader can see the intent, the principles that matter, and what follows from them
 without reconstructing the conversation. Check whether they can assess the tradeoffs
-and take the next step. Show the conclusions and supporting reasons they need;
-keep exploratory thinking out of their way. Use the appropriate specialist skill for
-the artifact's format and conventions.
+and take the next step.
+
+Apply the [human-readable](human-readable/SKILL.md) skill for sentence-level style.
+Use the appropriate specialist skill for the artifact's format and conventions.
