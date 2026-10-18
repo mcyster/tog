@@ -33,6 +33,17 @@ Follow the ordered priorities and tradeoff guidance in
 [`docs/principles.md`](docs/principles.md). Concrete development standards are in
 [`docs/development-standards.md`](docs/development-standards.md).
 
+## Model Responsibilities Before Mechanics
+
+- Apply the responsibility and encapsulation rules in `docs/development-standards.md` to internal components as well as external APIs.
+- Before implementing a significant new or revised component, state its purpose, ownership, smallest caller-facing interface, and one usage example. Reuse an agreed contract; do not add an unnecessary approval step.
+- Expose only the concept's operations and read-only attributes. Keep implementation steps private. Private fields, narrower visibility, renamed types, and file splits alone do not establish encapsulation.
+- Separate object state from per-operation results. Tool-response schemas, read offsets, excerpts, and presentation limits must not define the underlying object's model.
+- Put creation with the responsible creator. Keep process and task machinery behind the contract unless managing that machinery is the concept's purpose.
+- Use private fields and immutable accessors for read-only attributes. Expose only the intended capabilities of returned objects.
+- Review every exposed method for caller need, conceptual ownership, valid use, and invariant preservation. Fix misplaced responsibilities before completing the change; passing tests is not sufficient.
+- Rust mechanics support the object model. They do not replace it. Concrete types can provide strong contracts; neither inheritance nor a trait per type is required.
+
 ## Rust Source
 
 - Use descriptive, full-word names for project-defined types, functions, modules, variables, parameters, and generic parameters.

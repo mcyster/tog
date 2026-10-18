@@ -70,6 +70,63 @@ when an intended caller needs access as part of the component's contract.
 - Before exposing a helper, ask whether the caller should know that operation
   exists. Moving implementation details across a boundary is not encapsulation.
 
+## Responsibility and Encapsulation
+
+Design the caller's object model before choosing implementation machinery. For
+each significant new or revised component, state what it represents, what it
+owns, and what its callers need to observe or do. Show the smallest caller-facing
+interface and one short usage example in the working proposal before implementing
+its mechanics. This does not require a new document or an extra approval round
+when the intended contract is already agreed.
+
+These are implementation requirements, not optional style preferences:
+
+- Model meaningful concepts as cohesive types with clear responsibilities.
+  Do not reduce them to passive state containers coordinated by unrelated helpers.
+  Plain data records remain appropriate for values and transport.
+- Expose only operations and read-only attributes that belong to the concept.
+  A helper does not belong on the contract merely because the implementation or
+  a neighboring module calls it.
+- Keep process creation, task supervision, locks, channels, buffers, and allocation
+  choices private unless that mechanism is the component's stated responsibility.
+  Internal callers must respect the boundary too.
+- Place creation with the component responsible for starting or constructing
+  the object. Do not add lifecycle machinery to the returned object's interface
+  solely because it is convenient to implement there.
+- Separate object state from operation results. Reader offsets, output excerpts,
+  response limits, and presentation choices belong to reads or adapters, not to
+  the underlying object's state.
+- Do not copy a tool's request or response schema into the domain model by default.
+  An adapter may combine several domain operations into one convenient tool call.
+- Express read-only attributes with private fields and immutable accessors.
+  Return a value or reference that grants only the intended capabilities.
+  A getter must not expose mutation of internal state merely for convenience.
+- Choose Rust ownership and concurrency mechanisms to implement the contract.
+  Do not let those mechanisms dictate the caller's object model. Use concrete
+  types or traits as appropriate; inheritance and a trait per type are not required.
+
+Private fields, narrower visibility, renamed types, and moving code into child
+modules are not sufficient encapsulation. Fix the ownership of responsibilities.
+Do not put a facade over a misplaced responsibility and call the design complete.
+
+For example, an execution represents work that has started. Its caller-facing
+contract can expose standard output, standard error, combined output, state, and
+cancellation. The shell starts that execution. Process spawning and supervision
+are implementation mechanics. An output excerpt and its next offset describe a
+read, not the execution itself. This example illustrates the boundary; it does
+not settle whether observing state also supports waiting.
+
+Before completing a change, review every exposed method and accessor:
+
+1. What caller requirement does it serve?
+2. Does the operation or attribute belong to this concept?
+3. Can a caller use it correctly without understanding internal machinery?
+4. Does it preserve invariants and expose only the intended capabilities?
+5. Does its signature distinguish object state from per-operation data?
+
+If any answer is unclear, revise the contract before adding implementation.
+Passing tests does not substitute for this review.
+
 ## Readable Contracts
 
 Define each component through the responsibility it owns and the operations it
@@ -89,7 +146,6 @@ and failure behavior from the contract without studying the implementation.
 
 Review each boundary by asking: can a caller use this component correctly from
 its contract alone, or must they understand how it works internally?
-
 
 Present a concept's contract in its module entry point: trait signatures and the
 important struct, enum, identifier, and error declarations. Keep implementation
