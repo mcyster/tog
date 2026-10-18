@@ -59,11 +59,59 @@ pub(super) struct Execution {
     completed: Notify,
 }
 
+struct SpawnedProcess {
+    child: Child,
+    process_id: u32,
+    standard_output: tokio::process::ChildStdout,
+    standard_error: tokio::process::ChildStderr,
+}
+
 impl Execution {
-    pub(super) fn spawn(
+    pub(super) fn try_new(
         commands: String,
         timeout: Duration,
     ) -> Result<Arc<Execution>, OperationFailure> {
+        let process = Self::spawn(commands)?;
+
+        let standard_output = Arc::new(OutputStream::new(SPOOL_MEMORY_THRESHOLD_BYTES));
+        let standard_error = Arc::new(OutputStream::new(SPOOL_MEMORY_THRESHOLD_BYTES));
+        let combined_output = Arc::new(OutputStream::new(SPOOL_MEMORY_THRESHOLD_BYTES));
+        let (termination, termination_receiver) = watch::channel(false);
+        let execution = Arc::new(Execution {
+            standard_output: Arc::clone(&standard_output),
+            standard_error: Arc::clone(&standard_error),
+            combined_output: Arc::clone(&combined_output),
+            process_id: process.process_id,
+            termination,
+            signals: ExecutionSignals::default(),
+            completion: Mutex::new(Completion::default()),
+            completed: Notify::new(),
+        });
+
+        let standard_output_drain = tokio::spawn(drain_output(
+            process.standard_output,
+            Arc::clone(&standard_output),
+            Arc::clone(&combined_output),
+            Arc::clone(&execution),
+        ));
+        let standard_error_drain = tokio::spawn(drain_output(
+            process.standard_error,
+            Arc::clone(&standard_error),
+            Arc::clone(&combined_output),
+            Arc::clone(&execution),
+        ));
+        tokio::spawn(supervise(
+            process.child,
+            termination_receiver,
+            standard_output_drain,
+            standard_error_drain,
+            Arc::clone(&execution),
+            timeout,
+        ));
+        Ok(execution)
+    }
+
+    fn spawn(commands: String) -> Result<SpawnedProcess, OperationFailure> {
         let mut command = Command::new("/bin/sh");
         command
             .arg("-c")
@@ -78,45 +126,14 @@ impl Execution {
         let process_id = child.id().ok_or_else(|| {
             execution_failed("the shell process reported no identifier after starting".to_owned())
         })?;
-        let stdout_pipe = take_pipe(child.stdout.take(), "standard output")?;
-        let stderr_pipe = take_pipe(child.stderr.take(), "standard error")?;
-
-        let standard_output = Arc::new(OutputStream::new(SPOOL_MEMORY_THRESHOLD_BYTES));
-        let standard_error = Arc::new(OutputStream::new(SPOOL_MEMORY_THRESHOLD_BYTES));
-        let combined_output = Arc::new(OutputStream::new(SPOOL_MEMORY_THRESHOLD_BYTES));
-        let (termination, termination_receiver) = watch::channel(false);
-        let execution = Arc::new(Execution {
-            standard_output: Arc::clone(&standard_output),
-            standard_error: Arc::clone(&standard_error),
-            combined_output: Arc::clone(&combined_output),
-            process_id,
-            termination,
-            signals: ExecutionSignals::default(),
-            completion: Mutex::new(Completion::default()),
-            completed: Notify::new(),
-        });
-
-        let standard_output_drain = tokio::spawn(drain_output(
-            stdout_pipe,
-            Arc::clone(&standard_output),
-            Arc::clone(&combined_output),
-            Arc::clone(&execution),
-        ));
-        let standard_error_drain = tokio::spawn(drain_output(
-            stderr_pipe,
-            Arc::clone(&standard_error),
-            Arc::clone(&combined_output),
-            Arc::clone(&execution),
-        ));
-        tokio::spawn(supervise(
+        let standard_output = take_pipe(child.stdout.take(), "standard output")?;
+        let standard_error = take_pipe(child.stderr.take(), "standard error")?;
+        Ok(SpawnedProcess {
             child,
-            termination_receiver,
-            standard_output_drain,
-            standard_error_drain,
-            Arc::clone(&execution),
-            timeout,
-        ));
-        Ok(execution)
+            process_id,
+            standard_output,
+            standard_error,
+        })
     }
 
     pub(super) fn standard_output(&self) -> &OutputStream {

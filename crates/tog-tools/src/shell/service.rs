@@ -64,7 +64,7 @@ impl ShellService {
             .output_limit_bytes
             .unwrap_or(DEFAULT_INLINE_OUTPUT_BYTES);
 
-        let execution = Execution::spawn(parameters.commands, timeout)?;
+        let execution = Execution::try_new(parameters.commands, timeout)?;
         let execution_id = ExecutionId::new();
         let stdout_stream_id = StreamId::new();
         let stderr_stream_id = StreamId::new();
