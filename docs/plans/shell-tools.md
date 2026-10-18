@@ -26,7 +26,9 @@ Each call starts a fresh shell with tog's inherited environment. The shell
 interprets pipes, redirects, variable expansion, and command sequences.
 
 - For phase 1, the execution context uses tog's current working directory and
-  inherited environment. A directory override affects one call.
+  inherited environment. A successful command can change its own directory
+  with `cd ... && ...`. A directory override belongs to the phase 2 shell
+  context, not to an execution.
 - Setup commands, `cd`, and `export` affect only that execution.
 - Filesystem changes and other external effects remain shared.
 - Omitted `shell_context_id` always means independent execution, including later.
@@ -119,15 +121,47 @@ immutably referenced, as required by [project principles](../principles.md).
 Implemented phase-1 decisions: executions and streams remain identifiable and
 readable for the life of the tog process; completed output is not promoted to
 assets; stream identifiers are transient references, not durable content
-references; and dropping the shell tool state terminates any still-running
-process groups (the shutdown path). A resumed conversation in a new process sees
-an unknown identifier and reports it as an invalid-argument error. Phase 1 does
-not promise process recovery or automatic command replay. The
-[durable-execution plan](execute-commands-durably.md) covers that broader work.
+references. A resumed conversation in a new process sees an unknown identifier
+and fails explicitly; tog never reruns a command to reconstruct a missing
+execution. Phase 1 does not promise process recovery or automatic command
+replay. The [durable-execution plan](execute-commands-durably.md) covers that
+broader work.
+
+Execution and stream identifiers follow the conversation's identifier
+conventions: version-7 UUIDs under the `exec_` and `stream_` prefixes. They are
+not reused across service instances or process restarts, so a persisted
+identifier cannot resolve to unrelated newer work.
 
 Use the Conversation API for tool results. Live UI progress through conversation
 events remains a separate choice. Do not introduce a parallel event bus or label
 shell output as model-specific data.
+
+## Service boundary and lifecycle ownership
+
+As implemented, a `ShellService` exposes the four operations—execute, wait,
+cancel, and stream read—behind a focused contract. It owns the execution and
+stream registries and their synchronization privately. Tool adapters only
+decode arguments, call the service, and encode results. No new crate or trait
+is involved.
+
+Each `Execution` presents a lifecycle API. Construction happens through
+`Execution::spawn`; callers never touch process identifiers, capture tasks,
+signal flags, or `Arc` sharing. Waiting behavior is a named `WaitPolicy`:
+`WaitForCompletion` for `shell_execute`, `WaitForOutputOrCompletion` for
+`shell_wait`.
+
+Lifecycle ownership is deliberate:
+
+- A supervisor task owns the live child and is the only entity that signals the
+  process group. Cancellation is a request to the supervisor; it terminates the
+  group only while the child is unreaped, when the saved process id cannot yet
+  be reused.
+- Completion is recorded by the same supervisor, so a late cancellation can
+  neither signal a reused group nor overwrite a completed outcome. Cancellation
+  after completion is a no-op.
+- Releasing the service requests cancellation of tracked executions through
+  this owner. `Drop` is a synchronous fallback that only issues the request; it
+  does not await process cleanup.
 
 ## Phase 2: shell contexts
 
@@ -183,7 +217,7 @@ names below with explicit units: `wait_time_seconds`, `timeout_seconds`,
 `output_limit_bytes`, `offset`, and `limit_bytes`.
 
 ```text
-shell_execute(commands, shell_context_id?, directory?,
+shell_execute(commands, shell_context_id?,
               wait_time_seconds?, timeout_seconds?, output_limit_bytes?)
   -> execution_id
      stdout_stream_id

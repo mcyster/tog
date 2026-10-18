@@ -1,6 +1,5 @@
 use std::fmt::{Display, Formatter};
 use std::io;
-use std::path::PathBuf;
 use std::process::{ExitStatus, Stdio};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -9,7 +8,9 @@ use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::{Child, Command};
+use tokio::sync::watch;
 use tokio::task::JoinHandle;
+use uuid::Uuid;
 
 use tog::conversation::{FailureCategory, OperationFailure};
 
@@ -19,17 +20,17 @@ use super::{
 };
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(crate) struct ExecutionId(u64);
+pub(super) struct ExecutionId(Uuid);
 
 impl ExecutionId {
-    pub(crate) fn new(value: u64) -> Self {
-        Self(value)
+    pub(super) fn new() -> Self {
+        Self(Uuid::now_v7())
     }
 }
 
 impl Display for ExecutionId {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "exec_{}", self.0)
+        write!(formatter, "exec_{}", self.0.simple())
     }
 }
 
@@ -37,57 +38,120 @@ impl FromStr for ExecutionId {
     type Err = ();
 
     fn from_str(text: &str) -> Result<Self, Self::Err> {
-        let digits = text.strip_prefix("exec_").ok_or(())?;
-        let value = digits.parse::<u64>().map_err(|_| ())?;
-        Ok(Self(value))
+        let uuid_text = text.strip_prefix("exec_").ok_or(())?;
+        Uuid::parse_str(uuid_text).map(Self).map_err(|_| ())
     }
 }
 
-pub(crate) struct Execution {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum WaitPolicy {
+    WaitForCompletion,
+    WaitForOutputOrCompletion,
+}
+
+pub(super) struct Execution {
     standard_output: Arc<SharedStream>,
     standard_error: Arc<SharedStream>,
     combined_output: Arc<SharedStream>,
     process_id: u32,
-    cancellation: Arc<Cancellation>,
+    termination: watch::Sender<bool>,
+    signals: ExecutionSignals,
     completion: Mutex<Completion>,
 }
 
 impl Execution {
-    pub(crate) fn standard_output(&self) -> Arc<SharedStream> {
+    pub(super) fn spawn(
+        commands: String,
+        timeout: Duration,
+    ) -> Result<Arc<Execution>, OperationFailure> {
+        let mut command = Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg(commands)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .process_group(0);
+        let mut child = command.spawn().map_err(|error| {
+            execution_failed(format!("the shell process could not be started: {error}"))
+        })?;
+        let process_id = child.id().ok_or_else(|| {
+            execution_failed("the shell process reported no identifier after starting".to_owned())
+        })?;
+        let stdout_pipe = take_pipe(child.stdout.take(), "standard output")?;
+        let stderr_pipe = take_pipe(child.stderr.take(), "standard error")?;
+
+        let standard_output = Arc::new(SharedStream::new(SPOOL_MEMORY_THRESHOLD_BYTES));
+        let standard_error = Arc::new(SharedStream::new(SPOOL_MEMORY_THRESHOLD_BYTES));
+        let combined_output = Arc::new(SharedStream::new(SPOOL_MEMORY_THRESHOLD_BYTES));
+        let (termination, termination_receiver) = watch::channel(false);
+        let execution = Arc::new(Execution {
+            standard_output: Arc::clone(&standard_output),
+            standard_error: Arc::clone(&standard_error),
+            combined_output: Arc::clone(&combined_output),
+            process_id,
+            termination,
+            signals: ExecutionSignals::default(),
+            completion: Mutex::new(Completion::default()),
+        });
+
+        let standard_output_drain = tokio::spawn(drain_output(
+            stdout_pipe,
+            Arc::clone(&standard_output),
+            Arc::clone(&combined_output),
+            Arc::clone(&execution),
+        ));
+        let standard_error_drain = tokio::spawn(drain_output(
+            stderr_pipe,
+            Arc::clone(&standard_error),
+            Arc::clone(&combined_output),
+            Arc::clone(&execution),
+        ));
+        tokio::spawn(supervise(
+            child,
+            termination_receiver,
+            standard_output_drain,
+            standard_error_drain,
+            Arc::clone(&execution),
+            timeout,
+        ));
+        Ok(execution)
+    }
+
+    pub(super) fn standard_output(&self) -> Arc<SharedStream> {
         Arc::clone(&self.standard_output)
     }
 
-    pub(crate) fn standard_error(&self) -> Arc<SharedStream> {
+    pub(super) fn standard_error(&self) -> Arc<SharedStream> {
         Arc::clone(&self.standard_error)
     }
 
-    pub(crate) fn combined_output(&self) -> Arc<SharedStream> {
+    pub(super) fn combined_output(&self) -> Arc<SharedStream> {
         Arc::clone(&self.combined_output)
     }
 
-    pub(crate) fn request_cancel(&self) {
-        self.cancellation.requested.store(true, Ordering::SeqCst);
-        kill_process_group(self.process_id);
+    pub(super) fn request_cancel(&self) {
+        self.signals.cancelled.store(true, Ordering::SeqCst);
+        let _ = self.termination.send(true);
     }
 
-    pub(crate) async fn state_at(
+    pub(super) async fn wait_for_state(
         &self,
         offset: u64,
         output_limit: u64,
-        wait: Option<Duration>,
-        return_on_output: bool,
+        wait: Duration,
+        policy: WaitPolicy,
     ) -> ExecutionState {
-        let deadline = wait.map(|duration| tokio::time::Instant::now() + duration);
+        let deadline = tokio::time::Instant::now() + wait;
         loop {
             if self.completion_snapshot().status == ExecutionStatus::Complete {
                 break;
             }
-            if return_on_output && self.combined_output.available(offset) {
+            if policy == WaitPolicy::WaitForOutputOrCompletion
+                && self.combined_output.available(offset)
+            {
                 break;
             }
-            let Some(deadline) = deadline else {
-                break;
-            };
             let now = tokio::time::Instant::now();
             if now >= deadline {
                 break;
@@ -118,18 +182,38 @@ impl Execution {
         }
     }
 
+    fn wants_termination(&self) -> bool {
+        self.signals.cancelled.load(Ordering::SeqCst)
+            || self.signals.timed_out.load(Ordering::SeqCst)
+            || self.signals.capture_failed.load(Ordering::SeqCst)
+    }
+
+    fn note_timed_out(&self) {
+        self.signals.timed_out.store(true, Ordering::SeqCst);
+    }
+
+    fn note_capture_failure(&self) {
+        self.signals.capture_failed.store(true, Ordering::SeqCst);
+        let _ = self.termination.send(true);
+    }
+
     fn mark_completed(&self, natural_exit: Option<ExitStatus>) {
         let mut completion = self
             .completion
             .lock()
             .expect("the shell completion should lock");
         completion.status = ExecutionStatus::Complete;
-        if self.cancellation.requested.load(Ordering::SeqCst) {
+        if self.signals.capture_failed.load(Ordering::SeqCst) {
+            completion.error = Some(ShellExecutionError {
+                kind: ShellExecutionErrorKind::CaptureFailed,
+                message: "the shell output could not be captured".to_owned(),
+            });
+        } else if self.signals.cancelled.load(Ordering::SeqCst) {
             completion.error = Some(ShellExecutionError {
                 kind: ShellExecutionErrorKind::Cancelled,
                 message: "the shell execution was cancelled".to_owned(),
             });
-        } else if self.cancellation.timed_out.load(Ordering::SeqCst) {
+        } else if self.signals.timed_out.load(Ordering::SeqCst) {
             completion.error = Some(ShellExecutionError {
                 kind: ShellExecutionErrorKind::TimedOut,
                 message: "the shell execution exceeded its timeout".to_owned(),
@@ -139,14 +223,10 @@ impl Execution {
         }
     }
 
-    fn release_streams(
-        &self,
-        standard_output_result: DrainResult,
-        standard_error_result: DrainResult,
-    ) {
-        let capture_failed = matches!(standard_output_result, DrainResult::CaptureFailed)
-            || matches!(standard_error_result, DrainResult::CaptureFailed);
-        if capture_failed {
+    fn release_streams(&self, standard_output: DrainResult, standard_error: DrainResult) {
+        if matches!(standard_output, DrainResult::CaptureFailed)
+            || matches!(standard_error, DrainResult::CaptureFailed)
+        {
             let mut completion = self
                 .completion
                 .lock()
@@ -163,71 +243,9 @@ impl Execution {
     }
 }
 
-pub(crate) async fn spawn(
-    commands: String,
-    directory: Option<PathBuf>,
-    timeout: Duration,
-) -> Result<Arc<Execution>, OperationFailure> {
-    let mut command = Command::new("/bin/sh");
-    command
-        .arg("-c")
-        .arg(commands)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .process_group(0);
-    if let Some(directory) = directory {
-        command.current_dir(directory);
-    }
-    let mut child = command.spawn().map_err(|error| {
-        execution_failed(format!("the shell process could not be started: {error}"))
-    })?;
-    let process_id = child.id().ok_or_else(|| {
-        execution_failed("the shell process reported no identifier after starting".to_owned())
-    })?;
-    let stdout_pipe = take_pipe(child.stdout.take(), "standard output")?;
-    let stderr_pipe = take_pipe(child.stderr.take(), "standard error")?;
-
-    let standard_output = Arc::new(SharedStream::new(SPOOL_MEMORY_THRESHOLD_BYTES));
-    let standard_error = Arc::new(SharedStream::new(SPOOL_MEMORY_THRESHOLD_BYTES));
-    let combined_output = Arc::new(SharedStream::new(SPOOL_MEMORY_THRESHOLD_BYTES));
-    let cancellation = Arc::new(Cancellation::default());
-    let execution = Arc::new(Execution {
-        standard_output: Arc::clone(&standard_output),
-        standard_error: Arc::clone(&standard_error),
-        combined_output: Arc::clone(&combined_output),
-        process_id,
-        cancellation: Arc::clone(&cancellation),
-        completion: Mutex::new(Completion::default()),
-    });
-
-    let standard_output_drain = tokio::spawn(drain_output(
-        stdout_pipe,
-        Arc::clone(&standard_output),
-        Arc::clone(&combined_output),
-        Arc::clone(&cancellation),
-        process_id,
-    ));
-    let standard_error_drain = tokio::spawn(drain_output(
-        stderr_pipe,
-        Arc::clone(&standard_error),
-        Arc::clone(&combined_output),
-        Arc::clone(&cancellation),
-        process_id,
-    ));
-    tokio::spawn(supervise(
-        child,
-        standard_output_drain,
-        standard_error_drain,
-        Arc::clone(&execution),
-        timeout,
-    ));
-    Ok(execution)
-}
-
 #[derive(Default)]
-struct Cancellation {
-    requested: AtomicBool,
+struct ExecutionSignals {
+    cancelled: AtomicBool,
     timed_out: AtomicBool,
     capture_failed: AtomicBool,
 }
@@ -253,21 +271,32 @@ enum DrainResult {
 
 async fn supervise(
     mut child: Child,
+    termination: watch::Receiver<bool>,
     standard_output_drain: JoinHandle<DrainResult>,
     standard_error_drain: JoinHandle<DrainResult>,
     execution: Arc<Execution>,
     timeout: Duration,
 ) {
-    let natural_exit = tokio::select! {
-        status = child.wait() => Some(status),
-        () = tokio::time::sleep(timeout) => {
-            execution.cancellation.timed_out.store(true, Ordering::SeqCst);
+    let timeout_deadline = tokio::time::Instant::now() + timeout;
+    let mut termination = termination;
+    let natural_exit = loop {
+        if execution.wants_termination() {
             kill_process_group(execution.process_id);
-            None
+        }
+        let remaining = timeout_deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            execution.note_timed_out();
+            kill_process_group(execution.process_id);
+            break None;
+        }
+        tokio::select! {
+            status = child.wait() => break status.ok(),
+            _ = termination.changed() => {}
+            () = tokio::time::sleep(remaining) => execution.note_timed_out(),
         }
     };
     let natural_exit = match natural_exit {
-        Some(status) => status.ok(),
+        Some(status) => Some(status),
         None => {
             let _ = child.wait().await;
             None
@@ -287,8 +316,7 @@ async fn drain_output<Reader>(
     mut reader: Reader,
     target: Arc<SharedStream>,
     combined: Arc<SharedStream>,
-    cancellation: Arc<Cancellation>,
-    process_id: u32,
+    execution: Arc<Execution>,
 ) -> DrainResult
 where
     Reader: AsyncRead + Unpin,
@@ -302,20 +330,18 @@ where
                 if combined.append(chunk.clone()).await.is_err()
                     || target.append(chunk).await.is_err()
                 {
-                    return fail_capture(&cancellation, process_id);
+                    execution.note_capture_failure();
+                    return DrainResult::CaptureFailed;
                 }
             }
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-            Err(_) => return fail_capture(&cancellation, process_id),
+            Err(_) => {
+                execution.note_capture_failure();
+                return DrainResult::CaptureFailed;
+            }
         }
     }
     DrainResult::Finished
-}
-
-fn fail_capture(cancellation: &Cancellation, process_id: u32) -> DrainResult {
-    cancellation.capture_failed.store(true, Ordering::SeqCst);
-    kill_process_group(process_id);
-    DrainResult::CaptureFailed
 }
 
 fn build_state(
@@ -360,12 +386,12 @@ fn shell_exit_status(exit_status: ExitStatus) -> ShellExitStatus {
     }
 }
 
-pub(crate) fn invalid_arguments(message: String) -> OperationFailure {
+pub(super) fn invalid_arguments(message: String) -> OperationFailure {
     OperationFailure::try_new(FailureCategory::InvalidArguments, message, None)
         .expect("the invalid-argument message should be valid")
 }
 
-pub(crate) fn execution_failed(message: String) -> OperationFailure {
+pub(super) fn execution_failed(message: String) -> OperationFailure {
     OperationFailure::try_new(FailureCategory::ExecutionFailed, message, None)
         .expect("the execution failure message should be valid")
 }
@@ -378,11 +404,24 @@ mod tests {
 
     #[test]
     fn execution_identifiers_parse_from_and_display_their_prefix_form() {
-        let identifier = ExecutionId::new(2);
+        let identifier = ExecutionId::new();
 
-        assert_eq!(identifier.to_string(), "exec_2");
-        assert_eq!(ExecutionId::from_str("exec_2"), Ok(identifier));
-        assert!(ExecutionId::from_str("stream_2").is_err());
-        assert!(ExecutionId::from_str("exec_abc").is_err());
+        assert!(identifier.to_string().starts_with("exec_"));
+        assert_eq!(
+            ExecutionId::from_str(&identifier.to_string()),
+            Ok(identifier)
+        );
+        assert!(ExecutionId::from_str("stream_foo").is_err());
+        assert!(ExecutionId::from_str("exec_not-a-uuid").is_err());
+        assert!(ExecutionId::from_str("exec_123").is_err());
+    }
+
+    #[test]
+    fn execution_identifiers_do_not_repeat() {
+        let first = ExecutionId::new();
+        let second = ExecutionId::new();
+
+        assert_ne!(first, second);
+        assert_ne!(first.to_string(), second.to_string());
     }
 }

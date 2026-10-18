@@ -113,16 +113,16 @@ cargo run -- :log --readable
 
 A turn may request tools. The current build registers `shell_execute`,
 `shell_wait`, `shell_cancel`, and `stream_read`. A command runs through
-`/bin/sh -c` without an approval prompt, in the current directory unless a
-`directory` is given. `shell_execute` waits up to 30 seconds and returns a
-bounded slice of the combined output; a longer command returns a running
-execution that a model can wait on and cancel. Capture stays in memory until a
-stream passes 64 KiB, then spills to a temporary file, and `stream_read` reads
-any stream by byte offset. Nonzero exits, signals, timeouts, and cancellation
-are reported in the execution state; invalid arguments, unknown identifiers,
-and launch failures are returned as typed tool-call problems. Tool definitions,
-requests, and responses are recorded in the conversation log. See
-[Tools](docs/tools.md).
+`/bin/sh -c` without an approval prompt, in the current directory; a command
+can change its own directory with `cd ... && ...`. `shell_execute` waits up to
+30 seconds and returns a bounded slice of the combined output; a longer
+command returns a running execution that a model can wait on and cancel.
+Capture stays in memory until a stream passes 64 KiB, then spills to a
+temporary file, and `stream_read` reads any stream by byte offset. Nonzero
+exits, signals, timeouts, and cancellation are reported in the execution
+state; invalid arguments, unknown identifiers, and launch failures are
+returned as typed tool-call problems. Tool definitions, requests, and
+responses are recorded in the conversation log. See [Tools](docs/tools.md).
 
 ## Build
 

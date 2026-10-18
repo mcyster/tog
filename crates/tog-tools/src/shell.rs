@@ -2,11 +2,10 @@
 mod tests;
 
 mod execution;
-mod registry;
+mod service;
 mod stream;
 mod tools;
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use schemars::JsonSchema;
@@ -22,19 +21,17 @@ pub struct ShellTools;
 
 impl ShellTools {
     pub fn register(registry: &mut ToolRegistry) {
-        let state = Arc::new(registry::ShellState::new());
-        registry.register(tools::ShellExecuteTool::new(Arc::clone(&state)));
-        registry.register(tools::ShellWaitTool::new(Arc::clone(&state)));
-        registry.register(tools::ShellCancelTool::new(Arc::clone(&state)));
-        registry.register(tools::StreamReadTool::new(Arc::clone(&state)));
+        let service = Arc::new(service::ShellService::new());
+        registry.register(tools::ShellExecuteTool::new(Arc::clone(&service)));
+        registry.register(tools::ShellWaitTool::new(Arc::clone(&service)));
+        registry.register(tools::ShellCancelTool::new(Arc::clone(&service)));
+        registry.register(tools::StreamReadTool::new(Arc::clone(&service)));
     }
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub(crate) struct ShellExecuteParameters {
     commands: String,
-    #[serde(default)]
-    directory: Option<PathBuf>,
     #[serde(default)]
     shell_context_id: Option<String>,
     #[serde(default)]

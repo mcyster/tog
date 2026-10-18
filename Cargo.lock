@@ -1559,6 +1559,7 @@ dependencies = [
  "tog",
  "tog-context",
  "tokio",
+ "uuid",
 ]
 
 [[package]]

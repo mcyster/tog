@@ -9,30 +9,30 @@ use tog::conversation::{OperationFailure, ToolDefinition, ToolName};
 use tog_context::toolset::ExecutableTool;
 
 use super::execution::{execution_failed, invalid_arguments};
-use super::registry::ShellState;
+use super::service::ShellService;
 use super::{
     ExecutionState, ShellCancelParameters, ShellCancelResult, ShellExecuteParameters,
     ShellExecuteResult, ShellWaitParameters, StreamReadParameters, StreamReadResult,
 };
 
-pub(crate) struct ShellExecuteTool {
+pub(super) struct ShellExecuteTool {
     definition: ToolDefinition,
-    shared: Arc<ShellState>,
+    service: Arc<ShellService>,
 }
 
 impl ShellExecuteTool {
-    pub(crate) fn new(shared: Arc<ShellState>) -> Self {
+    pub(super) fn new(service: Arc<ShellService>) -> Self {
         Self {
             definition: tool_definition(
                 "shell_execute",
-                "Run a command with /bin/sh -c in an optional working directory. Waits up to \
-                 wait_time_seconds for the command to finish and returns a shell execution state \
-                 plus execution and stream identifiers; a longer command keeps running and can be \
-                 followed with shell_wait or cancelled with shell_cancel.",
+                "Run a command with /bin/sh -c. Waits up to wait_time_seconds for the command \
+                 to finish and returns a shell execution state plus execution and stream \
+                 identifiers; a longer command keeps running and can be followed with \
+                 shell_wait or cancelled with shell_cancel.",
                 schema_for!(ShellExecuteParameters),
                 schema_for!(ShellExecuteResult),
             ),
-            shared,
+            service,
         }
     }
 }
@@ -51,7 +51,7 @@ impl ExecutableTool for ShellExecuteTool {
                 serde_json::from_value(arguments).map_err(|error| {
                     invalid_arguments(format!("invalid shell_execute arguments: {error}"))
                 })?;
-            let result = self.shared.execute(parameters).await?;
+            let result = self.service.execute(parameters).await?;
             serde_json::to_value(result).map_err(|error| {
                 execution_failed(format!(
                     "the shell_execute result could not be serialized: {error}"
@@ -62,13 +62,13 @@ impl ExecutableTool for ShellExecuteTool {
     }
 }
 
-pub(crate) struct ShellWaitTool {
+pub(super) struct ShellWaitTool {
     definition: ToolDefinition,
-    shared: Arc<ShellState>,
+    service: Arc<ShellService>,
 }
 
 impl ShellWaitTool {
-    pub(crate) fn new(shared: Arc<ShellState>) -> Self {
+    pub(super) fn new(service: Arc<ShellService>) -> Self {
         Self {
             definition: tool_definition(
                 "shell_wait",
@@ -79,7 +79,7 @@ impl ShellWaitTool {
                 schema_for!(ShellWaitParameters),
                 schema_for!(ExecutionState),
             ),
-            shared,
+            service,
         }
     }
 }
@@ -98,7 +98,7 @@ impl ExecutableTool for ShellWaitTool {
                 serde_json::from_value(arguments).map_err(|error| {
                     invalid_arguments(format!("invalid shell_wait arguments: {error}"))
                 })?;
-            let state = self.shared.wait(parameters).await?;
+            let state = self.service.wait(parameters).await?;
             serde_json::to_value(state).map_err(|error| {
                 execution_failed(format!(
                     "the shell_wait result could not be serialized: {error}"
@@ -109,22 +109,23 @@ impl ExecutableTool for ShellWaitTool {
     }
 }
 
-pub(crate) struct ShellCancelTool {
+pub(super) struct ShellCancelTool {
     definition: ToolDefinition,
-    shared: Arc<ShellState>,
+    service: Arc<ShellService>,
 }
 
 impl ShellCancelTool {
-    pub(crate) fn new(shared: Arc<ShellState>) -> Self {
+    pub(super) fn new(service: Arc<ShellService>) -> Self {
         Self {
             definition: tool_definition(
                 "shell_cancel",
                 "Terminate a running shell execution and its child processes. A later shell_wait \
-                 reports the cancelled execution's final state.",
+                 reports the cancelled execution's final state. Cancelling an execution that has \
+                 already completed is a no-op.",
                 schema_for!(ShellCancelParameters),
                 schema_for!(ShellCancelResult),
             ),
-            shared,
+            service,
         }
     }
 }
@@ -143,7 +144,7 @@ impl ExecutableTool for ShellCancelTool {
                 serde_json::from_value(arguments).map_err(|error| {
                     invalid_arguments(format!("invalid shell_cancel arguments: {error}"))
                 })?;
-            let result = self.shared.cancel(parameters)?;
+            let result = self.service.cancel(parameters)?;
             serde_json::to_value(result).map_err(|error| {
                 execution_failed(format!(
                     "the shell_cancel result could not be serialized: {error}"
@@ -154,13 +155,13 @@ impl ExecutableTool for ShellCancelTool {
     }
 }
 
-pub(crate) struct StreamReadTool {
+pub(super) struct StreamReadTool {
     definition: ToolDefinition,
-    shared: Arc<ShellState>,
+    service: Arc<ShellService>,
 }
 
 impl StreamReadTool {
-    pub(crate) fn new(shared: Arc<ShellState>) -> Self {
+    pub(super) fn new(service: Arc<ShellService>) -> Self {
         Self {
             definition: tool_definition(
                 "stream_read",
@@ -170,7 +171,7 @@ impl StreamReadTool {
                 schema_for!(StreamReadParameters),
                 schema_for!(StreamReadResult),
             ),
-            shared,
+            service,
         }
     }
 }
@@ -189,7 +190,7 @@ impl ExecutableTool for StreamReadTool {
                 serde_json::from_value(arguments).map_err(|error| {
                     invalid_arguments(format!("invalid stream_read arguments: {error}"))
                 })?;
-            let result = self.shared.read(parameters).await?;
+            let result = self.service.read_stream(parameters).await?;
             serde_json::to_value(result).map_err(|error| {
                 execution_failed(format!(
                     "the stream_read result could not be serialized: {error}"

@@ -1,12 +1,11 @@
 use std::collections::HashMap;
 use std::str::FromStr;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tog::conversation::OperationFailure;
 
-use super::execution::{Execution, ExecutionId, invalid_arguments, spawn};
+use super::execution::{Execution, ExecutionId, WaitPolicy, invalid_arguments};
 use super::stream::{SharedStream, StreamId};
 use super::{
     DEFAULT_INLINE_OUTPUT_BYTES, DEFAULT_TIMEOUT_SECONDS, DEFAULT_WAIT_SECONDS, ExecutionState,
@@ -14,24 +13,20 @@ use super::{
     ShellWaitParameters, StreamReadParameters, StreamReadResult,
 };
 
-pub(crate) struct ShellState {
+pub(super) struct ShellService {
     executions: Mutex<HashMap<ExecutionId, Arc<Execution>>>,
     streams: Mutex<HashMap<StreamId, Arc<SharedStream>>>,
-    next_execution: AtomicU64,
-    next_stream: AtomicU64,
 }
 
-impl ShellState {
-    pub(crate) fn new() -> Self {
+impl ShellService {
+    pub(super) fn new() -> Self {
         Self {
             executions: Mutex::new(HashMap::new()),
             streams: Mutex::new(HashMap::new()),
-            next_execution: AtomicU64::new(0),
-            next_stream: AtomicU64::new(0),
         }
     }
 
-    pub(crate) async fn execute(
+    pub(super) async fn execute(
         &self,
         parameters: ShellExecuteParameters,
     ) -> Result<ShellExecuteResult, OperationFailure> {
@@ -56,13 +51,11 @@ impl ShellState {
             .output_limit_bytes
             .unwrap_or(DEFAULT_INLINE_OUTPUT_BYTES);
 
-        let execution_id =
-            ExecutionId::new(self.next_execution.fetch_add(1, Ordering::Relaxed) + 1);
-        let execution = spawn(parameters.commands, parameters.directory, timeout).await?;
-
-        let stdout_stream_id = StreamId::new(self.next_stream.fetch_add(1, Ordering::Relaxed) + 1);
-        let stderr_stream_id = StreamId::new(self.next_stream.fetch_add(1, Ordering::Relaxed) + 1);
-        let output_stream_id = StreamId::new(self.next_stream.fetch_add(1, Ordering::Relaxed) + 1);
+        let execution = Execution::spawn(parameters.commands, timeout)?;
+        let execution_id = ExecutionId::new();
+        let stdout_stream_id = StreamId::new();
+        let stderr_stream_id = StreamId::new();
+        let output_stream_id = StreamId::new();
         {
             let mut executions = self
                 .executions
@@ -78,7 +71,9 @@ impl ShellState {
             streams.insert(output_stream_id, execution.combined_output());
         }
 
-        let state = execution.state_at(0, output_limit, Some(wait), false).await;
+        let state = execution
+            .wait_for_state(0, output_limit, wait, WaitPolicy::WaitForCompletion)
+            .await;
         Ok(ShellExecuteResult {
             execution_id: execution_id.to_string(),
             stdout_stream_id: stdout_stream_id.to_string(),
@@ -88,7 +83,7 @@ impl ShellState {
         })
     }
 
-    pub(crate) async fn wait(
+    pub(super) async fn wait(
         &self,
         parameters: ShellWaitParameters,
     ) -> Result<ExecutionState, OperationFailure> {
@@ -99,11 +94,16 @@ impl ShellState {
             .output_limit_bytes
             .unwrap_or(DEFAULT_INLINE_OUTPUT_BYTES);
         Ok(execution
-            .state_at(parameters.offset, output_limit, Some(wait), true)
+            .wait_for_state(
+                parameters.offset,
+                output_limit,
+                wait,
+                WaitPolicy::WaitForOutputOrCompletion,
+            )
             .await)
     }
 
-    pub(crate) fn cancel(
+    pub(super) fn cancel(
         &self,
         parameters: ShellCancelParameters,
     ) -> Result<ShellCancelResult, OperationFailure> {
@@ -112,7 +112,7 @@ impl ShellState {
         Ok(ShellCancelResult { cancelled: true })
     }
 
-    pub(crate) async fn read(
+    pub(super) async fn read_stream(
         &self,
         parameters: StreamReadParameters,
     ) -> Result<StreamReadResult, OperationFailure> {
@@ -156,7 +156,7 @@ impl ShellState {
     }
 }
 
-impl Drop for ShellState {
+impl Drop for ShellService {
     fn drop(&mut self) {
         let executions = self
             .executions

@@ -75,15 +75,16 @@ and `stream_read`. They provide independent command execution, bounded inline
 output, and readable output streams.
 
 Each execution starts a fresh `/bin/sh -c COMMAND` with tog's inherited
-environment and current working directory. A `directory` parameter overrides
-the working directory for one call. Stdin is closed. Setup commands and
-exported variables affect only that execution. Supplied `shell_context_id`
+environment and current working directory. Stdin is closed. Setup commands,
+`cd`, and exported variables affect only that execution; a command can change
+its own directory with `cd ... && ...`. A working-directory override belongs to
+the future shell context, not to an execution. Supplied `shell_context_id`
 values are rejected; shell contexts are planned, not implemented.
 
 ### Execution state
 
-`shell_execute(commands, directory?, wait_time_seconds?, timeout_seconds?,
-output_limit_bytes?, shell_context_id?)` starts the command and waits up to
+`shell_execute(commands, shell_context_id?, wait_time_seconds?,
+timeout_seconds?, output_limit_bytes?)` starts the command and waits up to
 `wait_time_seconds` (default 30 seconds) for it to finish. The result contains:
 
 - `execution_id`
@@ -112,9 +113,12 @@ returns the execution state from the given byte offset. It returns when output
 beyond the offset is available, when the execution completes, or when the wait
 time elapses.
 
-`shell_cancel(execution_id)` terminates the execution's process group and
-returns `{ "cancelled": true }`. It is safe to repeat. A later `shell_wait`
-reports the cancelled final state.
+`shell_cancel(execution_id)` requests termination of the execution and its
+process group, and returns `{ "cancelled": true }`. The request is routed
+through the execution's supervisor, which terminates the group only while the
+command is still live. Cancellation is safe to repeat. Cancelling an execution
+that has already completed is a no-op and leaves its result unchanged. A later
+`shell_wait` reports the cancelled final state.
 
 Tool-call failures remain `OperationFailure` problems. Launch failure is kind
 `execution_failed`; a timeout or cancellation applies to the execution and is
@@ -145,8 +149,20 @@ remainder with `stream_read`. Phase 1 has no total capture limit.
 Executions and streams live for the life of the tog process. A completed
 execution stays identifiable and its retained output stays readable. A new
 process cannot reference an execution or stream from an earlier process;
-unknown identifiers are invalid-argument errors. Dropping the shell tool state
-terminates any still-running executions.
+unknown identifiers are invalid-argument errors.
+
+Execution and stream identifiers are unique UUIDs with `exec_` and `stream_`
+prefixes. They are never reused within or across services or process restarts,
+so a persisted identifier cannot resolve to unrelated newer work. An
+unavailable identifier fails explicitly; tog never reruns a command to
+reconstruct a missing execution.
+
+Cancellation is a request to the execution's supervisor. Only the supervisor,
+while it still owns the live command, signals the process group. Completion is
+recorded by the same owner, so a late cancellation cannot signal a reused
+process group or overwrite a completed outcome. Releasing the shell service
+requests cancellation of tracked executions; the supervisors perform the
+termination. The release path does not wait for the processes to finish.
 
 Spill files are anonymous temporary files removed when their stream is
 released. No temporary path or stream identifier is a durable content
@@ -163,3 +179,5 @@ approval prompts, sandbox policies, allowlists, or automatic retries.
   creation and removal.
 - `tokio` gains the `process`, `time`, `sync`, and `io-util` features for
   asynchronous child execution, stream capture, and output waiting.
+- `uuid` provides collision-resistant version-7 identifiers for executions and
+  streams, following the conversation's identifier conventions.
