@@ -48,7 +48,7 @@ pub(crate) struct ShellExecuteResult {
     stdout_stream_id: String,
     stderr_stream_id: String,
     output_stream_id: String,
-    state: ExecutionState,
+    state: ExecutionSnapshot,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -90,7 +90,7 @@ pub(crate) struct StreamReadResult {
 }
 
 #[derive(Clone, Debug, JsonSchema, Serialize)]
-pub(crate) struct ExecutionState {
+pub(crate) struct ExecutionSnapshot {
     output: String,
     next_offset: u64,
     output_eof: bool,

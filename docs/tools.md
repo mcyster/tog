@@ -110,8 +110,9 @@ tog ends an execution for timeout or cancellation, `exit_status` is omitted and
 
 `shell_wait(execution_id, offset, wait_time_seconds?, output_limit_bytes?)`
 returns the execution state from the given byte offset. It returns when output
-beyond the offset is available, when the execution completes, or when the wait
-time elapses.
+beyond the offset is available, when the combined stream reaches its end, or
+when the wait time elapses. The returned state always reports the execution's
+current completion status and error.
 
 `shell_cancel(execution_id)` requests termination of the execution and its
 process group, and returns `{ "cancelled": true }`. The request is routed

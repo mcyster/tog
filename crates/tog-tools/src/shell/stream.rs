@@ -35,20 +35,71 @@ impl FromStr for StreamId {
     }
 }
 
-pub(super) struct SharedStream {
+pub(super) struct OutputStream {
     storage: Arc<Mutex<SpooledTempFile>>,
     written: Arc<AtomicU64>,
     update: Notify,
     closed: AtomicBool,
 }
 
-impl SharedStream {
+impl OutputStream {
     pub(super) fn new(maximum_memory_bytes: usize) -> Self {
         Self {
             storage: Arc::new(Mutex::new(SpooledTempFile::new(maximum_memory_bytes))),
             written: Arc::new(AtomicU64::new(0)),
             update: Notify::new(),
             closed: AtomicBool::new(false),
+        }
+    }
+
+    pub(super) async fn read(&self, offset: u64, limit: u64) -> OutputRead {
+        let storage = Arc::clone(&self.storage);
+        let written = Arc::clone(&self.written);
+        let limit = limit as usize;
+        let read = tokio::task::spawn_blocking(move || {
+            let mut spool = storage.lock().expect("the stream storage should lock");
+            let available = written.load(Ordering::Relaxed).saturating_sub(offset) as usize;
+            let to_read = available.min(limit);
+            let mut bytes = vec![0_u8; to_read];
+            spool.seek(SeekFrom::Start(offset))?;
+            spool.read_exact(&mut bytes)?;
+            let more = to_read < available;
+            Ok::<(Vec<u8>, bool), std::io::Error>((bytes, more))
+        })
+        .await;
+        let (bytes, more) = match read {
+            Ok(Ok((bytes, more))) => (bytes, more),
+            Ok(Err(_)) | Err(_) => (Vec::new(), false),
+        };
+        OutputRead {
+            eof: self.is_closed() && !more,
+            more,
+            bytes,
+        }
+    }
+
+    pub(super) async fn read_following(
+        &self,
+        offset: u64,
+        limit: u64,
+        within: Duration,
+    ) -> OutputRead {
+        let deadline = tokio::time::Instant::now() + within;
+        loop {
+            let read = self.read(offset, limit).await;
+            if read.more || read.eof {
+                return read;
+            }
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                return read;
+            }
+            if tokio::time::timeout(deadline.saturating_duration_since(now), self.follow())
+                .await
+                .is_err()
+            {
+                return read;
+            }
         }
     }
 
@@ -72,61 +123,11 @@ impl SharedStream {
         }
     }
 
-    pub(super) async fn read(&self, offset: u64, limit: u64) -> StreamRead {
-        let storage = Arc::clone(&self.storage);
-        let written = Arc::clone(&self.written);
-        let limit = limit as usize;
-        let read = tokio::task::spawn_blocking(move || {
-            let mut spool = storage.lock().expect("the stream storage should lock");
-            let available = written.load(Ordering::Relaxed).saturating_sub(offset) as usize;
-            let to_read = available.min(limit);
-            let mut bytes = vec![0_u8; to_read];
-            spool.seek(SeekFrom::Start(offset))?;
-            spool.read_exact(&mut bytes)?;
-            Ok::<(Vec<u8>, bool), std::io::Error>((bytes, to_read < available))
-        })
-        .await;
-        match read {
-            Ok(Ok((bytes, more))) => StreamRead { bytes, more },
-            Ok(Err(_)) | Err(_) => StreamRead {
-                bytes: Vec::new(),
-                more: false,
-            },
-        }
+    async fn follow(&self) {
+        self.update.notified().await;
     }
 
-    pub(super) async fn read_with_wait(
-        &self,
-        offset: u64,
-        limit: u64,
-        timeout: Duration,
-    ) -> StreamRead {
-        let deadline = tokio::time::Instant::now() + timeout;
-        loop {
-            let read = self.read(offset, limit).await;
-            let eof = self.is_closed() && !read.more;
-            if read.more || eof {
-                return read;
-            }
-            let now = tokio::time::Instant::now();
-            if now >= deadline {
-                return read;
-            }
-            let remaining = deadline.saturating_duration_since(now);
-            if tokio::time::timeout(remaining, self.follow())
-                .await
-                .is_err()
-            {
-                return read;
-            }
-        }
-    }
-
-    pub(super) fn available(&self, offset: u64) -> bool {
-        self.written.load(Ordering::Relaxed) > offset
-    }
-
-    pub(super) fn is_closed(&self) -> bool {
+    fn is_closed(&self) -> bool {
         self.closed.load(Ordering::SeqCst)
     }
 
@@ -134,15 +135,12 @@ impl SharedStream {
         self.closed.store(true, Ordering::SeqCst);
         self.update.notify_one();
     }
-
-    pub(super) async fn follow(&self) {
-        self.update.notified().await;
-    }
 }
 
-pub(super) struct StreamRead {
+pub(super) struct OutputRead {
     pub(super) bytes: Vec<u8>,
     pub(super) more: bool,
+    pub(super) eof: bool,
 }
 
 #[cfg(test)]

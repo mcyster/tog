@@ -144,11 +144,15 @@ stream registries and their synchronization privately. Tool adapters only
 decode arguments, call the service, and encode results. No new crate or trait
 is involved.
 
-Each `Execution` presents a lifecycle API. Construction happens through
-`Execution::spawn`; callers never touch process identifiers, capture tasks,
-signal flags, or `Arc` sharing. Waiting behavior is a named `WaitPolicy`:
-`WaitForCompletion` for `shell_execute`, `WaitForOutputOrCompletion` for
-`shell_wait`.
+Each `Execution` has a private implementation and a focused caller contract:
+`standard_output()`, `standard_error()`, and `combined_output()` return the
+read-only captured streams; `state()` returns the process state (status, exit
+status, error); `cancel()` requests cancellation; and `wait_for_completion`
+observes state with waiting. `Execution::spawn` starts the work. Callers never
+touch process identifiers, capture tasks, signal flags, locks, or `Arc`
+sharing. Output excerpts and reader offsets are not part of the execution; they
+belong to stream reads, and the service adapter combines a read with the
+process state into each tool response.
 
 Lifecycle ownership is deliberate:
 
@@ -223,15 +227,15 @@ shell_execute(commands, shell_context_id?,
      stdout_stream_id
      stderr_stream_id
      output_stream_id
-     state: ExecutionState
+     state: ExecutionSnapshot
 
 shell_wait(execution_id, offset, wait_time_seconds?, output_limit_bytes?)
-  -> ExecutionState
+  -> ExecutionSnapshot
 
 shell_cancel(execution_id)
   -> cancellation acknowledgement
 
-ExecutionState
+ExecutionSnapshot
   output
   next_offset
   output_eof
@@ -251,7 +255,7 @@ stream_read(stream_id, offset?, limit_bytes?, timeout_seconds?)
 `stream_read` defaults to offset zero. It returns available data immediately.
 At the current end of a live stream, it may wait up to its timeout for more data.
 EOF is true only when the stream is closed and the returned read reaches its end.
-The same rule applies to `ExecutionState.output_eof`.
+The same rule applies to `ExecutionSnapshot.output_eof`.
 
 Failure handling is implemented as follows. Tool-call failures remain the
 existing `OperationFailure` problems: invalid arguments (including unknown or

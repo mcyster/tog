@@ -11,7 +11,7 @@ use tog_context::toolset::ExecutableTool;
 use super::execution::{execution_failed, invalid_arguments};
 use super::service::ShellService;
 use super::{
-    ExecutionState, ShellCancelParameters, ShellCancelResult, ShellExecuteParameters,
+    ExecutionSnapshot, ShellCancelParameters, ShellCancelResult, ShellExecuteParameters,
     ShellExecuteResult, ShellWaitParameters, StreamReadParameters, StreamReadResult,
 };
 
@@ -77,7 +77,7 @@ impl ShellWaitTool {
                  state. Returns the output that has arrived since the offset, bounded by \
                  output_limit_bytes.",
                 schema_for!(ShellWaitParameters),
-                schema_for!(ExecutionState),
+                schema_for!(ExecutionSnapshot),
             ),
             service,
         }

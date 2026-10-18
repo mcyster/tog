@@ -8,16 +8,14 @@ use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::{Child, Command};
-use tokio::sync::watch;
+use tokio::sync::{Notify, watch};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 use tog::conversation::{FailureCategory, OperationFailure};
 
-use super::stream::{SPOOL_MEMORY_THRESHOLD_BYTES, SharedStream, StreamRead};
-use super::{
-    ExecutionState, ExecutionStatus, ShellExecutionError, ShellExecutionErrorKind, ShellExitStatus,
-};
+use super::stream::{OutputStream, SPOOL_MEMORY_THRESHOLD_BYTES};
+use super::{ExecutionStatus, ShellExecutionError, ShellExecutionErrorKind, ShellExitStatus};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(super) struct ExecutionId(Uuid);
@@ -43,20 +41,22 @@ impl FromStr for ExecutionId {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum WaitPolicy {
-    WaitForCompletion,
-    WaitForOutputOrCompletion,
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct ExecutionState {
+    pub(super) status: ExecutionStatus,
+    pub(super) exit_status: Option<ShellExitStatus>,
+    pub(super) error: Option<ShellExecutionError>,
 }
 
 pub(super) struct Execution {
-    standard_output: Arc<SharedStream>,
-    standard_error: Arc<SharedStream>,
-    combined_output: Arc<SharedStream>,
+    standard_output: Arc<OutputStream>,
+    standard_error: Arc<OutputStream>,
+    combined_output: Arc<OutputStream>,
     process_id: u32,
     termination: watch::Sender<bool>,
     signals: ExecutionSignals,
     completion: Mutex<Completion>,
+    completed: Notify,
 }
 
 impl Execution {
@@ -81,9 +81,9 @@ impl Execution {
         let stdout_pipe = take_pipe(child.stdout.take(), "standard output")?;
         let stderr_pipe = take_pipe(child.stderr.take(), "standard error")?;
 
-        let standard_output = Arc::new(SharedStream::new(SPOOL_MEMORY_THRESHOLD_BYTES));
-        let standard_error = Arc::new(SharedStream::new(SPOOL_MEMORY_THRESHOLD_BYTES));
-        let combined_output = Arc::new(SharedStream::new(SPOOL_MEMORY_THRESHOLD_BYTES));
+        let standard_output = Arc::new(OutputStream::new(SPOOL_MEMORY_THRESHOLD_BYTES));
+        let standard_error = Arc::new(OutputStream::new(SPOOL_MEMORY_THRESHOLD_BYTES));
+        let combined_output = Arc::new(OutputStream::new(SPOOL_MEMORY_THRESHOLD_BYTES));
         let (termination, termination_receiver) = watch::channel(false);
         let execution = Arc::new(Execution {
             standard_output: Arc::clone(&standard_output),
@@ -93,6 +93,7 @@ impl Execution {
             termination,
             signals: ExecutionSignals::default(),
             completion: Mutex::new(Completion::default()),
+            completed: Notify::new(),
         });
 
         let standard_output_drain = tokio::spawn(drain_output(
@@ -118,68 +119,53 @@ impl Execution {
         Ok(execution)
     }
 
-    pub(super) fn standard_output(&self) -> Arc<SharedStream> {
-        Arc::clone(&self.standard_output)
+    pub(super) fn standard_output(&self) -> &OutputStream {
+        &self.standard_output
     }
 
-    pub(super) fn standard_error(&self) -> Arc<SharedStream> {
-        Arc::clone(&self.standard_error)
+    pub(super) fn standard_error(&self) -> &OutputStream {
+        &self.standard_error
     }
 
-    pub(super) fn combined_output(&self) -> Arc<SharedStream> {
-        Arc::clone(&self.combined_output)
+    pub(super) fn combined_output(&self) -> &OutputStream {
+        &self.combined_output
     }
 
-    pub(super) fn request_cancel(&self) {
-        self.signals.cancelled.store(true, Ordering::SeqCst);
-        let _ = self.termination.send(true);
-    }
-
-    pub(super) async fn wait_for_state(
-        &self,
-        offset: u64,
-        output_limit: u64,
-        wait: Duration,
-        policy: WaitPolicy,
-    ) -> ExecutionState {
-        let deadline = tokio::time::Instant::now() + wait;
-        loop {
-            if self.completion_snapshot().status == ExecutionStatus::Complete {
-                break;
-            }
-            if policy == WaitPolicy::WaitForOutputOrCompletion
-                && self.combined_output.available(offset)
-            {
-                break;
-            }
-            let now = tokio::time::Instant::now();
-            if now >= deadline {
-                break;
-            }
-            if tokio::time::timeout(
-                deadline.saturating_duration_since(now),
-                self.combined_output.follow(),
-            )
-            .await
-            .is_err()
-            {
-                break;
-            }
-        }
-        let read = self.combined_output.read(offset, output_limit).await;
-        build_state(self, offset, read, self.completion_snapshot())
-    }
-
-    fn completion_snapshot(&self) -> CompletionSnapshot {
+    pub(super) fn state(&self) -> ExecutionState {
         let completion = self
             .completion
             .lock()
             .expect("the shell completion should lock");
-        CompletionSnapshot {
+        ExecutionState {
             status: completion.status,
             exit_status: completion.exit_status,
             error: completion.error.clone(),
         }
+    }
+
+    pub(super) async fn wait_for_completion(&self, within: Duration) -> ExecutionState {
+        let deadline = tokio::time::Instant::now() + within;
+        loop {
+            let state = self.state();
+            if state.status == ExecutionStatus::Complete {
+                return state;
+            }
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                return state;
+            }
+            tokio::time::timeout(
+                deadline.saturating_duration_since(now),
+                self.completed.notified(),
+            )
+            .await
+            .ok();
+        }
+    }
+
+    pub(super) fn cancel(&self) {
+        self.signals.cancelled.store(true, Ordering::SeqCst);
+        let _ = self.termination.send(true);
     }
 
     fn wants_termination(&self) -> bool {
@@ -221,6 +207,8 @@ impl Execution {
         } else if let Some(exit_status) = natural_exit {
             completion.exit_status = Some(shell_exit_status(exit_status));
         }
+        drop(completion);
+        self.completed.notify_one();
     }
 
     fn release_streams(&self, standard_output: DrainResult, standard_error: DrainResult) {
@@ -252,13 +240,6 @@ struct ExecutionSignals {
 
 #[derive(Default)]
 struct Completion {
-    status: ExecutionStatus,
-    exit_status: Option<ShellExitStatus>,
-    error: Option<ShellExecutionError>,
-}
-
-#[derive(Clone)]
-struct CompletionSnapshot {
     status: ExecutionStatus,
     exit_status: Option<ShellExitStatus>,
     error: Option<ShellExecutionError>,
@@ -314,8 +295,8 @@ async fn supervise(
 
 async fn drain_output<Reader>(
     mut reader: Reader,
-    target: Arc<SharedStream>,
-    combined: Arc<SharedStream>,
+    target: Arc<OutputStream>,
+    combined: Arc<OutputStream>,
     execution: Arc<Execution>,
 ) -> DrainResult
 where
@@ -342,22 +323,6 @@ where
         }
     }
     DrainResult::Finished
-}
-
-fn build_state(
-    execution: &Execution,
-    offset: u64,
-    read: StreamRead,
-    completion: CompletionSnapshot,
-) -> ExecutionState {
-    ExecutionState {
-        output: String::from_utf8_lossy(&read.bytes).into_owned(),
-        next_offset: offset + read.bytes.len() as u64,
-        output_eof: execution.combined_output.is_closed() && !read.more,
-        status: completion.status,
-        exit_status: completion.exit_status,
-        error: completion.error,
-    }
 }
 
 fn take_pipe<Reader>(pipe: Option<Reader>, stream_name: &str) -> Result<Reader, OperationFailure> {
