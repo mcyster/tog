@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use tog::conversation::OperationFailure;
 
-use super::execution::{Execution, ExecutionId, ExecutionState, invalid_arguments};
+use super::execution::{Execution, ExecutionId, invalid_arguments};
 use super::stream::StreamId;
 use super::{
     DEFAULT_INLINE_OUTPUT_BYTES, DEFAULT_TIMEOUT_SECONDS, DEFAULT_WAIT_SECONDS, ExecutionSnapshot,
@@ -102,9 +102,9 @@ impl ShellService {
             );
         }
 
-        let _ = execution.wait_for_completion(wait).await;
+        execution.wait_for_completion(wait).await;
         let read = execution.combined_output().read(0, output_limit).await;
-        let state = composed_snapshot(execution.state(), 0, read);
+        let state = composed_snapshot(&execution, 0, read);
         Ok(ShellExecuteResult {
             execution_id: execution_id.to_string(),
             stdout_stream_id: stdout_stream_id.to_string(),
@@ -128,11 +128,7 @@ impl ShellService {
             .combined_output()
             .read_following(parameters.offset, output_limit, wait)
             .await;
-        Ok(composed_snapshot(
-            execution.state(),
-            parameters.offset,
-            read,
-        ))
+        Ok(composed_snapshot(&execution, parameters.offset, read))
     }
 
     pub(super) fn cancel(
@@ -204,7 +200,7 @@ impl ShellService {
 }
 
 fn composed_snapshot(
-    process: ExecutionState,
+    execution: &Execution,
     offset: u64,
     read: super::stream::OutputRead,
 ) -> ExecutionSnapshot {
@@ -212,9 +208,9 @@ fn composed_snapshot(
         output: String::from_utf8_lossy(&read.bytes).into_owned(),
         next_offset: offset + read.bytes.len() as u64,
         output_eof: read.eof,
-        status: process.status,
-        exit_status: process.exit_status,
-        error: process.error,
+        status: execution.status(),
+        exit_status: execution.exit_status(),
+        error: execution.error(),
     }
 }
 

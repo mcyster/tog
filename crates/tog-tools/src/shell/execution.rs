@@ -41,13 +41,6 @@ impl FromStr for ExecutionId {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub(super) struct ExecutionState {
-    pub(super) status: ExecutionStatus,
-    pub(super) exit_status: Option<ShellExitStatus>,
-    pub(super) error: Option<ShellExecutionError>,
-}
-
 pub(super) struct Execution {
     standard_output: Arc<OutputStream>,
     standard_error: Arc<OutputStream>,
@@ -148,28 +141,37 @@ impl Execution {
         &self.combined_output
     }
 
-    pub(super) fn state(&self) -> ExecutionState {
-        let completion = self
-            .completion
+    pub(super) fn status(&self) -> ExecutionStatus {
+        self.completion
             .lock()
-            .expect("the shell completion should lock");
-        ExecutionState {
-            status: completion.status,
-            exit_status: completion.exit_status,
-            error: completion.error.clone(),
-        }
+            .expect("the shell completion should lock")
+            .status
     }
 
-    pub(super) async fn wait_for_completion(&self, within: Duration) -> ExecutionState {
+    pub(super) fn exit_status(&self) -> Option<ShellExitStatus> {
+        self.completion
+            .lock()
+            .expect("the shell completion should lock")
+            .exit_status
+    }
+
+    pub(super) fn error(&self) -> Option<ShellExecutionError> {
+        self.completion
+            .lock()
+            .expect("the shell completion should lock")
+            .error
+            .clone()
+    }
+
+    pub(super) async fn wait_for_completion(&self, within: Duration) {
         let deadline = tokio::time::Instant::now() + within;
         loop {
-            let state = self.state();
-            if state.status == ExecutionStatus::Complete {
-                return state;
+            if self.status() == ExecutionStatus::Complete {
+                return;
             }
             let now = tokio::time::Instant::now();
             if now >= deadline {
-                return state;
+                return;
             }
             tokio::time::timeout(
                 deadline.saturating_duration_since(now),

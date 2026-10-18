@@ -146,9 +146,10 @@ is involved.
 
 Each `Execution` has a private implementation and a focused caller contract:
 `standard_output()`, `standard_error()`, and `combined_output()` return the
-read-only captured streams; `state()` returns the process state (status, exit
-status, error); `cancel()` requests cancellation; and `wait_for_completion`
-observes state with waiting. Construction happens through `Execution::try_new`,
+read-only captured streams; `status()`, `exit_status()`, and `error()`
+accessors report the process state; `cancel()` requests cancellation; and
+`wait_for_completion` observes state with waiting. Construction happens
+through `Execution::try_new`,
 which starts the work; launching the OS process is a private step of that
 constructor. Callers never
 touch process identifiers, capture tasks, signal flags, locks, or `Arc`
