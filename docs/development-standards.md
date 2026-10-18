@@ -14,7 +14,7 @@ The ordered priorities and reasons behind these conventions live in
 - Express intent through names and small, focused entities rather than source comments.
 - Validate external input at the boundary and represent valid values with dedicated types.
 - Represent absence with `Option` and recoverable failure with `Result`.
-- Keep public interfaces minimal.
+- Keep interfaces minimal and use the narrowest visibility required by their intended callers.
 - Keep provider-neutral contracts independent of concrete integrations; integrations depend on contracts, never the reverse.
 - Classify values by lifetime before designing an interface: stable values belong to the object, per-operation values are parameters, derived values are not passed twice, and produced values are returned.
 - Prefer direct parameters and return values. Introduce input structs, result wrappers, callbacks, sinks, channels, or streams only when a concrete current requirement justifies them.
@@ -56,7 +56,40 @@ The ordered priorities and reasons behind these conventions live in
 - Before choosing an approach, consult the principles, architecture overview, and relevant plans and topic documents. Follow detail links as needed, surface conflicts, and update documents whose meaning changes.
 - Keep the project as a Cargo workspace of focused crates; add a crate only when a concrete requirement justifies a separate package and boundary.
 
+## Visibility
+
+Start types, functions, methods, fields, and modules private. Widen visibility only
+when an intended caller needs access as part of the component's contract.
+
+- Prefer `pub(super)` or a specific `pub(in ...)` scope when access is local.
+- Use `pub(crate)` only when callers across the crate need access.
+- Use `pub` only for the intended external API. Keep internal items restricted even
+  when a private module currently prevents external access.
+- Do not widen production visibility solely for tests. Place tests where they can
+  exercise the contract or access private implementation details.
+- Before exposing a helper, ask whether the caller should know that operation
+  exists. Moving implementation details across a boundary is not encapsulation.
+
 ## Readable Contracts
+
+Define each component through the responsibility it owns and the operations it
+provides. A reader should understand its purpose, valid use, ownership, lifetime,
+and failure behavior from the contract without studying the implementation.
+
+- Name components for their responsibility, not merely their stored state.
+- Expose meaningful operations that preserve the component's invariants.
+- Keep storage, synchronization, task coordination, and allocation choices behind
+  the boundary unless they are part of the caller's responsibility.
+- Make ownership, lifetime, and failure behavior clear through types and method
+  signatures. Use explicit names for meaningful behavioral choices.
+- A concrete type with private fields and a coherent API can provide a strong
+  contract. Do not add a trait or wrapper solely to hide implementation syntax.
+- Expose shared ownership, such as `Arc`, only when sharing ownership is part of
+  the caller's contract. Its presence alone is not a design defect.
+
+Review each boundary by asking: can a caller use this component correctly from
+its contract alone, or must they understand how it works internally?
+
 
 Present a concept's contract in its module entry point: trait signatures and the
 important struct, enum, identifier, and error declarations. Keep implementation
