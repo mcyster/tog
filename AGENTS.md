@@ -46,7 +46,9 @@ Follow the ordered priorities and tradeoff guidance in
 - Put conversions on the containing or destination type rather than making inner domain types depend on outer systems.
 - Expose contractually readable state through immutable typed accessors, including extension data intended for compatible consumers; do not expose mutation for convenience.
 - Use `Option` for absence and `Result` for recoverable failure.
-- Keep public interfaces minimal.
+- Keep interfaces minimal. Start types, functions, methods, fields, and modules private; widen visibility only for intended callers. Prefer `pub(super)` or a specific `pub(in ...)` scope over `pub(crate)` when access is local. Reserve `pub` for the external API; do not widen production visibility solely for tests.
+- Define components through their responsibility and meaningful operations. Make valid use, ownership, lifetime, and failure behavior understandable from the contract without reading implementation bodies.
+- Keep storage, synchronization, task coordination, and allocation choices behind the contract unless the caller owns those responsibilities. A concrete type with private fields can provide a strong contract; do not add traits or wrappers merely for appearance.
 - Keep provider-neutral contracts independent of concrete integrations; integrations depend on contracts, never the reverse.
 - Classify values by lifetime before designing an API: object-stable values belong to the object, per-operation values are parameters, derived values are not passed twice, and produced values are returned.
 - Prefer direct parameters and return values. Add input structs, result wrappers, callbacks, sinks, or streams only for a concrete current requirement.
