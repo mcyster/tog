@@ -18,6 +18,7 @@ readonly DEFAULT_MACHINE_TYPE="e2-standard-2"
 readonly DEFAULT_WORKSTATION_NAME="tog"
 readonly INSTANCE_PREFIX="tog-workstation-"
 readonly WORKSTATION_LABEL="tog-workstation=true"
+readonly WORKSTATION_LABEL_FILTER="labels.tog-workstation=true"
 
 usage() {
   cat <<'EOF'
@@ -262,13 +263,14 @@ command_destroy() {
 }
 
 command_list() {
-  local filter="$WORKSTATION_LABEL"
+  local filter="$WORKSTATION_LABEL_FILTER"
   if [[ -n "$zone" ]]; then
     filter="$filter AND zone:$zone"
   fi
   gcloud compute instances list \
     --project "$project" \
     --filter "$filter" \
+    --verbosity=error \
     --format='csv[no-heading](name,status,machineType.basename(),zone.basename())'
 }
 
