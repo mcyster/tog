@@ -120,7 +120,7 @@ Confirm the configured values, confirm billing is enabled, then list machine
 types available in the zone:
 
 ```console
-gcloud config list project compute/zone
+gcloud config list
 gcloud billing projects describe tog-dev
 gcloud compute machine-types list --zones us-central1-a
 ```

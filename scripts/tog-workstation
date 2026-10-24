@@ -269,7 +269,6 @@ command_list() {
   gcloud compute instances list \
     --project "$project" \
     --filter "$filter" \
-    --show-stopped \
     --format='csv[no-heading](name,status,machineType.basename(),zone.basename())'
 }
 
