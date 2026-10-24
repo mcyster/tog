@@ -76,20 +76,31 @@ The GitHub Actions workflow authenticates with
 [Workload Identity Federation](https://github.com/google-github-actions/auth)
 instead.
 
+### Create a project
+
+Create a project and note its ID:
+
+```console
+gcloud projects create tog-dev
+```
+
+Project IDs are globally unique, so if `tog-dev` is unavailable, choose another
+ID. Creation can fail transiently with HTTP `429 RESOURCE_EXHAUSTED` ("Quota
+exceeded for ... 'Write requests per minute'"); wait a minute and retry, or
+create the project from the [Cloud Console](https://console.cloud.google.com).
+Enable billing before provisioning any instances.
+
 ### Configure project and zone
 
 `tog-workstation` uses the `--project` and `--zone` flags when you pass them,
 and otherwise reads gcloud's configuration. Set these once so the commands need
-no flags. The examples below use the project ID `tog` and the zone
+no flags. The examples below use the project ID `tog-dev` and the zone
 `us-central1-a`:
 
 ```console
-gcloud config set project tog
+gcloud config set project tog-dev
 gcloud config set compute/zone us-central1-a
 ```
-
-Project IDs are globally unique, so `tog` may already be in use; choose another
-ID if `gcloud config set project tog` is rejected or the project is not yours.
 
 The workstation is provisioned and stopped in this zone, so choose where you
 want the machine to live. Google documents
@@ -100,7 +111,7 @@ Each command accepts per-call overrides:
 
 ```console
 tog-workstation create main --machine-type e2-standard-2 \
-  --project tog --zone us-central1-a
+  --project tog-dev --zone us-central1-a
 ```
 
 ### Verify access
