@@ -37,18 +37,29 @@ lifecycle:
 
 ### Web terminal
 
-`create --provision` adds a web terminal so the workstation is usable from any
+`create --web-terminal` adds a web terminal so the workstation is usable from any
 device with a browser, with no local tooling installed. It installs
 [code-server](https://github.com/coder/code-server) — VS Code and a shell in the
-browser — serves it on `https://EXTERNAL_IP:8443` with a generated password, and
-starts it as a service that survives `stop` and `start`. The command prints the
-URL and password; accept the self-signed certificate warning the browser shows.
+browser — serves it on `https://EXTERNAL_IP:8443` with a password, and starts it
+as a service that survives `stop` and `start`. Accept the self-signed certificate
+warning the browser shows.
 
 ```console
-tog-workstation create --provision
+tog-workstation create --web-terminal
 ```
 
-Without `--provision`, `create` stays ssh-only and opens no extra firewall port.
+The password comes from `TOG_WEB_TERMINAL_SECRET` when set. Otherwise the
+workstation's stored value is reused, and if no value is stored a random one is
+generated and saved in the instance metadata. The stored value is what GitHub
+Actions reads back, so a workflow and a local shell agree on the same secret.
+`list --full` prints the URL and the current secret for each workstation:
+
+```console
+tog-workstation list --full
+```
+
+Without `--web-terminal`, `create` stays ssh-only and opens no extra firewall
+port.
 
 Today a hosted workstation boots a stock Compute Engine image. Reproducing the
 flake environment inside it, so that developing there feels identical to local,

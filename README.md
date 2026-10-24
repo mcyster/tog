@@ -191,10 +191,13 @@ scripts/tog-workstation destroy
   confirmation, or unconditionally with `--yes`.
 - `create` on an existing workstation leaves it unchanged, so its machine type
   is preserved. There is no resize operation.
-- `create --provision` installs code-server on the workstation: VS Code and a
-  terminal in the browser at `https://EXTERNAL_IP:8443`, with a generated
-  password and a firewall rule for that port. Run create without `--provision`
-  to keep the workstation ssh-only.
+- `create --web-terminal` installs code-server on the workstation: VS Code and a
+  terminal in the browser at `https://EXTERNAL_IP:8443`, with a password and a
+  firewall rule for that port. Run create without `--web-terminal` to keep the
+  workstation ssh-only.
+- The web terminal secret is read from `TOG_WEB_TERMINAL_SECRET` when set; if the
+  workstation already has a stored secret it is reused, otherwise a random one is
+  generated. `list --full` prints each workstation's URL and current secret.
 - No snapshots or backups are created automatically.
 
 The reusable workflow `.github/workflows/tog-workstation.yml` wraps the same

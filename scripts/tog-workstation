@@ -22,6 +22,7 @@ readonly WORKSTATION_LABEL_FILTER="labels.tog-workstation=true"
 readonly CODE_SERVER_TAG="tog-workstation-code-server"
 readonly CODE_SERVER_PORT="8443"
 readonly CODE_FIREWALL_RULE="tog-workstation-code-server"
+readonly CODE_SERVER_PASSWORD_KEY="code-server-password"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly SCRIPT_DIR
 readonly PROVISION_SCRIPT="$SCRIPT_DIR/provision-code-server"
@@ -31,16 +32,16 @@ usage() {
 tog-workstation - manage GCE workstations with persistent boot disks
 
 Usage:
-  tog-workstation [OPTIONS] create [NAME] [--machine-type TYPE] [--provision]
+  tog-workstation [OPTIONS] create [NAME] [--machine-type TYPE] [--web-terminal]
   tog-workstation [OPTIONS] stop [NAME]
   tog-workstation [OPTIONS] start [NAME]
   tog-workstation [OPTIONS] destroy [NAME] [--yes]
-  tog-workstation [OPTIONS] list
+  tog-workstation [OPTIONS] list [--full]
 
 Commands:
   create   Create the workstation if it does not exist. Creating an existing
            workstation changes nothing, including its machine type. With
-           --provision, installs a browser code editor and web terminal.
+           --web-terminal, installs a browser code editor and web terminal.
   stop     Stop the workstation, halting compute charges. The persistent boot
            disk is kept.
   start    Start the existing workstation.
@@ -48,6 +49,7 @@ Commands:
            confirmation unless --yes is given.
   list     Print each workstation as CSV:
            name,status,machine_type,zone,external_ip.
+           With --full, also print web_terminal_url and web_terminal_secret.
 
 NAME defaults to tog. When omitted, every command acts on the workstation named
 tog.
@@ -56,12 +58,18 @@ Options:
   --project PROJECT    Compute Engine project.
   --zone ZONE          Compute Engine zone; the workstation is provisioned here.
   --machine-type TYPE  Machine type used by create. Default: e2-standard-2.
-  --provision          After create, install code-server (VS Code and a
+  --web-terminal       After create, install code-server (VS Code and a
                        terminal in the browser) and print its URL. When
                        omitted, the workstation stays ssh-only.
+  --full               With list, include the web terminal URL and secret
+                       for each workstation.
   --yes                Skip the destroy confirmation.
   -h, --help           Show this help.
 
+The web terminal secret comes from TOG_WEB_TERMINAL_SECRET when set, otherwise
+from the value already stored on the workstation, otherwise a new random value.
+The stored value is reused so re-provisioning with create --web-terminal and
+restarts after start keep the same secret. list --full prints the current value.
 A requested machine type is validated against the zone before provisioning. The
 default project and zone come from your gcloud configuration.
 EOF
@@ -78,7 +86,8 @@ project_option=""
 zone_option=""
 machine_type_option=""
 assume_yes=false
-provision=false
+web_terminal=false
+full_list=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -113,8 +122,12 @@ while [[ $# -gt 0 ]]; do
       machine_type_option="${1#--machine-type=}"
       shift
       ;;
-    --provision)
-      provision=true
+    --web-terminal)
+      web_terminal=true
+      shift
+      ;;
+    --full)
+      full_list=true
       shift
       ;;
     --yes)
@@ -143,8 +156,12 @@ done
 
 [[ -n "$command" ]] || die "no command given; try --help"
 
-if [[ "$provision" == true && "$command" != "create" ]]; then
-  die "--provision applies only to create"
+if [[ "$web_terminal" == true && "$command" != "create" ]]; then
+  die "--web-terminal applies only to create"
+fi
+
+if [[ "$full_list" == true && "$command" != "list" ]]; then
+  die "--full applies only to list"
 fi
 
 if [[ "$command" != "list" && -z "$name" ]]; then
@@ -253,10 +270,37 @@ instance_external_ip() {
   describe_field 'value(networkInterfaces[0].accessConfigs[0].natIP)'
 }
 
+instance_stored_secret() {
+  describe_field "value(metadata.${CODE_SERVER_PASSWORD_KEY})"
+}
+
 generate_password() {
   local random_bytes
   random_bytes="$(head -c 64 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9')"
   printf '%s\n' "${random_bytes:0:32}"
+}
+
+resolve_web_terminal_secret() {
+  local candidate="${TOG_WEB_TERMINAL_SECRET:-}"
+  if [[ -n "$candidate" ]]; then
+    if [[ ! "$candidate" =~ ^[a-zA-Z0-9]+$ ]]; then
+      die "TOG_WEB_TERMINAL_SECRET must be letters and digits only"
+    fi
+    printf '%s\n' "$candidate"
+    return 0
+  fi
+  candidate="$(instance_stored_secret)"
+  if [[ -n "$candidate" ]]; then
+    printf '%s\n' "$candidate"
+    return 0
+  fi
+  generate_password
+}
+
+store_web_terminal_secret() {
+  gcloud compute instances add-metadata "$(instance_name)" \
+    --project "$project" --zone "$zone" \
+    --metadata="${CODE_SERVER_PASSWORD_KEY}=$1"
 }
 
 command_provision() {
@@ -275,7 +319,7 @@ command_provision() {
   waits_for_ssh || die "workstation '$name' is not accepting SSH connections"
 
   local password
-  password="$(generate_password)"
+  password="$(resolve_web_terminal_secret)"
   printf 'installing the browser editor and terminal on workstation %s...\n' "$name"
   if ! gcloud compute ssh "$(instance_name)" \
       --project "$project" --zone "$zone" \
@@ -284,6 +328,7 @@ command_provision() {
       < "$PROVISION_SCRIPT"; then
     die "provisioning failed on workstation '$name'"
   fi
+  store_web_terminal_secret "$password"
 
   if ! instance_has_tag; then
     gcloud compute instances add-tags "$(instance_name)" \
@@ -365,17 +410,37 @@ command_list() {
   if [[ -n "$zone" ]]; then
     filter="$filter AND zone:$zone"
   fi
-  gcloud compute instances list \
+  local fields='name,status,machineType.basename(),zone.basename(),networkInterfaces[0].accessConfigs[0].natIP'
+  if [[ "$full_list" == true ]]; then
+    fields="$fields,metadata.code-server-password"
+  fi
+  local rows
+  rows="$(gcloud compute instances list \
     --project "$project" \
     --filter "$filter" \
     --verbosity=error \
-    --format='csv[no-heading](name,status,machineType.basename(),zone.basename(),networkInterfaces[0].accessConfigs[0].natIP)'
+    --format="csv[no-heading]($fields)")"
+  if [[ "$full_list" != true ]]; then
+    printf '%s\n' "$rows"
+    return 0
+  fi
+  local instance status machine_type row_zone external_ip secret
+  while IFS=, read -r instance status machine_type row_zone external_ip secret; do
+    if [[ -n "$external_ip" && -n "$secret" ]]; then
+      printf '%s,%s,%s,%s,%s,https://%s:%s,%s\n' \
+        "$instance" "$status" "$machine_type" "$row_zone" "$external_ip" \
+        "$external_ip" "$CODE_SERVER_PORT" "$secret"
+    else
+      printf '%s,%s,%s,%s,%s,,\n' \
+        "$instance" "$status" "$machine_type" "$row_zone" "$external_ip"
+    fi
+  done <<< "$rows"
 }
 
 case "$command" in
   create)
     command_create
-    if [[ "$provision" == true ]]; then
+    if [[ "$web_terminal" == true ]]; then
       command_provision
     fi
     ;;

@@ -22,6 +22,15 @@ on:
         required: false
         type: string
         default: e2-standard-2
+      web_terminal:
+        description: Install the browser editor and web terminal on create
+        required: false
+        type: boolean
+        default: false
+      web_terminal_secret:
+        description: Password for the web terminal; defaults to the workstation's stored value or a random one
+        required: false
+        type: string
       project:
         description: Compute Engine project
         required: true
@@ -53,6 +62,15 @@ on:
         required: false
         type: string
         default: e2-standard-2
+      web_terminal:
+        description: Install the browser editor and web terminal on create
+        required: false
+        type: boolean
+        default: false
+      web_terminal_secret:
+        description: Password for the web terminal; defaults to the workstation's stored value or a random one
+        required: false
+        type: string
       project:
         description: Compute Engine project
         required: true
@@ -95,10 +113,18 @@ jobs:
           WORKSTATION_MACHINE_TYPE: ${{ inputs.machine_type }}
           WORKSTATION_PROJECT: ${{ inputs.project }}
           WORKSTATION_ZONE: ${{ inputs.zone }}
+          WORKSTATION_WEB_TERMINAL: ${{ inputs.web_terminal }}
+          TOG_WEB_TERMINAL_SECRET: ${{ inputs.web_terminal_secret }}
         run: |
-          bash scripts/tog-workstation "$WORKSTATION_ACTION" "$WORKSTATION_NAME" \
-            --project "$WORKSTATION_PROJECT" --zone "$WORKSTATION_ZONE" \
+          args=(
+            "$WORKSTATION_ACTION" "$WORKSTATION_NAME"
+            --project "$WORKSTATION_PROJECT" --zone "$WORKSTATION_ZONE"
             --machine-type "$WORKSTATION_MACHINE_TYPE" --yes
+          )
+          if [ "$WORKSTATION_WEB_TERMINAL" = "true" ] && [ "$WORKSTATION_ACTION" = "create" ]; then
+            args+=( --web-terminal )
+          fi
+          bash scripts/tog-workstation "${args[@]}"
 
       - name: Write job summary
         if: always()
@@ -126,6 +152,20 @@ jobs:
           if [ -n "$row" ]; then
             printf -- '- Status: %s\n' "$(printf '%s\n' "$row" | cut -d, -f2)" >> "$GITHUB_STEP_SUMMARY"
             printf -- '- Machine type: %s\n' "$(printf '%s\n' "$row" | cut -d, -f3)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          if [ "$WORKSTATION_WEB_TERMINAL" = "true" ]; then
+            full_row="$(bash scripts/tog-workstation list --full \
+              --project "$WORKSTATION_PROJECT" --zone "$WORKSTATION_ZONE" 2>/dev/null \
+              | grep "^workstation-$WORKSTATION_NAME," | head -n 1 || true)"
+            if [ -n "$full_row" ]; then
+              url="$(printf '%s\n' "$full_row" | cut -d, -f6)"
+              secret="$(printf '%s\n' "$full_row" | cut -d, -f7)"
+              if [ -n "$url" ] && [ -n "$secret" ]; then
+                printf -- '- Web terminal: %s\n' "$url" >> "$GITHUB_STEP_SUMMARY"
+                printf -- '- Web terminal secret: %s\n' "$secret" >> "$GITHUB_STEP_SUMMARY"
+              fi
+            fi
           fi
 
           {
