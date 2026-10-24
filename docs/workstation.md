@@ -35,6 +35,21 @@ lifecycle:
 - `destroy` deletes the instance and its boot disk.
 - `list` shows hosted workstations and their machine types.
 
+### SSH and file transfer
+
+`tog-workstation shell` opens an interactive SSH session on a running
+workstation:
+
+```console
+tog-workstation shell
+```
+
+gcloud manages the SSH key, so no password is needed. The underlying commands
+work directly too: `gcloud compute scp` transfers files (with `--recurse` for
+directories) using the same key, and `gcloud compute config-ssh` adds an SSH
+config alias (like `workstation-tog.us-central1-a.tog-dev`) so plain `scp` and
+`rsync` also connect.
+
 ### Web terminal
 
 `create --web-terminal` adds a web terminal so the workstation is usable from any

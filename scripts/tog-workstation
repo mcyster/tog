@@ -35,6 +35,7 @@ Usage:
   tog-workstation [OPTIONS] create [NAME] [--machine-type TYPE] [--web-terminal]
   tog-workstation [OPTIONS] stop [NAME]
   tog-workstation [OPTIONS] start [NAME]
+  tog-workstation [OPTIONS] shell [NAME]
   tog-workstation [OPTIONS] destroy [NAME] [--yes]
   tog-workstation [OPTIONS] list [--full]
 
@@ -45,6 +46,7 @@ Commands:
   stop     Stop the workstation, halting compute charges. The persistent boot
            disk is kept.
   start    Start the existing workstation.
+  shell    Open an interactive SSH session on the running workstation.
   destroy  Delete the workstation and its boot disk. Prompts for typed
            confirmation unless --yes is given.
   list     Print each workstation as CSV:
@@ -134,7 +136,7 @@ while [[ $# -gt 0 ]]; do
       assume_yes=true
       shift
       ;;
-    create | stop | start | destroy | list)
+    create | stop | start | shell | destroy | list)
       if [[ -n "$command" ]]; then
         die "duplicate command: $1"
       fi
@@ -378,6 +380,20 @@ command_start() {
   printf 'started workstation %s (machine type %s)\n' "$name" "$(instance_machine_type)"
 }
 
+command_shell() {
+  local status
+  status="$(instance_status)"
+  if [[ -z "$status" ]]; then
+    die "workstation '$name' does not exist; use create first"
+  fi
+  if [[ "$status" != "RUNNING" ]]; then
+    die "workstation '$name' is not running; start it first"
+  fi
+  gcloud compute ssh "$(instance_name)" \
+    --project "$project" --zone "$zone" \
+    --strict-host-key-checking=no
+}
+
 command_destroy() {
   local status
   status="$(instance_status)"
@@ -446,6 +462,7 @@ case "$command" in
     ;;
   stop) command_stop ;;
   start) command_start ;;
+  shell) command_shell ;;
   destroy) command_destroy || exit 1 ;;
   list) command_list ;;
 esac
