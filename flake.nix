@@ -14,7 +14,7 @@
       forEachSupportedSystem = function:
         nixpkgs.lib.genAttrs supportedSystems (system:
           function (import nixpkgs { inherit system; }));
-      gcloudRequested = (builtins.getEnv "TOG_ENABLE_GCLOUD") == "1";
+      gcloudRequested = (builtins.getEnv "TOG_GCLOUD_ENABLE") == "1";
     in
     {
       devShells = forEachSupportedSystem (packageSet: {

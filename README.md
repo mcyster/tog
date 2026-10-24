@@ -168,23 +168,26 @@ asset or a JSON Lines listing. See [Assets](docs/assets.md).
 
 Manage Google Compute Engine workstations backed by a persistent boot disk with
 [`scripts/tog-workstation`](scripts/tog-workstation). It wraps the `gcloud`
-CLI. In the Nix development environment, set `TOG_ENABLE_GCLOUD=1` and enter
+CLI. In the Nix development environment, set `TOG_GCLOUD_ENABLE=1` and enter
 with `nix develop --impure` to include the Google Cloud CLI; otherwise install
-it yourself. Enter the environment, then authenticate with
-`gcloud auth login`:
+it yourself. Enter the environment, then authenticate with `gcloud auth login`,
+or provide application default credentials (for example `GOOGLE_APPLICATION_CREDENTIALS`
+pointing at a service-account key) when automating:
 
 ```console
-scripts/tog-workstation create main
+scripts/tog-workstation create
 scripts/tog-workstation create main --machine-type e2-standard-2
 scripts/tog-workstation list
-scripts/tog-workstation stop main
-scripts/tog-workstation start main
-scripts/tog-workstation destroy main
+scripts/tog-workstation stop
+scripts/tog-workstation start
+scripts/tog-workstation destroy
 ```
 
 - The machine type defaults to `e2-standard-2` (2 vCPU, 8 GB RAM). Any machine
   type available in the zone is accepted; a requested type is validated against
   the zone before provisioning.
+- The workstation name defaults to `tog`; pass a name to target another
+  workstation.
 - `stop` halts compute charges while keeping the boot disk, which continues to
   incur storage charges. `start` resumes the same workstation.
 - `destroy` deletes the workstation and its boot disk after a typed
