@@ -199,10 +199,13 @@ command_create() {
     die "machine type '$machine_type' is not available in zone '$zone'"
   fi
 
-  gcloud compute instances create "$(instance_name)" \
-    --project "$project" --zone "$zone" \
-    --machine-type "$machine_type" \
-    --labels "$WORKSTATION_LABEL"
+  if ! create_output="$(gcloud compute instances create "$(instance_name)" \
+      --project "$project" --zone "$zone" \
+      --machine-type "$machine_type" \
+      --labels "$WORKSTATION_LABEL" 2>&1)"; then
+    printf '%s\n' "$create_output" >&2
+    die "failed to create workstation '$name'"
+  fi
   printf 'created workstation %s (machine type %s) in zone %s\n' \
     "$name" "$(instance_machine_type)" "$zone"
 }
