@@ -116,12 +116,18 @@ tog-workstation create main --machine-type e2-standard-2 \
 
 ### Verify access
 
-Confirm the configured values, then list machine types available in the zone:
+Confirm the configured values, confirm billing is enabled, then list machine
+types available in the zone:
 
 ```console
 gcloud config list project compute/zone
+gcloud billing projects describe tog-dev
 gcloud compute machine-types list --zones us-central1-a
 ```
+
+`gcloud billing projects describe tog-dev` reports `billingEnabled: true` when
+billing is on. Provisioning an instance requires it, so enable billing on the
+project if the check is false.
 
 `create` validates a requested machine type against the zone before
 provisioning. See the [machine types](https://cloud.google.com/compute/docs/machine-resource)
