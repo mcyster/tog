@@ -14,26 +14,28 @@
       forEachSupportedSystem = function:
         nixpkgs.lib.genAttrs supportedSystems (system:
           function (import nixpkgs { inherit system; }));
-      gcloudRequested = (builtins.getEnv "TOG_GCLOUD_ENABLE") == "1";
-    in
-    {
-      devShells = forEachSupportedSystem (packageSet: {
-        default = packageSet.mkShell {
-          packages = [
-            packageSet.cargo
-            packageSet.clippy
-            packageSet.opencode
-            packageSet.rust-analyzer
-            packageSet.rustc
-            packageSet.rustfmt
-          ] ++ nixpkgs.lib.optionals gcloudRequested [
-            packageSet.google-cloud-sdk
-          ];
+      basePackages = packageSet: [
+        packageSet.cargo
+        packageSet.clippy
+        packageSet.opencode
+        packageSet.rust-analyzer
+        packageSet.rustc
+        packageSet.rustfmt
+      ];
+      shell = packageSet: extraPackages:
+        packageSet.mkShell {
+          packages = basePackages packageSet ++ extraPackages;
 
           shellHook = ''
             export PATH="$PWD/target/release:$PATH"
           '';
         };
+    in
+    {
+      devShells = forEachSupportedSystem (packageSet: {
+        default = shell packageSet [];
+
+        gcloud = shell packageSet [ packageSet.google-cloud-sdk ];
       });
     };
 }
