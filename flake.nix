@@ -14,6 +14,7 @@
       forEachSupportedSystem = function:
         nixpkgs.lib.genAttrs supportedSystems (system:
           function (import nixpkgs { inherit system; }));
+      gcloudRequested = (builtins.getEnv "TOG_ENABLE_GCLOUD") == "1";
     in
     {
       devShells = forEachSupportedSystem (packageSet: {
@@ -25,6 +26,8 @@
             packageSet.rust-analyzer
             packageSet.rustc
             packageSet.rustfmt
+          ] ++ nixpkgs.lib.optionals gcloudRequested [
+            packageSet.google-cloud-sdk
           ];
 
           shellHook = ''
