@@ -1,14 +1,53 @@
-# Workstations
+# Workstation
 
-`tog-workstation` manages Google Compute Engine workstations through the
-`gcloud` CLI. Set up Google Cloud first. Each command tells you exactly what it
-is missing, such as the project, the zone, or `gcloud` itself.
+A workstation is the environment you use to build and develop tog. It can run
+locally on your machine or hosted on Google Cloud. The two should feel
+identical: both come from the same [Nix flake](../flake.nix), so tools,
+versions, and commands match.
 
-The command usage is documented in the [README](../README.md#workstations).
+## The environment comes from a Nix flake
 
-## Install the Google Cloud CLI
+The repository's flake defines the development environment: toolchain, linters,
+formatters, and helper tools. Nix delivers the same environment wherever it
+runs, which is what lets a local and a hosted workstation match.
 
-The Nix dev environment provides `gcloud` in the `gcloud` shell, not the
+Enter it with `nix develop`, or automatically through
+[direnv](../.envrc). The flake provides two shells:
+
+- `.#default` — the day-to-day build environment.
+- `.#gcloud` — `.#default` plus the Google Cloud CLI, for managing hosted
+  workstations.
+
+## Local workstation
+
+Your machine, with the flake environment active and the repository checked out.
+This is where you build and develop tog day to day.
+
+## Hosted workstation
+
+A hosted workstation runs on Google Compute Engine as an instance backed by a
+persistent boot disk. [`tog-workstation`](../README.md#workstations) manages its
+lifecycle:
+
+- `create` provisions it with a machine type, defaulting to `e2-standard-2`.
+- `stop` halts compute charges while keeping the boot disk.
+- `start` resumes the same instance.
+- `destroy` deletes the instance and its boot disk.
+- `list` shows hosted workstations and their machine types.
+
+Today a hosted workstation boots a stock Compute Engine image. Reproducing the
+flake environment inside it, so that developing there feels identical to local,
+is the intended direction. Until then, the lifecycle commands below manage the
+hosted workstation itself.
+
+## Google Cloud setup
+
+Managing hosted workstations needs a Google Cloud project, the `gcloud` CLI,
+and credentials.
+
+### Install the Google Cloud CLI
+
+The Nix dev environment provides `gcloud` in the `.#gcloud` shell, not the
 default shell, so contributors who never manage workstations do not download
 the SDK.
 
@@ -18,7 +57,7 @@ the SDK.
 Outside the Nix environment, install the
 [Google Cloud SDK](https://cloud.google.com/sdk/docs/install).
 
-## Authenticate
+### Authenticate
 
 For interactive use, log in with your Google account:
 
@@ -37,7 +76,7 @@ The GitHub Actions workflow authenticates with
 [Workload Identity Federation](https://github.com/google-github-actions/auth)
 instead.
 
-## Configure project and zone
+### Configure project and zone
 
 `tog-workstation` uses the `--project` and `--zone` flags when you pass them,
 and otherwise reads gcloud's configuration. Set project and zone once so the
@@ -60,7 +99,7 @@ tog-workstation create main --machine-type e2-standard-2 \
   --project PROJECT --zone ZONE
 ```
 
-## Verify access
+### Verify access
 
 Confirm the configured values, then list machine types available in the zone:
 
