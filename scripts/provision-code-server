@@ -61,12 +61,14 @@ EOF
 
 start_service() {
   if systemctl --user daemon-reload >/dev/null 2>&1; then
-    systemctl --user enable --now code-server
+    systemctl --user enable code-server
+    systemctl --user restart code-server
     sudo loginctl enable-linger "$USER"
     return 0
   fi
   if pgrep -f 'code-server.*--config' >/dev/null 2>&1; then
-    return 0
+    pkill -f 'code-server.*--config'
+    sleep 1
   fi
   nohup "$(command -v code-server)" --config "$CONFIG_FILE" >/dev/null 2>&1 &
 }
