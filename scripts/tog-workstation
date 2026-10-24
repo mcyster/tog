@@ -277,9 +277,10 @@ command_provision() {
   local password
   password="$(generate_password)"
   printf 'installing the browser editor and terminal on workstation %s...\n' "$name"
-  if ! CODE_SERVER_PASSWORD="$password" gcloud compute ssh "$(instance_name)" \
+  if ! gcloud compute ssh "$(instance_name)" \
       --project "$project" --zone "$zone" \
-      --strict-host-key-checking=no --command "bash -s" \
+      --strict-host-key-checking=no \
+      --command "CODE_SERVER_PASSWORD='${password}' bash -s" \
       < "$PROVISION_SCRIPT"; then
     die "provisioning failed on workstation '$name'"
   fi
@@ -292,9 +293,6 @@ command_provision() {
       --project "$project" >/dev/null 2>&1; then
     gcloud compute firewall-rules create "$CODE_FIREWALL_RULE" \
       --project "$project" \
-      --direction=INGRESS \
-      --priority=1000 \
-      --action=ALLOW \
       --allow="tcp:$CODE_SERVER_PORT" \
       --target-tags="$CODE_SERVER_TAG"
   fi
