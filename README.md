@@ -168,12 +168,8 @@ asset or a JSON Lines listing. See [Assets](docs/assets.md).
 
 Manage Google Compute Engine workstations backed by a persistent boot disk with
 [`scripts/tog-workstation`](scripts/tog-workstation). It wraps the `gcloud`
-CLI. The Nix dev environment keeps `gcloud` out of the default shell; enter
-`nix develop .#gcloud` instead, or with direnv set `TOG_GCLOUD_ENABLE=1` and
-reload. Outside that environment, install the Google Cloud CLI yourself.
-Authenticate with `gcloud auth login`, or provide application default
-credentials (for example `GOOGLE_APPLICATION_CREDENTIALS` pointing at a
-service-account key) when automating:
+CLI; follow the [Google Cloud setup](docs/workstation.md) for the SDK,
+authentication, and project and zone, then run:
 
 ```console
 scripts/tog-workstation create
