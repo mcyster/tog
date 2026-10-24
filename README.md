@@ -189,6 +189,8 @@ scripts/tog-workstation destroy
   incur storage charges. `start` resumes the same workstation.
 - `shell` opens an interactive SSH session on a running workstation; gcloud
   manages the key, so no password is needed.
+- `config-ssh` adds an SSH config alias for the workstation so plain `ssh`,
+  `scp`, and `rsync` connect without gcloud flags.
 - `destroy` deletes the workstation and its boot disk after a typed
   confirmation, or unconditionally with `--yes`.
 - `create` on an existing workstation leaves it unchanged, so its machine type

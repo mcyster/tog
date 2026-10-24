@@ -46,9 +46,16 @@ tog-workstation shell
 
 gcloud manages the SSH key, so no password is needed. The underlying commands
 work directly too: `gcloud compute scp` transfers files (with `--recurse` for
-directories) using the same key, and `gcloud compute config-ssh` adds an SSH
-config alias (like `workstation-tog.us-central1-a.tog-dev`) so plain `scp` and
-`rsync` also connect.
+directories) using the same key.
+
+`tog-workstation config-ssh` adds an SSH config alias for the workstation, after
+which plain `ssh`, `scp`, and `rsync` connect without gcloud flags:
+
+```console
+tog-workstation config-ssh
+ssh workstation-tog.us-central1-a.tog-dev
+rsync -avz ./tog workstation-tog.us-central1-a.tog-dev:~/
+```
 
 ### Web terminal
 
