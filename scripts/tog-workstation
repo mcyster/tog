@@ -16,7 +16,7 @@ set -o pipefail
 
 readonly DEFAULT_MACHINE_TYPE="e2-standard-2"
 readonly DEFAULT_WORKSTATION_NAME="tog"
-readonly INSTANCE_PREFIX="tog-workstation-"
+readonly INSTANCE_PREFIX="workstation-"
 readonly WORKSTATION_LABEL="tog-workstation=true"
 readonly WORKSTATION_LABEL_FILTER="labels.tog-workstation=true"
 
