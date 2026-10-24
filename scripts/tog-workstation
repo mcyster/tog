@@ -19,13 +19,19 @@ readonly DEFAULT_WORKSTATION_NAME="tog"
 readonly INSTANCE_PREFIX="workstation-"
 readonly WORKSTATION_LABEL="tog-workstation=true"
 readonly WORKSTATION_LABEL_FILTER="labels.tog-workstation=true"
+readonly CODE_SERVER_TAG="tog-workstation-code-server"
+readonly CODE_SERVER_PORT="8443"
+readonly CODE_FIREWALL_RULE="tog-workstation-code-server"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly SCRIPT_DIR
+readonly PROVISION_SCRIPT="$SCRIPT_DIR/provision-code-server"
 
 usage() {
   cat <<'EOF'
 tog-workstation - manage GCE workstations with persistent boot disks
 
 Usage:
-  tog-workstation [OPTIONS] create [NAME] [--machine-type TYPE]
+  tog-workstation [OPTIONS] create [NAME] [--machine-type TYPE] [--provision]
   tog-workstation [OPTIONS] stop [NAME]
   tog-workstation [OPTIONS] start [NAME]
   tog-workstation [OPTIONS] destroy [NAME] [--yes]
@@ -33,14 +39,15 @@ Usage:
 
 Commands:
   create   Create the workstation if it does not exist. Creating an existing
-           workstation changes nothing, including its machine type.
+           workstation changes nothing, including its machine type. With
+           --provision, installs a browser code editor and web terminal.
   stop     Stop the workstation, halting compute charges. The persistent boot
            disk is kept.
   start    Start the existing workstation.
   destroy  Delete the workstation and its boot disk. Prompts for typed
            confirmation unless --yes is given.
-   list     Print each workstation as CSV:
-            name,status,machine_type,zone,external_ip.
+  list     Print each workstation as CSV:
+           name,status,machine_type,zone,external_ip.
 
 NAME defaults to tog. When omitted, every command acts on the workstation named
 tog.
@@ -49,6 +56,9 @@ Options:
   --project PROJECT    Compute Engine project.
   --zone ZONE          Compute Engine zone; the workstation is provisioned here.
   --machine-type TYPE  Machine type used by create. Default: e2-standard-2.
+  --provision          After create, install code-server (VS Code and a
+                       terminal in the browser) and print its URL. When
+                       omitted, the workstation stays ssh-only.
   --yes                Skip the destroy confirmation.
   -h, --help           Show this help.
 
@@ -68,6 +78,7 @@ project_option=""
 zone_option=""
 machine_type_option=""
 assume_yes=false
+provision=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -102,6 +113,10 @@ while [[ $# -gt 0 ]]; do
       machine_type_option="${1#--machine-type=}"
       shift
       ;;
+    --provision)
+      provision=true
+      shift
+      ;;
     --yes)
       assume_yes=true
       shift
@@ -127,6 +142,10 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "$command" ]] || die "no command given; try --help"
+
+if [[ "$provision" == true && "$command" != "create" ]]; then
+  die "--provision applies only to create"
+fi
 
 if [[ "$command" != "list" && -z "$name" ]]; then
   name="$DEFAULT_WORKSTATION_NAME"
@@ -211,6 +230,83 @@ command_create() {
     "$name" "$(instance_machine_type)" "$zone"
 }
 
+waits_for_ssh() {
+  local attempt=30
+  while (( attempt > 0 )); do
+    if gcloud compute ssh "$(instance_name)" \
+      --project "$project" --zone "$zone" \
+      --strict-host-key-checking=no --command 'true' >/dev/null 2>&1; then
+      return 0
+    fi
+    (( attempt -= 1 ))
+    sleep 5
+  done
+  return 1
+}
+instance_has_tag() {
+  local tags
+  tags="$(describe_field 'value(tags.items)')"
+  [[ ",${tags}," == *",${CODE_SERVER_TAG},"* ]]
+}
+
+instance_external_ip() {
+  describe_field 'value(networkInterfaces[0].accessConfigs[0].natIP)'
+}
+
+generate_password() {
+  local random_bytes
+  random_bytes="$(head -c 64 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9')"
+  printf '%s\n' "${random_bytes:0:32}"
+}
+
+command_provision() {
+  local status
+  status="$(instance_status)"
+  if [[ -z "$status" ]]; then
+    die "workstation '$name' does not exist; use create first"
+  fi
+  if [[ "$status" != "RUNNING" ]]; then
+    printf 'starting workstation %s to provision it...\n' "$name"
+    gcloud compute instances start "$(instance_name)" \
+      --project "$project" --zone "$zone" >/dev/null 2>&1
+  fi
+
+  printf 'waiting for workstation %s to accept SSH...\n' "$name"
+  waits_for_ssh || die "workstation '$name' is not accepting SSH connections"
+
+  local password
+  password="$(generate_password)"
+  printf 'installing the browser editor and terminal on workstation %s...\n' "$name"
+  if ! CODE_SERVER_PASSWORD="$password" gcloud compute ssh "$(instance_name)" \
+      --project "$project" --zone "$zone" \
+      --strict-host-key-checking=no --command "bash -s" \
+      < "$PROVISION_SCRIPT"; then
+    die "provisioning failed on workstation '$name'"
+  fi
+
+  if ! instance_has_tag; then
+    gcloud compute instances add-tags "$(instance_name)" \
+      --project "$project" --zone "$zone" --tags "$CODE_SERVER_TAG"
+  fi
+  if ! gcloud compute firewall-rules describe "$CODE_FIREWALL_RULE" \
+      --project "$project" >/dev/null 2>&1; then
+    gcloud compute firewall-rules create "$CODE_FIREWALL_RULE" \
+      --project "$project" \
+      --direction=INGRESS \
+      --priority=1000 \
+      --action=ALLOW \
+      --allow="tcp:$CODE_SERVER_PORT" \
+      --target-tags="$CODE_SERVER_TAG"
+  fi
+
+  local external_ip
+  external_ip="$(instance_external_ip)"
+  printf 'provisioned workstation %s\n' "$name"
+  printf 'web terminal: https://%s:%s\n' "$external_ip" "$CODE_SERVER_PORT"
+  printf 'password:     %s\n' "$password"
+  printf 'accept the self-signed certificate warning in the browser.\n'
+}
+
 command_stop() {
   local status
   status="$(instance_status)"
@@ -279,7 +375,12 @@ command_list() {
 }
 
 case "$command" in
-  create) command_create ;;
+  create)
+    command_create
+    if [[ "$provision" == true ]]; then
+      command_provision
+    fi
+    ;;
   stop) command_stop ;;
   start) command_start ;;
   destroy) command_destroy || exit 1 ;;

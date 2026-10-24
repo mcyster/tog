@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+#
+# Install code-server (VS Code and a terminal in the browser) on the current
+# host and run it as a service, so the workstation can be used from any device
+# with only a browser.
+#
+# Runs on the workstation over SSH. Requires CODE_SERVER_PASSWORD to be set.
+# Idempotent: re-running reinstalls nothing but rewrites the config and restarts
+# the service with a new password.
+
+set -o errexit
+set -o nounset
+set -o pipefail
+
+readonly PASSWORD="${CODE_SERVER_PASSWORD:?CODE_SERVER_PASSWORD is required}"
+readonly PORT="8443"
+readonly CONFIG_DIR="${HOME}/.config/code-server"
+readonly CONFIG_FILE="${CONFIG_DIR}/config.yaml"
+readonly UNIT_DIR="${HOME}/.config/systemd/user"
+readonly UNIT_FILE="${UNIT_DIR}/code-server.service"
+
+install_code_server() {
+  if command -v code-server >/dev/null 2>&1; then
+    return 0
+  fi
+  if ! command -v curl >/dev/null 2>&1; then
+    sudo apt-get update
+    sudo apt-get install --yes curl
+  fi
+  curl -fsSL https://code-server.dev/install.sh | sh
+}
+
+write_config() {
+  mkdir -p "$CONFIG_DIR"
+  cat > "$CONFIG_FILE" <<EOF
+bind-addr: 0.0.0.0:${PORT}
+auth: password
+password: ${PASSWORD}
+cert: true
+disable-telemetry: true
+EOF
+  chmod 600 "$CONFIG_FILE"
+}
+
+write_unit() {
+  mkdir -p "$UNIT_DIR"
+  cat > "$UNIT_FILE" <<EOF
+[Unit]
+Description=code-server web terminal
+After=network-online.target
+
+[Service]
+ExecStart=$(command -v code-server) --config ${CONFIG_FILE}
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target
+EOF
+}
+
+start_service() {
+  if systemctl --user daemon-reload >/dev/null 2>&1; then
+    systemctl --user enable --now code-server
+    sudo loginctl enable-linger "$USER"
+    return 0
+  fi
+  if pgrep -f 'code-server.*--config' >/dev/null 2>&1; then
+    return 0
+  fi
+  nohup "$(command -v code-server)" --config "$CONFIG_FILE" >/dev/null 2>&1 &
+}
+
+wait_until_listening() {
+  local attempt=12
+  while (( attempt > 0 )); do
+    if curl -sk "https://localhost:${PORT}" >/dev/null 2>&1; then
+      return 0
+    fi
+    (( attempt -= 1 ))
+    sleep 2
+  done
+  return 1
+}
+
+install_code_server
+write_config
+write_unit
+start_service
+wait_until_listening || {
+  echo "code-server did not come up on port ${PORT}; check journalctl --user -u code-server" >&2
+  exit 1
+}
+printf 'code-server running on https://localhost:%s\n' "$PORT"
