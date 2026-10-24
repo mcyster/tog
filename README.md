@@ -164,6 +164,38 @@ MIME type from content, falling back to `application/octet-stream`; override
 either with `--name` and `--mime-type`. Standard output carries the added
 asset or a JSON Lines listing. See [Assets](docs/assets.md).
 
+## Workstations
+
+Manage Google Compute Engine workstations backed by a persistent boot disk with
+[`scripts/tog-workstation`](scripts/tog-workstation). It wraps the `gcloud`
+CLI, so install the Google Cloud CLI and authenticate before using it:
+
+```console
+scripts/tog-workstation create main
+scripts/tog-workstation create main --machine-type e2-standard-2
+scripts/tog-workstation list
+scripts/tog-workstation stop main
+scripts/tog-workstation start main
+scripts/tog-workstation destroy main
+```
+
+- The machine type defaults to `e2-standard-2` (2 vCPU, 8 GB RAM). Any machine
+  type available in the zone is accepted; a requested type is validated against
+  the zone before provisioning.
+- `stop` halts compute charges while keeping the boot disk, which continues to
+  incur storage charges. `start` resumes the same workstation.
+- `destroy` deletes the workstation and its boot disk after a typed
+  confirmation, or unconditionally with `--yes`.
+- `create` on an existing workstation leaves it unchanged, so its machine type
+  is preserved. There is no resize operation.
+- No snapshots or backups are created automatically.
+
+The reusable workflow `.github/workflows/tog-workstation.yml` wraps the same
+commands for GitHub Actions. It accepts `action`, `name`, an optional
+`machine_type` used for `create`, `project`, `zone`, and workload identity
+credentials, and records each workstation's status and actual machine type in
+the job summary.
+
 ## Development
 
 Run the project checks:

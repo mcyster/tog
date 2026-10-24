@@ -1,0 +1,138 @@
+name: tog-workstation
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: Lifecycle action to run on the workstation
+        required: true
+        type: choice
+        options:
+          - create
+          - stop
+          - start
+          - destroy
+          - list
+      name:
+        description: Workstation name
+        required: true
+        type: string
+      machine_type:
+        description: Compute Engine machine type, used for create
+        required: false
+        type: string
+        default: e2-standard-2
+      project:
+        description: Compute Engine project
+        required: true
+        type: string
+      zone:
+        description: Compute Engine zone
+        required: true
+        type: string
+      workload_identity_provider:
+        description: Workload identity provider for gcloud authentication
+        required: true
+        type: string
+      service_account:
+        description: Service account to authenticate as
+        required: true
+        type: string
+  workflow_call:
+    inputs:
+      action:
+        description: Lifecycle action to run on the workstation
+        required: true
+        type: string
+      name:
+        description: Workstation name
+        required: true
+        type: string
+      machine_type:
+        description: Compute Engine machine type, used for create
+        required: false
+        type: string
+        default: e2-standard-2
+      project:
+        description: Compute Engine project
+        required: true
+        type: string
+      zone:
+        description: Compute Engine zone
+        required: true
+        type: string
+      workload_identity_provider:
+        description: Workload identity provider for gcloud authentication
+        required: true
+        type: string
+      service_account:
+        description: Service account to authenticate as
+        required: true
+        type: string
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  workstation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ inputs.workload_identity_provider }}
+          service_account: ${{ inputs.service_account }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Run workstation command
+        env:
+          WORKSTATION_ACTION: ${{ inputs.action }}
+          WORKSTATION_NAME: ${{ inputs.name }}
+          WORKSTATION_MACHINE_TYPE: ${{ inputs.machine_type }}
+          WORKSTATION_PROJECT: ${{ inputs.project }}
+          WORKSTATION_ZONE: ${{ inputs.zone }}
+        run: |
+          bash scripts/tog-workstation "$WORKSTATION_ACTION" "$WORKSTATION_NAME" \
+            --project "$WORKSTATION_PROJECT" --zone "$WORKSTATION_ZONE" \
+            --machine-type "$WORKSTATION_MACHINE_TYPE" --yes
+
+      - name: Write job summary
+        if: always()
+        env:
+          WORKSTATION_ACTION: ${{ inputs.action }}
+          WORKSTATION_NAME: ${{ inputs.name }}
+          WORKSTATION_PROJECT: ${{ inputs.project }}
+          WORKSTATION_ZONE: ${{ inputs.zone }}
+        run: |
+          {
+            printf '## Workstation %s\n\n' "$WORKSTATION_NAME"
+            printf -- '- Action: %s\n' "$WORKSTATION_ACTION"
+            printf -- '- Zone: %s\n' "$WORKSTATION_ZONE"
+            printf '\n'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$WORKSTATION_ACTION" = "destroy" ]; then
+            printf -- '- Workstation destroyed, including the boot disk.\n' >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          entries="$(bash scripts/tog-workstation list \
+            --project "$WORKSTATION_PROJECT" --zone "$WORKSTATION_ZONE" 2>/dev/null || true)"
+          row="$(printf '%s\n' "$entries" | grep "^tog-workstation-$WORKSTATION_NAME," | head -n 1 || true)"
+          if [ -n "$row" ]; then
+            printf -- '- Status: %s\n' "$(printf '%s\n' "$row" | cut -d, -f2)" >> "$GITHUB_STEP_SUMMARY"
+            printf -- '- Machine type: %s\n' "$(printf '%s\n' "$row" | cut -d, -f3)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          {
+            printf '\n### All tog workstations\n\n'
+            printf '| instance | status | machine type | zone |\n'
+            printf '| --- | --- | --- | --- |\n'
+            printf '%s\n' "$entries" | grep -v '^$' | while IFS=, read -r instance status_value machine_type zone_value; do
+              printf '| %s | %s | %s | %s |\n' "$instance" "$status_value" "$machine_type" "$zone_value"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
