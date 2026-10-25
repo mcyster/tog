@@ -47,8 +47,9 @@ Commands:
            --web-terminal, installs a browser code editor and web terminal.
   start    Start the workstation when stopped. A workstation with a web
            terminal issues fresh login credentials once the service is up.
-  login    Rotate the web terminal password on a running workstation and print
-           fresh login credentials. The previous password stops working.
+  login    Rotate the web terminal password on a running workstation and store
+           the fresh password in Secret Manager. The previous password stops
+           working.
   stop     Stop the workstation, halting compute charges. The persistent boot
            disk is kept.
   shell    Open an interactive SSH session on the running workstation.
@@ -68,17 +69,19 @@ Options:
   --zone ZONE          Compute Engine zone; the workstation is provisioned here.
   --machine-type TYPE  Machine type used by create. Default: e2-standard-2.
   --web-terminal       After create, install code-server (VS Code and a
-                       terminal in the browser) and print its URL and a
-                       fresh password. When omitted, the workstation stays
-                       ssh-only.
+                       terminal in the browser), print its URL, and store a
+                       fresh password in Secret Manager. When omitted, the
+                       workstation stays ssh-only.
   --yes                Skip the destroy confirmation.
   -h, --help           Show this help.
 
-Web terminal passwords are random and rotated: they are shown once by create
---web-terminal, login, and start, and are never stored on the workstation or in
-Google Cloud metadata. Forgot a password? Run login again. A requested machine
-type is validated against the zone before provisioning. The default project and
-zone come from your gcloud configuration.
+Web terminal passwords are random and rotated: a fresh password is stored by
+create --web-terminal, login, and start in the Secret Manager secret
+tog-web-terminal-password, where it is read from the Google Cloud console. The
+workstation keeps only an argon2 hash and nothing is stored in Google Cloud
+metadata. Forgot a password? Run login again. A requested machine type is
+validated against the zone before provisioning. The default project and zone
+come from your gcloud configuration.
 EOF
 }
 

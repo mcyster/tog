@@ -70,10 +70,13 @@ warning the browser shows.
 tog-workstation create --web-terminal
 ```
 
-Every web terminal password is random, shown once, and then discarded. The
-machine stores only an argon2 hash of it, and nothing is written to instance
-metadata or project configuration. Passwords are deliberately not recoverable:
-if the password is lost, run `login` again to get a fresh one.
+Every web terminal password is random and never printed or stored on the
+workstation. The machine keeps only an argon2 hash of it, and the plaintext is
+stored in Google Cloud Secret Manager under the secret `tog-web-terminal-password`.
+Anyone with view access to the secret can read the current password from the
+Google Cloud console (no terminal needed); the workflow's service account can
+only add versions, never read them, so the value never appears in GitHub
+output.
 
 ```console
 tog-workstation login
@@ -153,7 +156,8 @@ Google credentials scoped to a service account. The value looks like
 `projects/123456789012/locations/global/workloadIdentityPools/tog-actions/providers/github`.
 
 **How to create the values.** Run the setup script. It creates the service
-account, pool, and provider, grants the roles, and prints the two secret values:
+account, pool, provider, and the Secret Manager secret `tog-web-terminal-password`,
+grants the roles, and prints the values:
 
 ```console
 scripts/tog-workstation-gcloud-identity --project tog-dev \
