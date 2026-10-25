@@ -207,13 +207,14 @@ scripts/tog-workstation destroy
 - No snapshots or backups are created automatically.
 
 The reusable workflow `.github/workflows/tog-workstation.yml` wraps the same
-commands for GitHub Actions. It accepts `action`, `name`, an optional
-`machine_type` used for `create`, `project`, `zone`, and workload identity
-credentials. For `create --web-terminal`, `start`, and `login` it writes the web
-terminal URL and freshly generated password to the job summary; the password is
-masked in the step log. Retired passwords are deliberately recoverable only by
-running the workflow again, which is an accepted tradeoff for a personal
-workstation.
+commands for GitHub Actions. The manual run form asks only for the action and
+workstation name; `project`, `zone`, and the workload identity credentials come
+from repository variables and secrets (configured once, see
+`docs/workstation.md`). For `create --web-terminal`, `start`, and `login` it
+writes the web terminal URL and freshly generated password to the job summary;
+the password is masked in the step log. Retired passwords are deliberately
+recoverable only by running the workflow again, which is an accepted tradeoff
+for a personal workstation.
 
 ## Development
 

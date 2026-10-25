@@ -129,6 +129,37 @@ The GitHub Actions workflow authenticates with
 [Workload Identity Federation](https://github.com/google-github-actions/auth)
 instead.
 
+### Configure the workflow from the repository
+
+The workflow's manual run form asks only for the action and workstation name.
+The Google Cloud details come from repository settings, so you configure them
+once instead of typing them per run.
+
+Set these under **Settings -> Secrets and variables -> Actions** in the
+repository `mcyster/tog`:
+
+| Kind | Name | Value |
+| --- | --- | --- |
+| Variable | `TOG_GCLOUD_PROJECT` | Your project ID, for example `tog-dev` |
+| Variable | `TOG_GCLOUD_ZONE` | Default `us-central1-a`; set it to change |
+| Secret | `TOG_GCLOUD_SERVICE_ACCOUNT` | The email of the service account to run as, for example `workstations@tog-dev.iam.gserviceaccount.com` |
+| Secret | `TOG_GCLOUD_WORKLOAD_IDENTITY_PROVIDER` | The workload identity provider used to mint credentials for that service account |
+
+**What the workload identity provider is.** It is the `gcloud` login for a
+machine that has no browser: it lets GitHub exchange an OIDC token for short-lived
+Google credentials scoped to a service account. The value looks like
+`projects/123456789012/locations/global/workloadIdentityPools/wif-pool/providers/github`.
+
+**Where the value comes from.** You create a workload identity pool and provider,
+then grant the pool's identity the `roles/iam.workloadIdentityUser` role on the
+service account. Google's
+[GKE Workload Identity guide](https://cloud.google.com/iam/docs/workload-identity-federation)
+describes the general flow; the
+[google-github-actions/auth setup](https://github.com/google-github-actions/auth#setting-up-workload-identity-federation)
+gives the exact pool, provider, and role commands to run against your project.
+
+The workflow passes these on to `gcloud`; the script itself never reads them.
+
 ### Create a project
 
 Create a project and note its ID:

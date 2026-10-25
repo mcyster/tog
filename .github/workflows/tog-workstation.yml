@@ -16,7 +16,8 @@ on:
           - list
       name:
         description: Workstation name
-        required: true
+        required: false
+        default: tog
         type: string
       machine_type:
         description: Compute Engine machine type, used for create
@@ -28,22 +29,12 @@ on:
         required: false
         type: boolean
         default: false
-      project:
-        description: Compute Engine project
-        required: true
-        type: string
-      zone:
-        description: Compute Engine zone
-        required: true
-        type: string
-      workload_identity_provider:
-        description: Workload identity provider for gcloud authentication
-        required: true
-        type: string
-      service_account:
-        description: Service account to authenticate as
-        required: true
-        type: string
+    # Cloud configuration for manual runs comes from repository configuration,
+    # not from the dispatch form:
+    #   variable  TOG_GCLOUD_PROJECT                       (required)
+    #   variable  TOG_GCLOUD_ZONE         default us-central1-a
+    #   secret    TOG_GCLOUD_WORKLOAD_IDENTITY_PROVIDER    (required)
+    #   secret    TOG_GCLOUD_SERVICE_ACCOUNT               (required)
   workflow_call:
     inputs:
       action:
@@ -88,14 +79,32 @@ permissions:
 jobs:
   workstation:
     runs-on: ubuntu-latest
+    env:
+      WORKSTATION_PROJECT: ${{ inputs.project || vars.TOG_GCLOUD_PROJECT }}
+      WORKSTATION_ZONE: ${{ inputs.zone || vars.TOG_GCLOUD_ZONE || 'us-central1-a' }}
+      WORKSTATION_WORKLOAD_IDENTITY_PROVIDER: ${{ inputs.workload_identity_provider || secrets.TOG_GCLOUD_WORKLOAD_IDENTITY_PROVIDER }}
+      WORKSTATION_SERVICE_ACCOUNT: ${{ inputs.service_account || secrets.TOG_GCLOUD_SERVICE_ACCOUNT }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Check cloud configuration
+        run: |
+          for variable in \
+            WORKSTATION_PROJECT \
+            WORKSTATION_WORKLOAD_IDENTITY_PROVIDER \
+            WORKSTATION_SERVICE_ACCOUNT; do
+            if [ -z "${!variable}" ]; then
+              echo "::error::$variable is not set." >&2
+              echo "Set it as a repository variable or secret (see docs/workstation.md)." >&2
+              exit 1
+            fi
+          done
 
       - id: auth
         uses: google-github-actions/auth@v2
         with:
-          workload_identity_provider: ${{ inputs.workload_identity_provider }}
-          service_account: ${{ inputs.service_account }}
+          workload_identity_provider: ${{ env.WORKSTATION_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ env.WORKSTATION_SERVICE_ACCOUNT }}
 
       - uses: google-github-actions/setup-gcloud@v2
 
@@ -104,8 +113,6 @@ jobs:
           WORKSTATION_ACTION: ${{ inputs.action }}
           WORKSTATION_NAME: ${{ inputs.name }}
           WORKSTATION_MACHINE_TYPE: ${{ inputs.machine_type }}
-          WORKSTATION_PROJECT: ${{ inputs.project }}
-          WORKSTATION_ZONE: ${{ inputs.zone }}
           WORKSTATION_WEB_TERMINAL: ${{ inputs.web_terminal }}
         run: |
           args=(
@@ -144,8 +151,6 @@ jobs:
         env:
           WORKSTATION_ACTION: ${{ inputs.action }}
           WORKSTATION_NAME: ${{ inputs.name }}
-          WORKSTATION_PROJECT: ${{ inputs.project }}
-          WORKSTATION_ZONE: ${{ inputs.zone }}
         run: |
           {
             printf '## Workstation %s\n\n' "$WORKSTATION_NAME"
