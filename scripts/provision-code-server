@@ -22,6 +22,28 @@ readonly WEB_USER="tog"
 readonly CONFIG_DIR="/home/${WEB_USER}/.config/code-server"
 readonly CONFIG_FILE="${CONFIG_DIR}/config.yaml"
 
+code_server_bin() {
+  command -v code-server
+}
+
+code_server_root() {
+  local binary
+  binary="$(code_server_bin)"
+  if [[ "$binary" == /usr/lib/code-server/bin/code-server ]]; then
+    printf '%s\n' /usr/lib/code-server
+  else
+    dirname "$(dirname "$binary")"
+  fi
+}
+
+hash_password() {
+  local root
+  root="$(code_server_root)"
+  local node="${root}/lib/node"
+  local argon2="${root}/node_modules/argon2"
+  "$node" -e 'const argon2 = require(process.argv[1]); argon2.hash(process.argv[2], { type: argon2.argon2id }).then((hash) => process.stdout.write(hash))' "$argon2" "$PASSWORD"
+}
+
 install_code_server() {
   if command -v code-server >/dev/null 2>&1; then
     return 0
@@ -43,11 +65,13 @@ ensure_web_user() {
 }
 
 write_config() {
+  local hashed
+  hashed="$(hash_password)"
   sudo mkdir -p "$CONFIG_DIR"
   cat > /tmp/code-server-config.yaml <<EOF
 bind-addr: 0.0.0.0:${PORT}
 auth: password
-password: ${PASSWORD}
+hashed-password: ${hashed}
 cert: true
 disable-telemetry: true
 EOF

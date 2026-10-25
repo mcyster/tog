@@ -11,6 +11,7 @@ on:
           - create
           - stop
           - start
+          - login
           - destroy
           - list
       name:
@@ -27,10 +28,6 @@ on:
         required: false
         type: boolean
         default: false
-      web_terminal_secret:
-        description: Password for the web terminal; defaults to the workstation's stored value or a random one
-        required: false
-        type: string
       project:
         description: Compute Engine project
         required: true
@@ -67,10 +64,6 @@ on:
         required: false
         type: boolean
         default: false
-      web_terminal_secret:
-        description: Password for the web terminal; defaults to the workstation's stored value or a random one
-        required: false
-        type: string
       project:
         description: Compute Engine project
         required: true
@@ -114,7 +107,6 @@ jobs:
           WORKSTATION_PROJECT: ${{ inputs.project }}
           WORKSTATION_ZONE: ${{ inputs.zone }}
           WORKSTATION_WEB_TERMINAL: ${{ inputs.web_terminal }}
-          TOG_WEB_TERMINAL_SECRET: ${{ inputs.web_terminal_secret }}
         run: |
           args=(
             "$WORKSTATION_ACTION" "$WORKSTATION_NAME"
@@ -124,7 +116,28 @@ jobs:
           if [ "$WORKSTATION_WEB_TERMINAL" = "true" ] && [ "$WORKSTATION_ACTION" = "create" ]; then
             args+=( --web-terminal )
           fi
-          bash scripts/tog-workstation "${args[@]}"
+
+          output_file="$(mktemp)"
+          set +e
+          bash scripts/tog-workstation "${args[@]}" > "$output_file"
+          command_status=$?
+          set -e
+          if [ "$command_status" -ne 0 ]; then
+            rm -f "$output_file"
+            exit "$command_status"
+          fi
+
+          url="$(sed -n 's/^web terminal: //p' "$output_file" | head -n 1)"
+          secret="$(sed -n 's/^password: //p' "$output_file" | head -n 1)"
+          rm -f "$output_file"
+
+          if [ -n "$url" ] && [ -n "$secret" ]; then
+            {
+              printf -- '- Web terminal: %s\n' "$url"
+              printf -- '- Web terminal secret: %s\n' "$secret"
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::add-mask::$secret"
+          fi
 
       - name: Write job summary
         if: always()
@@ -154,17 +167,13 @@ jobs:
             printf -- '- Machine type: %s\n' "$(printf '%s\n' "$row" | cut -d, -f3)" >> "$GITHUB_STEP_SUMMARY"
           fi
 
-          if [ "$WORKSTATION_WEB_TERMINAL" = "true" ]; then
-            full_row="$(bash scripts/tog-workstation list --full \
-              --project "$WORKSTATION_PROJECT" --zone "$WORKSTATION_ZONE" 2>/dev/null \
-              | grep "^workstation-$WORKSTATION_NAME," | head -n 1 || true)"
-            if [ -n "$full_row" ]; then
-              url="$(printf '%s\n' "$full_row" | cut -d, -f6)"
-              secret="$(printf '%s\n' "$full_row" | cut -d, -f7)"
-              if [ -n "$url" ] && [ -n "$secret" ]; then
-                printf -- '- Web terminal: %s\n' "$url" >> "$GITHUB_STEP_SUMMARY"
-                printf -- '- Web terminal secret: %s\n' "$secret" >> "$GITHUB_STEP_SUMMARY"
-              fi
+          full_row="$(bash scripts/tog-workstation list --full \
+            --project "$WORKSTATION_PROJECT" --zone "$WORKSTATION_ZONE" 2>/dev/null \
+            | grep "^workstation-$WORKSTATION_NAME," | head -n 1 || true)"
+          if [ -n "$full_row" ]; then
+            url="$(printf '%s\n' "$full_row" | cut -d, -f6)"
+            if [ -n "$url" ]; then
+              printf -- '- Web terminal: %s\n' "$url" >> "$GITHUB_STEP_SUMMARY"
             fi
           fi
 
