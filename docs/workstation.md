@@ -133,7 +133,9 @@ instead.
 
 The workflow's manual run form asks only for the action and workstation name.
 The Google Cloud details come from repository settings, so you configure them
-once instead of typing them per run.
+once instead of typing them per run. The web terminal turn-on defaults to on,
+so a manual `create` from the action is ready to use in a browser; turn it off
+for an ssh-only workstation.
 
 Set these under **Settings -> Secrets and variables -> Actions** in the
 repository `mcyster/tog`:

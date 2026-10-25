@@ -28,9 +28,10 @@ on:
         description: Install the browser editor and web terminal on create
         required: false
         type: boolean
-        default: false
+        default: true
     # Cloud configuration for manual runs comes from repository configuration,
-    # not from the dispatch form:
+    # not from the dispatch form. web_terminal defaults to on so a manual create
+    # from the action is ready to use in a browser; turn it off for ssh-only.
     #   variable  TOG_GCLOUD_PROJECT                       (required)
     #   variable  TOG_GCLOUD_ZONE         default us-central1-a
     #   secret    TOG_GCLOUD_WORKLOAD_IDENTITY_PROVIDER    (required)
@@ -54,7 +55,7 @@ on:
         description: Install the browser editor and web terminal on create
         required: false
         type: boolean
-        default: false
+        default: true
       project:
         description: Compute Engine project
         required: true
