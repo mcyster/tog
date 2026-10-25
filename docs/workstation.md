@@ -70,10 +70,13 @@ warning the browser shows.
 tog-workstation create --web-terminal
 ```
 
-Every web terminal password is random, shown once, and then discarded. The
-machine stores only an argon2 hash of it, and nothing is written to instance
-metadata or project configuration. Passwords are deliberately not recoverable:
-if the password is lost, run `login` again to get a fresh one.
+Every web terminal password is random and never printed or stored on the
+workstation. The machine keeps only an argon2 hash of it, and the plaintext is
+stored in Google Cloud Secret Manager under the secret `tog-web-terminal-password`.
+Anyone with view access to the secret can read the current password from the
+Google Cloud console (no terminal needed); the workflow's service account can
+only add versions, never read them, so the value never appears in GitHub
+output.
 
 ```console
 tog-workstation login
@@ -128,6 +131,45 @@ export GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json
 The GitHub Actions workflow authenticates with
 [Workload Identity Federation](https://github.com/google-github-actions/auth)
 instead.
+
+### Configure the workflow from the repository
+
+The workflow's manual run form asks only for the action and workstation name.
+The Google Cloud details come from repository settings, so you configure them
+once instead of typing them per run. The web terminal turn-on defaults to on,
+so a manual `create` from the action is ready to use in a browser; turn it off
+for an ssh-only workstation.
+
+Set the cloud configuration as repository variables and secrets, under
+**Settings -> Secrets and variables -> Actions** in `mcyster/tog`:
+
+| Kind | Name | Value |
+| --- | --- | --- |
+| Variable | `TOG_GCLOUD_PROJECT` | Your project ID, for example `tog-dev` |
+| Variable | `TOG_GCLOUD_ZONE` | Default `us-central1-a`; set it to change |
+| Secret | `TOG_GCLOUD_SERVICE_ACCOUNT` | The email of the service account to run as, for example `github-actions@tog-dev.iam.gserviceaccount.com` |
+| Secret | `TOG_GCLOUD_WORKLOAD_IDENTITY_PROVIDER` | The workload identity provider used to mint credentials for that service account |
+
+**What the workload identity provider is.** It is the `gcloud` login for a
+machine that has no browser: it lets GitHub exchange an OIDC token for short-lived
+Google credentials scoped to a service account. The value looks like
+`projects/123456789012/locations/global/workloadIdentityPools/tog-actions/providers/github`.
+
+**How to create the values.** Run the setup script. It creates the service
+account, pool, provider, and the Secret Manager secret `tog-web-terminal-password`,
+grants the roles, and prints the values:
+
+```console
+scripts/tog-workstation-gcloud-identity --project tog-dev \
+  --repo mcyster/tog
+```
+
+The script is idempotent: re-running it creates nothing new and reprints the
+values. See the script's `--help` for the details of what it provisions. It
+requires the Google Cloud CLI and a principal with project IAM-admin
+permissions in the project.
+
+The workflow passes these on to `gcloud`; the script itself never reads them.
 
 ### Create a project
 

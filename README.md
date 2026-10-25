@@ -199,21 +199,25 @@ scripts/tog-workstation destroy
   terminal in the browser at `https://EXTERNAL_IP:8443`, behind a password and a
   firewall rule for that port. Run create without `--web-terminal` to keep the
   workstation ssh-only.
-- Web terminal passwords are random, shown once, and discarded; the machine keeps
-  only an argon2 hash, and nothing is stored in metadata. `create --web-terminal`,
-  `login`, and `start` (after a boot) each print fresh credentials. `login`
-  rotates the password on a running workstation. Password forgotten? Run
-  `login` again.
+- Web terminal passwords are random and never printed or stored on the
+  workstation; the machine keeps only an argon2 hash, and the plaintext lives in
+  Google Cloud Secret Manager under `tog-web-terminal-password`, where the owner
+  reads it from the Google Cloud console. `create --web-terminal`, `login`, and
+  `start` (after a boot) each rotate the password in Secret Manager. `login`
+  rotates it on a running workstation. Password forgotten? Run `login` again.
 - No snapshots or backups are created automatically.
 
 The reusable workflow `.github/workflows/tog-workstation.yml` wraps the same
-commands for GitHub Actions. It accepts `action`, `name`, an optional
-`machine_type` used for `create`, `project`, `zone`, and workload identity
-credentials. For `create --web-terminal`, `start`, and `login` it writes the web
-terminal URL and freshly generated password to the job summary; the password is
-masked in the step log. Retired passwords are deliberately recoverable only by
-running the workflow again, which is an accepted tradeoff for a personal
-workstation.
+commands for GitHub Actions. The manual run form asks only for the action and
+workstation name, and installs the web terminal by default; `project`, `zone`,
+and the workload identity credentials come from repository variables and
+secrets. Provision those once with `scripts/tog-workstation-gcloud-identity`
+(see `docs/workstation.md`). For `create --web-terminal`, `start`, and `login`
+it writes the web terminal URL to the job summary plus a link to the secret in
+the Google Cloud console; the password itself never appears in GitHub output.
+Retired passwords are deliberately recoverable only by running the workflow
+again and reading the new value from Secret Manager, which is an accepted
+tradeoff for a personal workstation on a public repository.
 
 ## Development
 
