@@ -196,19 +196,24 @@ scripts/tog-workstation destroy
 - `create` on an existing workstation leaves it unchanged, so its machine type
   is preserved. There is no resize operation.
 - `create --web-terminal` installs code-server on the workstation: VS Code and a
-  terminal in the browser at `https://EXTERNAL_IP:8443`, with a password and a
+  terminal in the browser at `https://EXTERNAL_IP:8443`, behind a password and a
   firewall rule for that port. Run create without `--web-terminal` to keep the
   workstation ssh-only.
-- The web terminal secret is read from `TOG_WEB_TERMINAL_SECRET` when set; if the
-  workstation already has a stored secret it is reused, otherwise a random one is
-  generated. `list --full` prints each workstation's URL and current secret.
+- Web terminal passwords are random, shown once, and discarded; the machine keeps
+  only an argon2 hash, and nothing is stored in metadata. `create --web-terminal`,
+  `login`, and `start` (after a boot) each print fresh credentials. `login`
+  rotates the password on a running workstation. Password forgotten? Run
+  `login` again.
 - No snapshots or backups are created automatically.
 
 The reusable workflow `.github/workflows/tog-workstation.yml` wraps the same
 commands for GitHub Actions. It accepts `action`, `name`, an optional
 `machine_type` used for `create`, `project`, `zone`, and workload identity
-credentials, and records each workstation's status and actual machine type in
-the job summary.
+credentials. For `create --web-terminal`, `start`, and `login` it writes the web
+terminal URL and freshly generated password to the job summary; the password is
+masked in the step log. Retired passwords are deliberately recoverable only by
+running the workflow again, which is an accepted tradeoff for a personal
+workstation.
 
 ## Development
 

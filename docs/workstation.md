@@ -62,7 +62,7 @@ rsync -avz ./tog workstation-tog.us-central1-a.tog-dev:~/
 `create --web-terminal` adds a web terminal so the workstation is usable from any
 device with a browser, with no local tooling installed. It installs
 [code-server](https://github.com/coder/code-server) — VS Code and a shell in the
-browser — serves it on `https://EXTERNAL_IP:8443` with a password, and starts it
+browser — serves it on `https://EXTERNAL_IP:8443` behind a password, and starts it
 as a service that survives `stop` and `start`. Accept the self-signed certificate
 warning the browser shows.
 
@@ -70,11 +70,22 @@ warning the browser shows.
 tog-workstation create --web-terminal
 ```
 
-The password comes from `TOG_WEB_TERMINAL_SECRET` when set. Otherwise the
-workstation's stored value is reused, and if no value is stored a random one is
-generated and saved in the instance metadata. The stored value is what GitHub
-Actions reads back, so a workflow and a local shell agree on the same secret.
-`list --full` prints the URL and the current secret for each workstation:
+Every web terminal password is random, shown once, and then discarded. The
+machine stores only an argon2 hash of it, and nothing is written to instance
+metadata or project configuration. Passwords are deliberately not recoverable:
+if the password is lost, run `login` again to get a fresh one.
+
+```console
+tog-workstation login
+```
+
+`login` rotates the password on a running workstation; the previous password
+stops working. `start` also issues fresh credentials when the workstation boots.
+Because rotation rewrites the hash, already-open browser sessions lose access on
+their next request and get redirected to the login page. A `start` on a
+workstation that is already running leaves credentials untouched.
+
+`list --full` shows each workstation's web terminal URL (without any password):
 
 ```console
 tog-workstation list --full
