@@ -22,18 +22,22 @@ readonly WEB_USER="tog"
 readonly CONFIG_DIR="/home/${WEB_USER}/.config/code-server"
 readonly CONFIG_FILE="${CONFIG_DIR}/config.yaml"
 
-code_server_bin() {
-  command -v code-server
-}
-
 code_server_root() {
   local binary
-  binary="$(code_server_bin)"
-  if [[ "$binary" == /usr/lib/code-server/bin/code-server ]]; then
-    printf '%s\n' /usr/lib/code-server
-  else
-    dirname "$(dirname "$binary")"
-  fi
+  binary="$(command -v code-server)"
+  local candidate
+  local candidates=(
+    "/usr/lib/code-server"
+    "$(dirname "$(dirname "$binary")")"
+    "${HOME}/.local/lib/code-server"
+  )
+  for candidate in "${candidates[@]}"; do
+    if [[ -x "$candidate/lib/node" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  printf '%s\n' /usr/lib/code-server
 }
 
 hash_password() {
