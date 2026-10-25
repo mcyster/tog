@@ -92,10 +92,37 @@ A `start` on a workstation that is already running leaves credentials untouched.
 Without `--web-terminal`, `create` stays ssh-only and opens no extra firewall
 port.
 
-Today a hosted workstation boots a stock Compute Engine image. Reproducing the
-flake environment inside it, so that developing there feels identical to local,
-is the intended direction. Until then, the lifecycle commands below manage the
-hosted workstation itself.
+### Host setup
+
+`create` injects first-boot setup (Google's cloud-init) so the host is ready for
+development as soon as it boots. It creates the `tog` user and installs nix,
+direnv, nix-direnv, and git, then checks out the tog repository at
+`/home/tog/tog/main` with direnv allowed. The web terminal and SSH both run as
+the `tog` user.
+
+The setup lives in `host/setup-host.sh` and is embedded into the instance's
+`user-data` metadata at create time, so the versioned script is deployed with
+the tool rather than fetched from the network later. It is guarded by a marker
+file and safe to rerun.
+
+```console
+tog-workstation create --web-terminal
+```
+
+### Reusing the host setup pattern
+
+`host/setup-host.sh` is deliberately small and generic. To point it at another
+project, change the two variables at the top:
+
+- `TOG_REPO_URL` — the repository to check out.
+- `TOG_CHECKOUT_DIR` — where to clone it (default `/home/tog/tog/main`).
+
+The rest — creating the `tog` user, installing nix + direnv, hooking the shell,
+allowing the checkout's `.envrc` — transfers as-is. Keep the script idempotent:
+any new step must be safe when the marker already exists or a previous run
+partially completed. `create` embeds whatever `host/setup-host.sh` contains at
+invocation time, so committing a change to that file changes what the next fresh
+workstation boots into.
 
 ## Google Cloud setup
 

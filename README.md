@@ -206,6 +206,11 @@ scripts/tog-workstation destroy
   terminal if missing and rotates the password in Secret Manager; `create
   --web-terminal` and `start` (after a boot) do the same. Password forgotten?
   Run `web-terminal` again.
+- `create` also injects first-boot host setup (via cloud-init): it creates the
+  `tog` user, installs nix, direnv, nix-direnv, and git, and checks out the tog
+  repository at `/home/tog/tog/main` with direnv allowed. The hosting runs in
+  `host/setup-host.sh`, which is embedded into the instance at create time; see
+  `docs/workstation.md` for the reusable pattern.
 - No snapshots or backups are created automatically.
 
 The reusable workflow `.github/workflows/tog-workstation.yml` wraps the same
