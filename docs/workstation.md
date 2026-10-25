@@ -79,14 +79,15 @@ only add versions, never read them, so the value never appears in GitHub
 output.
 
 ```console
-tog-workstation login
+tog-workstation web-terminal
 ```
 
-`login` rotates the password on a running workstation; the previous password
-stops working. `start` also issues fresh credentials when the workstation boots.
-Because rotation rewrites the hash, already-open browser sessions lose access on
-their next request and get redirected to the login page. A `start` on a
-workstation that is already running leaves credentials untouched.
+`web-terminal` enables the browser terminal if it is not installed, rotates the
+password on a running workstation, and stores the fresh value in Secret Manager;
+the previous password stops working. `start` also issues fresh credentials when
+the workstation boots. Because rotation rewrites the hash, already-open browser
+sessions lose access on their next request and get redirected to the login page.
+A `start` on a workstation that is already running leaves credentials untouched.
 
 Without `--web-terminal`, `create` stays ssh-only and opens no extra firewall
 port.

@@ -11,7 +11,7 @@ on:
           - create
           - stop
           - start
-          - login
+          - web-terminal
           - destroy
           - list
       name:
