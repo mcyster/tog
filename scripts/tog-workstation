@@ -249,7 +249,7 @@ command_create() {
     die "failed to create workstation '$name'"
   fi
   printf 'created workstation %s (machine type %s) in zone %s\n' \
-    "$name" "$(instance_machine_type)" >&2 "$zone"
+    "$name" "$(instance_machine_type)" "$zone" >&2
 }
 
 waits_for_ssh() {
