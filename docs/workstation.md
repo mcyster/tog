@@ -100,10 +100,10 @@ direnv, nix-direnv, and git, then checks out the tog repository at
 `/home/tog/tog/main` with direnv allowed. The web terminal and SSH both run as
 the `tog` user.
 
-The setup lives in `host/setup-host.sh` and is embedded into the instance's
-`user-data` metadata at create time, so the versioned script is deployed with
-the tool rather than fetched from the network later. It is guarded by a marker
-file and safe to rerun.
+The setup lives in `infra/scripts/workstation-setup` and is embedded into the
+instance's `user-data` metadata at create time, so the versioned script is
+deployed with the tool rather than fetched from the network later. It is guarded
+by a marker file and safe to rerun.
 
 ```console
 tog-workstation create --web-terminal
@@ -111,8 +111,8 @@ tog-workstation create --web-terminal
 
 ### Reusing the host setup pattern
 
-`host/setup-host.sh` is deliberately small and generic. To point it at another
-project, change the two variables at the top:
+`infra/scripts/workstation-setup` is deliberately small and generic. To point it
+at another project, change the two variables at the top:
 
 - `TOG_REPO_URL` — the repository to check out.
 - `TOG_CHECKOUT_DIR` — where to clone it (default `/home/tog/tog/main`).
@@ -120,9 +120,9 @@ project, change the two variables at the top:
 The rest — creating the `tog` user, installing nix + direnv, hooking the shell,
 allowing the checkout's `.envrc` — transfers as-is. Keep the script idempotent:
 any new step must be safe when the marker already exists or a previous run
-partially completed. `create` embeds whatever `host/setup-host.sh` contains at
-invocation time, so committing a change to that file changes what the next fresh
-workstation boots into.
+partially completed. `create` embeds whatever `infra/scripts/workstation-setup`
+contains at invocation time, so committing a change to that file changes what the
+next fresh workstation boots into.
 
 ## Google Cloud setup
 
@@ -188,7 +188,7 @@ account, pool, provider, and the Secret Manager secret `tog-web-terminal-passwor
 grants the roles, and prints the values:
 
 ```console
-scripts/tog-workstation-gcloud-identity --project tog-dev \
+infra/scripts/workstation-gcloud-identity --project tog-dev \
   --repo mcyster/tog
 ```
 

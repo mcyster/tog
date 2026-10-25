@@ -21,10 +21,10 @@ readonly WEB_TERMINAL_SECRET_NAME="tog-web-terminal-password"
 
 usage() {
   cat <<'EOF'
-tog-workstation-gcloud-identity - provision GitHub Actions identity on GCP
+workstation-gcloud-identity - provision GitHub Actions identity on GCP
 
 Usage:
-  tog-workstation-gcloud-identity --project PROJECT [--repo OWNER/REPO]
+  workstation-gcloud-identity --project PROJECT [--repo OWNER/REPO]
 
 Options:
   --project PROJECT   Compute Engine project to set up.
@@ -50,7 +50,7 @@ EOF
 }
 
 die() {
-  printf '%s\n' "tog-workstation-gcloud-identity: $*" >&2
+  printf '%s\n' "workstation-gcloud-identity: $*" >&2
   exit 1
 }
 

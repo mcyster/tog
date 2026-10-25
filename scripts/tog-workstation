@@ -25,8 +25,9 @@ readonly CODE_FIREWALL_RULE="tog-workstation-code-server"
 readonly WEB_TERMINAL_SECRET_NAME="tog-web-terminal-password"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly SCRIPT_DIR
-readonly PROVISION_SCRIPT="$SCRIPT_DIR/provision-code-server"
-readonly HOST_SETUP_SCRIPT="$SCRIPT_DIR/../host/setup-host.sh"
+readonly INFRA_SCRIPTS_DIR="$SCRIPT_DIR/../infra/scripts"
+readonly PROVISION_SCRIPT="$INFRA_SCRIPTS_DIR/workstation-web-terminal"
+readonly HOST_SETUP_SCRIPT="$INFRA_SCRIPTS_DIR/workstation-setup"
 
 usage() {
   cat <<'EOF'
