@@ -25,7 +25,9 @@ readonly CODE_FIREWALL_RULE="tog-workstation-code-server"
 readonly WEB_TERMINAL_SECRET_NAME="tog-web-terminal-password"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly SCRIPT_DIR
-readonly PROVISION_SCRIPT="$SCRIPT_DIR/provision-code-server"
+readonly INFRA_SCRIPTS_DIR="$SCRIPT_DIR/../infra/scripts"
+readonly PROVISION_SCRIPT="$INFRA_SCRIPTS_DIR/workstation-web-terminal"
+readonly HOST_SETUP_SCRIPT="$INFRA_SCRIPTS_DIR/workstation-setup"
 
 usage() {
   cat <<'EOF'
@@ -246,15 +248,40 @@ command_create() {
     die "machine type '$machine_type' is not available in zone '$zone'"
   fi
 
+  local user_data
+  user_data="$(generate_host_user_data)"
+  trap 'rm -f "$user_data"' RETURN
   if ! create_output="$(gcloud compute instances create "$(instance_name)" \
       --project "$project" --zone "$zone" \
       --machine-type "$machine_type" \
+      --metadata-from-file=user-data="$user_data" \
       --labels "$WORKSTATION_LABEL" 2>&1)"; then
     printf '%s\n' "$create_output" >&2
     die "failed to create workstation '$name'"
   fi
   printf 'created workstation %s (machine type %s) in zone %s\n' \
     "$name" "$(instance_machine_type)" "$zone" >&2
+}
+
+generate_host_user_data() {
+  if [[ ! -f "$HOST_SETUP_SCRIPT" ]]; then
+    die "missing host setup script: $HOST_SETUP_SCRIPT"
+  fi
+  local encoded
+  encoded="$(base64 -w0 < "$HOST_SETUP_SCRIPT")"
+  local temp_file
+  temp_file="$(mktemp)"
+  {
+    printf '#cloud-config\n'
+    printf 'write_files:\n'
+    printf '  - path: /usr/local/sbin/tog-host-setup.sh\n'
+    printf '    permissions: "0755"\n'
+    printf '    encoding: b64\n'
+    printf '    content: %s\n' "$encoded"
+    printf 'runcmd:\n'
+    printf '  - [ /usr/local/sbin/tog-host-setup.sh ]\n'
+  } > "$temp_file"
+  printf '%s\n' "$temp_file"
 }
 
 waits_for_ssh() {
@@ -268,6 +295,22 @@ waits_for_ssh() {
     (( attempt -= 1 ))
     sleep 5
   done
+  return 1
+}
+
+waits_for_host_setup() {
+  local attempt=120
+  while (( attempt > 0 )); do
+    if gcloud compute ssh "$(instance_name)" \
+      --project "$project" --zone "$zone" \
+      --strict-host-key-checking=no \
+      --command 'test -f /var/lib/tog-host-setup.done' >/dev/null 2>&1; then
+      return 0
+    fi
+    (( attempt -= 1 ))
+    sleep 10
+  done
+  printf 'host setup on workstation %s did not finish\n' "$name" >&2
   return 1
 }
 instance_has_tag() {
@@ -353,6 +396,7 @@ command_web_terminal() {
     die "workstation '$name' is not running; start it first"
   fi
   waits_for_ssh || die "workstation '$name' is not accepting SSH connections"
+  waits_for_host_setup || printf 'continuing without confirmed host setup on workstation %s\n' "$name" >&2
   ensure_web_terminal_firewall
   local password
   password="$(generate_password)"

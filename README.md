@@ -206,17 +206,22 @@ scripts/tog-workstation destroy
   terminal if missing and rotates the password in Secret Manager; `create
   --web-terminal` and `start` (after a boot) do the same. Password forgotten?
   Run `web-terminal` again.
+- `create` also injects first-boot host setup (via cloud-init): it creates the
+  `tog` user, installs nix, direnv, nix-direnv, and git, and checks out the tog
+  repository at `/home/tog/tog/main` with direnv allowed. The host setup lives in
+  `infra/scripts/workstation-setup`, which is embedded into the instance at
+  create time; see `docs/workstation.md` for the reusable pattern.
 - No snapshots or backups are created automatically.
 
 The reusable workflow `.github/workflows/tog-workstation.yml` wraps the same
-commands for GitHub Actions. The manual run form asks only for the action and
-workstation name, and installs the web terminal by default; `project`, `zone`,
-and the workload identity credentials come from repository variables and
-secrets. Provision those once with `scripts/tog-workstation-gcloud-identity`
-(see `docs/workstation.md`). For `create --web-terminal`, `start`, and
-`web-terminal` it writes the web terminal URL to the job summary plus a link to
-the secret in the Google Cloud console; the password itself never appears in
-GitHub output.
+commands (CLI `scripts/tog-workstation`) for GitHub Actions. The manual run form
+asks only for the action and workstation name, and installs the web terminal by
+default; `project`, `zone`, and the workload identity credentials come from
+repository variables and secrets. Provision those once with
+`infra/scripts/workstation-gcloud-identity` (see `docs/workstation.md`). For
+`create --web-terminal`, `start`, and `web-terminal` it writes the web terminal
+URL to the job summary plus a link to the secret in the Google Cloud console;
+the password itself never appears in GitHub output.
 Retired passwords are deliberately recoverable only by running the workflow
 again and reading the new value from Secret Manager, which is an accepted
 tradeoff for a personal workstation on a public repository.
