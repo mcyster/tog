@@ -85,12 +85,6 @@ Because rotation rewrites the hash, already-open browser sessions lose access on
 their next request and get redirected to the login page. A `start` on a
 workstation that is already running leaves credentials untouched.
 
-`list --full` shows each workstation's web terminal URL (without any password):
-
-```console
-tog-workstation list --full
-```
-
 Without `--web-terminal`, `create` stays ssh-only and opens no extra firewall
 port.
 

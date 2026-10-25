@@ -165,15 +165,9 @@ jobs:
           if [ -n "$row" ]; then
             printf -- '- Status: %s\n' "$(printf '%s\n' "$row" | cut -d, -f2)" >> "$GITHUB_STEP_SUMMARY"
             printf -- '- Machine type: %s\n' "$(printf '%s\n' "$row" | cut -d, -f3)" >> "$GITHUB_STEP_SUMMARY"
-          fi
-
-          full_row="$(bash scripts/tog-workstation list --full \
-            --project "$WORKSTATION_PROJECT" --zone "$WORKSTATION_ZONE" 2>/dev/null \
-            | grep "^workstation-$WORKSTATION_NAME," | head -n 1 || true)"
-          if [ -n "$full_row" ]; then
-            url="$(printf '%s\n' "$full_row" | cut -d, -f6)"
-            if [ -n "$url" ]; then
-              printf -- '- Web terminal: %s\n' "$url" >> "$GITHUB_STEP_SUMMARY"
+            external_ip="$(printf '%s\n' "$row" | cut -d, -f5)"
+            if [ -n "$external_ip" ]; then
+              printf -- '- External IP: %s\n' "$external_ip" >> "$GITHUB_STEP_SUMMARY"
             fi
           fi
 

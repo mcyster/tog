@@ -38,7 +38,7 @@ Usage:
   tog-workstation [OPTIONS] shell [NAME]
   tog-workstation [OPTIONS] config-ssh [NAME]
   tog-workstation [OPTIONS] destroy [NAME] [--yes]
-  tog-workstation [OPTIONS] list [--full]
+  tog-workstation [OPTIONS] list
 
 Commands:
   create   Create the workstation if it does not exist. Creating an existing
@@ -58,7 +58,6 @@ Commands:
            confirmation unless --yes is given.
   list     Print each workstation as CSV:
            name,status,machine_type,zone,external_ip.
-           With --full, also print the web terminal URL.
 
 NAME defaults to tog. When omitted, every command acts on the workstation named
 tog.
@@ -71,7 +70,6 @@ Options:
                        terminal in the browser) and print its URL and a
                        fresh password. When omitted, the workstation stays
                        ssh-only.
-  --full               With list, also print the web terminal URL.
   --yes                Skip the destroy confirmation.
   -h, --help           Show this help.
 
@@ -95,7 +93,6 @@ zone_option=""
 machine_type_option=""
 assume_yes=false
 web_terminal=false
-full_list=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -134,10 +131,6 @@ while [[ $# -gt 0 ]]; do
       web_terminal=true
       shift
       ;;
-    --full)
-      full_list=true
-      shift
-      ;;
     --yes)
       assume_yes=true
       shift
@@ -166,10 +159,6 @@ done
 
 if [[ "$web_terminal" == true && "$command" != "create" ]]; then
   die "--web-terminal applies only to create"
-fi
-
-if [[ "$full_list" == true && "$command" != "list" ]]; then
-  die "--full applies only to list"
 fi
 
 if [[ "$command" != "list" && -z "$name" ]]; then
@@ -474,31 +463,11 @@ command_list() {
   if [[ -n "$zone" ]]; then
     filter="$filter AND zone:$zone"
   fi
-  local fields='name,status,machineType.basename(),zone.basename(),networkInterfaces[0].accessConfigs[0].natIP'
-  if [[ "$full_list" == true ]]; then
-    fields="$fields,tags.items"
-  fi
-  local rows
-  rows="$(gcloud compute instances list \
+  gcloud compute instances list \
     --project "$project" \
     --filter "$filter" \
     --verbosity=error \
-    --format="csv[no-heading]($fields)")"
-  if [[ "$full_list" != true ]]; then
-    printf '%s\n' "$rows"
-    return 0
-  fi
-  local instance status machine_type row_zone external_ip tags
-  while IFS=, read -r instance status machine_type row_zone external_ip tags; do
-    if [[ -n "$external_ip" && ",${tags}," == *",${CODE_SERVER_TAG},"* ]]; then
-      printf '%s,%s,%s,%s,%s,https://%s:%s\n' \
-        "$instance" "$status" "$machine_type" "$row_zone" "$external_ip" \
-        "$external_ip" "$CODE_SERVER_PORT"
-    else
-      printf '%s,%s,%s,%s,%s,\n' \
-        "$instance" "$status" "$machine_type" "$row_zone" "$external_ip"
-    fi
-  done <<< "$rows"
+    --format='csv[no-heading](name,status,machineType.basename(),zone.basename(),networkInterfaces[0].accessConfigs[0].natIP)'
 }
 
 case "$command" in
