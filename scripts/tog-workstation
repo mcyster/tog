@@ -1,0 +1,487 @@
+#!/usr/bin/env bash
+#
+# Manage Google Compute Engine workstations backed by a persistent boot disk.
+#
+# The boot disk and the workstation files on it survive stop and start. Stop
+# halts compute charges while the persistent disk continues to incur storage
+# charges. Start resumes the existing workstation; it never recreates it.
+# Destroy removes the workstation and its boot disk together.
+#
+# This script wraps the gcloud CLI. Install the Google Cloud CLI and
+# authenticate before using it.
+
+set -o errexit
+set -o nounset
+set -o pipefail
+
+readonly DEFAULT_MACHINE_TYPE="e2-standard-2"
+readonly DEFAULT_WORKSTATION_NAME="tog"
+readonly INSTANCE_PREFIX="workstation-"
+readonly WORKSTATION_LABEL="tog-workstation=true"
+readonly WORKSTATION_LABEL_FILTER="labels.tog-workstation=true"
+readonly CODE_SERVER_TAG="tog-workstation-code-server"
+readonly CODE_SERVER_PORT="8443"
+readonly CODE_FIREWALL_RULE="tog-workstation-code-server"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly SCRIPT_DIR
+readonly PROVISION_SCRIPT="$SCRIPT_DIR/provision-code-server"
+
+usage() {
+  cat <<'EOF'
+tog-workstation - manage GCE workstations with persistent boot disks
+
+Usage:
+  tog-workstation [OPTIONS] create [NAME] [--machine-type TYPE] [--web-terminal]
+  tog-workstation [OPTIONS] start [NAME]
+  tog-workstation [OPTIONS] login [NAME]
+  tog-workstation [OPTIONS] stop [NAME]
+  tog-workstation [OPTIONS] shell [NAME]
+  tog-workstation [OPTIONS] config-ssh [NAME]
+  tog-workstation [OPTIONS] destroy [NAME] [--yes]
+  tog-workstation [OPTIONS] list
+
+Commands:
+  create   Create the workstation if it does not exist. Creating an existing
+           workstation changes nothing, including its machine type. With
+           --web-terminal, installs a browser code editor and web terminal.
+  start    Start the workstation when stopped. A workstation with a web
+           terminal issues fresh login credentials once the service is up.
+  login    Rotate the web terminal password on a running workstation and print
+           fresh login credentials. The previous password stops working.
+  stop     Stop the workstation, halting compute charges. The persistent boot
+           disk is kept.
+  shell    Open an interactive SSH session on the running workstation.
+  config-ssh
+           Add an SSH config alias for the workstation so plain ssh, scp, and
+           rsync connect without gcloud flags.
+  destroy  Delete the workstation and its boot disk. Prompts for typed
+           confirmation unless --yes is given.
+  list     Print each workstation as CSV:
+           name,status,machine_type,zone,external_ip.
+
+NAME defaults to tog. When omitted, every command acts on the workstation named
+tog.
+
+Options:
+  --project PROJECT    Compute Engine project.
+  --zone ZONE          Compute Engine zone; the workstation is provisioned here.
+  --machine-type TYPE  Machine type used by create. Default: e2-standard-2.
+  --web-terminal       After create, install code-server (VS Code and a
+                       terminal in the browser) and print its URL and a
+                       fresh password. When omitted, the workstation stays
+                       ssh-only.
+  --yes                Skip the destroy confirmation.
+  -h, --help           Show this help.
+
+Web terminal passwords are random and rotated: they are shown once by create
+--web-terminal, login, and start, and are never stored on the workstation or in
+Google Cloud metadata. Forgot a password? Run login again. A requested machine
+type is validated against the zone before provisioning. The default project and
+zone come from your gcloud configuration.
+EOF
+}
+
+die() {
+  printf '%s\n' "tog-workstation: $*" >&2
+  exit 1
+}
+
+command=""
+name=""
+project_option=""
+zone_option=""
+machine_type_option=""
+assume_yes=false
+web_terminal=false
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    --project)
+      [[ $# -ge 2 ]] || die "--project requires a value"
+      project_option="$2"
+      shift 2
+      ;;
+    --project=*)
+      project_option="${1#--project=}"
+      shift
+      ;;
+    --zone)
+      [[ $# -ge 2 ]] || die "--zone requires a value"
+      zone_option="$2"
+      shift 2
+      ;;
+    --zone=*)
+      zone_option="${1#--zone=}"
+      shift
+      ;;
+    --machine-type)
+      [[ $# -ge 2 ]] || die "--machine-type requires a value"
+      machine_type_option="$2"
+      shift 2
+      ;;
+    --machine-type=*)
+      machine_type_option="${1#--machine-type=}"
+      shift
+      ;;
+    --web-terminal)
+      web_terminal=true
+      shift
+      ;;
+    --yes)
+      assume_yes=true
+      shift
+      ;;
+    create | start | login | stop | shell | config-ssh | destroy | list)
+      if [[ -n "$command" ]]; then
+        die "duplicate command: $1"
+      fi
+      command="$1"
+      shift
+      ;;
+    -*)
+      die "unknown option: $1"
+      ;;
+    *)
+      if [[ -n "$name" ]]; then
+        die "unexpected argument: $1"
+      fi
+      name="$1"
+      shift
+      ;;
+  esac
+done
+
+[[ -n "$command" ]] || die "no command given; try --help"
+
+if [[ "$web_terminal" == true && "$command" != "create" ]]; then
+  die "--web-terminal applies only to create"
+fi
+
+if [[ "$command" != "list" && -z "$name" ]]; then
+  name="$DEFAULT_WORKSTATION_NAME"
+fi
+
+if [[ -n "$name" ]]; then
+  if [[ ! "$name" =~ ^[a-z]([-a-z0-9]{0,45}[a-z0-9])?$ ]] || [[ ${#name} -gt 47 ]]; then
+    die "invalid workstation name '$name': use 1-47 lowercase letters, digits, and hyphens, starting with a letter and ending with a letter or digit"
+  fi
+fi
+
+if ! command -v gcloud >/dev/null 2>&1; then
+  die "gcloud is required; install the Google Cloud CLI"
+fi
+
+if [[ -n "$project_option" ]]; then
+  project="$project_option"
+else
+  project="$(gcloud config get-value project 2>/dev/null || true)"
+  if [[ -z "$project" || "$project" == "(unset)" ]]; then
+    die "no project configured; pass --project or run: gcloud config set project PROJECT"
+  fi
+fi
+
+zone=""
+if [[ -n "$zone_option" ]]; then
+  zone="$zone_option"
+elif [[ "$command" != "list" && "$command" != "config-ssh" ]]; then
+  zone="$(gcloud config get-value compute/zone 2>/dev/null || true)"
+  if [[ -z "$zone" || "$zone" == "(unset)" ]]; then
+    die "no zone configured; pass --zone or run: gcloud config set compute/zone ZONE"
+  fi
+fi
+
+instance_name() {
+  printf '%s%s\n' "$INSTANCE_PREFIX" "$name"
+}
+
+instance_zone() {
+  gcloud compute instances list \
+    --project "$project" \
+    --filter="name=$(instance_name)" \
+    --verbosity=error \
+    --format='value(zone.basename())' 2>/dev/null || true
+}
+
+describe_field() {
+  gcloud compute instances describe "$(instance_name)" \
+    --project "$project" --zone "$zone" \
+    --format="$1" 2>/dev/null || true
+}
+
+instance_status() {
+  describe_field 'value(status)'
+}
+
+instance_label() {
+  describe_field 'value(labels.tog-workstation)'
+}
+
+instance_machine_type() {
+  describe_field 'value(machineType.basename())'
+}
+
+command_create() {
+  local status
+  status="$(instance_status)"
+  if [[ -n "$status" ]]; then
+    printf "workstation '%s' already exists (%s, machine type %s); leaving unchanged\n" \
+      "$name" "$status" "$(instance_machine_type)" >&2
+    return 0
+  fi
+
+  local machine_type
+  machine_type="${machine_type_option:-$DEFAULT_MACHINE_TYPE}"
+  printf 'validating machine type %s in zone %s...\n' "$machine_type" "$zone" >&2
+  if ! gcloud compute machine-types describe "$machine_type" \
+    --project "$project" --zone "$zone" >/dev/null 2>&1; then
+    die "machine type '$machine_type' is not available in zone '$zone'"
+  fi
+
+  if ! create_output="$(gcloud compute instances create "$(instance_name)" \
+      --project "$project" --zone "$zone" \
+      --machine-type "$machine_type" \
+      --labels "$WORKSTATION_LABEL" 2>&1)"; then
+    printf '%s\n' "$create_output" >&2
+    die "failed to create workstation '$name'"
+  fi
+  printf 'created workstation %s (machine type %s) in zone %s\n' \
+    "$name" "$(instance_machine_type)" "$zone" >&2
+}
+
+waits_for_ssh() {
+  local attempt=30
+  while (( attempt > 0 )); do
+    if gcloud compute ssh "$(instance_name)" \
+      --project "$project" --zone "$zone" \
+      --strict-host-key-checking=no --command 'true' >/dev/null 2>&1; then
+      return 0
+    fi
+    (( attempt -= 1 ))
+    sleep 5
+  done
+  return 1
+}
+instance_has_tag() {
+  local tags
+  tags="$(describe_field 'value(tags.items)')"
+  [[ ",${tags}," == *",${CODE_SERVER_TAG},"* ]]
+}
+
+instance_external_ip() {
+  describe_field 'value(networkInterfaces[0].accessConfigs[0].natIP)'
+}
+
+generate_password() {
+  local random_bytes
+  random_bytes="$(head -c 64 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9')"
+  printf '%s\n' "${random_bytes:0:32}"
+}
+
+print_web_terminal_credentials() {
+  local external_ip
+  external_ip="$(instance_external_ip)"
+  printf 'web terminal: https://%s:%s\n' "$external_ip" "$CODE_SERVER_PORT"
+  printf 'password: %s\n' "$1"
+  printf 'accept the self-signed certificate warning in the browser.\n' >&2
+}
+
+rotate_web_terminal_password() {
+  local password="$1"
+  if ! gcloud compute ssh "$(instance_name)" \
+      --project "$project" --zone "$zone" \
+      --strict-host-key-checking=no \
+      --command "CODE_SERVER_PASSWORD='${password}' bash -s" \
+      < "$PROVISION_SCRIPT" >/dev/null 2>&1; then
+    die "failed to set the web terminal password on workstation '$name'"
+  fi
+}
+
+ensure_web_terminal_firewall() {
+  if ! instance_has_tag; then
+    if ! gcloud compute instances add-tags "$(instance_name)" \
+        --project "$project" --zone "$zone" --tags "$CODE_SERVER_TAG" >/dev/null 2>&1; then
+      die "failed to tag workstation '$name'"
+    fi
+  fi
+  if ! gcloud compute firewall-rules describe "$CODE_FIREWALL_RULE" \
+      --project "$project" >/dev/null 2>&1; then
+    gcloud compute firewall-rules create "$CODE_FIREWALL_RULE" \
+      --project "$project" \
+      --allow="tcp:$CODE_SERVER_PORT" \
+      --target-tags="$CODE_SERVER_TAG" >/dev/null 2>&1 || {
+      die "failed to create the web terminal firewall rule"
+    }
+  fi
+}
+
+web_terminal_status() {
+  if instance_has_tag; then
+    printf 'enabled\n'
+  else
+    printf 'ssh-only\n'
+  fi
+}
+
+command_web_terminal_installation() {
+  local status
+  status="$(instance_status)"
+  if [[ -z "$status" ]]; then
+    die "workstation '$name' does not exist; use create first"
+  fi
+  if [[ "$status" != "RUNNING" ]]; then
+    printf 'starting workstation %s to provision it...\n' "$name" >&2
+    gcloud compute instances start "$(instance_name)" \
+      --project "$project" --zone "$zone" >/dev/null 2>&1
+    status="$(instance_status)"
+  fi
+  waits_for_ssh || die "workstation '$name' is not accepting SSH connections"
+  ensure_web_terminal_firewall
+  local password
+  password="$(generate_password)"
+  printf 'setting the web terminal password on workstation %s...\n' "$name" >&2
+  rotate_web_terminal_password "$password"
+  printf 'web terminal ready on workstation %s\n' "$name" >&2
+  print_web_terminal_credentials "$password"
+}
+
+command_login() {
+  local status
+  status="$(instance_status)"
+  if [[ -z "$status" ]]; then
+    die "workstation '$name' does not exist; use create first"
+  fi
+  if [[ "$status" != "RUNNING" ]]; then
+    die "workstation '$name' is not running; start it first"
+  fi
+  if ! instance_has_tag; then
+    die "workstation '$name' has no web terminal; run create --web-terminal first"
+  fi
+  waits_for_ssh || die "workstation '$name' is not accepting SSH connections"
+  local password
+  password="$(generate_password)"
+  printf 'rotating the web terminal password on workstation %s...\n' "$name" >&2
+  rotate_web_terminal_password "$password"
+  printf 'password rotated on workstation %s\n' "$name" >&2
+  print_web_terminal_credentials "$password"
+}
+
+command_stop() {
+  local status
+  status="$(instance_status)"
+  if [[ -z "$status" ]]; then
+    die "workstation '$name' does not exist"
+  fi
+  if [[ "$status" == "TERMINATED" ]]; then
+    printf 'workstation %s is already stopped (machine type %s)\n' "$name" "$(instance_machine_type)" >&2
+    return 0
+  fi
+  gcloud compute instances stop "$(instance_name)" --project "$project" --zone "$zone" >&2
+  printf 'stopped workstation %s\n' "$name" >&2
+}
+
+command_start() {
+  local status
+  status="$(instance_status)"
+  if [[ -z "$status" ]]; then
+    die "workstation '$name' does not exist; use create first"
+  fi
+  if [[ "$status" == "RUNNING" ]]; then
+    printf 'workstation %s is already running (machine type %s)\n' "$name" "$(instance_machine_type)" >&2
+    return 0
+  fi
+  gcloud compute instances start "$(instance_name)" --project "$project" --zone "$zone" >&2
+  printf 'started workstation %s (machine type %s)\n' "$name" "$(instance_machine_type)" >&2
+  if ! instance_has_tag; then
+    return 0
+  fi
+  waits_for_ssh || die "workstation '$name' is not accepting SSH connections"
+  local password
+  password="$(generate_password)"
+  printf 'rotating the web terminal password on workstation %s...\n' "$name" >&2
+  rotate_web_terminal_password "$password"
+  printf 'web terminal ready on workstation %s\n' "$name" >&2
+  print_web_terminal_credentials "$password"
+}
+
+command_shell() {
+  local status
+  status="$(instance_status)"
+  if [[ -z "$status" ]]; then
+    die "workstation '$name' does not exist; use create first"
+  fi
+  if [[ "$status" != "RUNNING" ]]; then
+    die "workstation '$name' is not running; start it first"
+  fi
+  gcloud compute ssh "$(instance_name)" \
+    --project "$project" --zone "$zone" \
+    --strict-host-key-checking=no
+}
+
+command_config_ssh() {
+  local instance_zone_value
+  instance_zone_value="$(instance_zone)"
+  if [[ -z "$instance_zone_value" ]]; then
+    die "workstation '$name' does not exist; use create first"
+  fi
+  gcloud compute config-ssh --project "$project" >&2
+  printf 'ssh %s.%s.%s\n' "$(instance_name)" "$instance_zone_value" "$project" >&2
+}
+
+command_destroy() {
+  local status
+  status="$(instance_status)"
+  if [[ -z "$status" ]]; then
+    printf 'workstation %s does not exist; nothing to destroy\n' "$name" >&2
+    return 0
+  fi
+  if [[ "$(instance_label)" != "true" ]]; then
+    die "instance '$(instance_name)' is not managed by tog-workstation; refusing to delete it"
+  fi
+  if [[ "$assume_yes" != true ]]; then
+    printf 'Permanently delete workstation %s and its boot disk (instance %s)?\n' \
+      "$name" "$(instance_name)" >&2
+    printf 'Type the workstation name to confirm: ' >&2
+    local confirmation
+    read -r confirmation
+    if [[ "$confirmation" != "$name" ]]; then
+      printf 'confirmation did not match; aborting\n' >&2
+      return 1
+    fi
+  fi
+  gcloud compute instances delete "$(instance_name)" \
+    --project "$project" --zone "$zone" \
+    --delete-disks=boot --quiet >&2
+  printf 'destroyed workstation %s and its boot disk\n' "$name" >&2
+}
+
+command_list() {
+  local filter="$WORKSTATION_LABEL_FILTER"
+  if [[ -n "$zone" ]]; then
+    filter="$filter AND zone:$zone"
+  fi
+  gcloud compute instances list \
+    --project "$project" \
+    --filter "$filter" \
+    --verbosity=error \
+    --format='csv[no-heading](name,status,machineType.basename(),zone.basename(),networkInterfaces[0].accessConfigs[0].natIP)'
+}
+
+case "$command" in
+  create)
+    command_create
+    if [[ "$web_terminal" == true ]]; then
+      command_web_terminal_installation
+    fi
+    ;;
+  stop) command_stop ;;
+  start) command_start ;;
+  login) command_login ;;
+  shell) command_shell ;;
+  config-ssh) command_config_ssh ;;
+  destroy) command_destroy || exit 1 ;;
+  list) command_list ;;
+esac

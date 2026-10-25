@@ -164,6 +164,57 @@ MIME type from content, falling back to `application/octet-stream`; override
 either with `--name` and `--mime-type`. Standard output carries the added
 asset or a JSON Lines listing. See [Assets](docs/assets.md).
 
+## Workstations
+
+Manage Google Compute Engine workstations backed by a persistent boot disk with
+[`scripts/tog-workstation`](scripts/tog-workstation). It wraps the `gcloud`
+CLI; follow the [Google Cloud setup](docs/workstation.md) for the SDK,
+authentication, and project and zone, then run:
+
+```console
+scripts/tog-workstation create
+scripts/tog-workstation create main --machine-type e2-standard-2
+scripts/tog-workstation list
+scripts/tog-workstation stop
+scripts/tog-workstation start
+scripts/tog-workstation destroy
+```
+
+- The machine type defaults to `e2-standard-2` (2 vCPU, 8 GB RAM). Any machine
+  type available in the zone is accepted; a requested type is validated against
+  the zone before provisioning.
+- The workstation name defaults to `tog`; pass a name to target another
+  workstation.
+- `stop` halts compute charges while keeping the boot disk, which continues to
+  incur storage charges. `start` resumes the same workstation.
+- `shell` opens an interactive SSH session on a running workstation; gcloud
+  manages the key, so no password is needed.
+- `config-ssh` adds an SSH config alias for the workstation so plain `ssh`,
+  `scp`, and `rsync` connect without gcloud flags.
+- `destroy` deletes the workstation and its boot disk after a typed
+  confirmation, or unconditionally with `--yes`.
+- `create` on an existing workstation leaves it unchanged, so its machine type
+  is preserved. There is no resize operation.
+- `create --web-terminal` installs code-server on the workstation: VS Code and a
+  terminal in the browser at `https://EXTERNAL_IP:8443`, behind a password and a
+  firewall rule for that port. Run create without `--web-terminal` to keep the
+  workstation ssh-only.
+- Web terminal passwords are random, shown once, and discarded; the machine keeps
+  only an argon2 hash, and nothing is stored in metadata. `create --web-terminal`,
+  `login`, and `start` (after a boot) each print fresh credentials. `login`
+  rotates the password on a running workstation. Password forgotten? Run
+  `login` again.
+- No snapshots or backups are created automatically.
+
+The reusable workflow `.github/workflows/tog-workstation.yml` wraps the same
+commands for GitHub Actions. It accepts `action`, `name`, an optional
+`machine_type` used for `create`, `project`, `zone`, and workload identity
+credentials. For `create --web-terminal`, `start`, and `login` it writes the web
+terminal URL and freshly generated password to the job summary; the password is
+masked in the step log. Retired passwords are deliberately recoverable only by
+running the workflow again, which is an accepted tradeoff for a personal
+workstation.
+
 ## Development
 
 Run the project checks:

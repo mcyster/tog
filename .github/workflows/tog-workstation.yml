@@ -1,0 +1,181 @@
+name: tog-workstation
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: Lifecycle action to run on the workstation
+        required: true
+        type: choice
+        options:
+          - create
+          - stop
+          - start
+          - login
+          - destroy
+          - list
+      name:
+        description: Workstation name
+        required: true
+        type: string
+      machine_type:
+        description: Compute Engine machine type, used for create
+        required: false
+        type: string
+        default: e2-standard-2
+      web_terminal:
+        description: Install the browser editor and web terminal on create
+        required: false
+        type: boolean
+        default: false
+      project:
+        description: Compute Engine project
+        required: true
+        type: string
+      zone:
+        description: Compute Engine zone
+        required: true
+        type: string
+      workload_identity_provider:
+        description: Workload identity provider for gcloud authentication
+        required: true
+        type: string
+      service_account:
+        description: Service account to authenticate as
+        required: true
+        type: string
+  workflow_call:
+    inputs:
+      action:
+        description: Lifecycle action to run on the workstation
+        required: true
+        type: string
+      name:
+        description: Workstation name
+        required: true
+        type: string
+      machine_type:
+        description: Compute Engine machine type, used for create
+        required: false
+        type: string
+        default: e2-standard-2
+      web_terminal:
+        description: Install the browser editor and web terminal on create
+        required: false
+        type: boolean
+        default: false
+      project:
+        description: Compute Engine project
+        required: true
+        type: string
+      zone:
+        description: Compute Engine zone
+        required: true
+        type: string
+      workload_identity_provider:
+        description: Workload identity provider for gcloud authentication
+        required: true
+        type: string
+      service_account:
+        description: Service account to authenticate as
+        required: true
+        type: string
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  workstation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ inputs.workload_identity_provider }}
+          service_account: ${{ inputs.service_account }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Run workstation command
+        env:
+          WORKSTATION_ACTION: ${{ inputs.action }}
+          WORKSTATION_NAME: ${{ inputs.name }}
+          WORKSTATION_MACHINE_TYPE: ${{ inputs.machine_type }}
+          WORKSTATION_PROJECT: ${{ inputs.project }}
+          WORKSTATION_ZONE: ${{ inputs.zone }}
+          WORKSTATION_WEB_TERMINAL: ${{ inputs.web_terminal }}
+        run: |
+          args=(
+            "$WORKSTATION_ACTION" "$WORKSTATION_NAME"
+            --project "$WORKSTATION_PROJECT" --zone "$WORKSTATION_ZONE"
+            --machine-type "$WORKSTATION_MACHINE_TYPE" --yes
+          )
+          if [ "$WORKSTATION_WEB_TERMINAL" = "true" ] && [ "$WORKSTATION_ACTION" = "create" ]; then
+            args+=( --web-terminal )
+          fi
+
+          output_file="$(mktemp)"
+          set +e
+          bash scripts/tog-workstation "${args[@]}" > "$output_file"
+          command_status=$?
+          set -e
+          if [ "$command_status" -ne 0 ]; then
+            rm -f "$output_file"
+            exit "$command_status"
+          fi
+
+          url="$(sed -n 's/^web terminal: //p' "$output_file" | head -n 1)"
+          secret="$(sed -n 's/^password: //p' "$output_file" | head -n 1)"
+          rm -f "$output_file"
+
+          if [ -n "$url" ] && [ -n "$secret" ]; then
+            {
+              printf -- '- Web terminal: %s\n' "$url"
+              printf -- '- Web terminal secret: %s\n' "$secret"
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::add-mask::$secret"
+          fi
+
+      - name: Write job summary
+        if: always()
+        env:
+          WORKSTATION_ACTION: ${{ inputs.action }}
+          WORKSTATION_NAME: ${{ inputs.name }}
+          WORKSTATION_PROJECT: ${{ inputs.project }}
+          WORKSTATION_ZONE: ${{ inputs.zone }}
+        run: |
+          {
+            printf '## Workstation %s\n\n' "$WORKSTATION_NAME"
+            printf -- '- Action: %s\n' "$WORKSTATION_ACTION"
+            printf -- '- Zone: %s\n' "$WORKSTATION_ZONE"
+            printf '\n'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$WORKSTATION_ACTION" = "destroy" ]; then
+            printf -- '- Workstation destroyed, including the boot disk.\n' >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          entries="$(bash scripts/tog-workstation list \
+            --project "$WORKSTATION_PROJECT" --zone "$WORKSTATION_ZONE" 2>/dev/null || true)"
+          row="$(printf '%s\n' "$entries" | grep "^workstation-$WORKSTATION_NAME," | head -n 1 || true)"
+          if [ -n "$row" ]; then
+            printf -- '- Status: %s\n' "$(printf '%s\n' "$row" | cut -d, -f2)" >> "$GITHUB_STEP_SUMMARY"
+            printf -- '- Machine type: %s\n' "$(printf '%s\n' "$row" | cut -d, -f3)" >> "$GITHUB_STEP_SUMMARY"
+            external_ip="$(printf '%s\n' "$row" | cut -d, -f5)"
+            if [ -n "$external_ip" ]; then
+              printf -- '- External IP: %s\n' "$external_ip" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          fi
+
+          {
+            printf '\n### All tog workstations\n\n'
+            printf '| instance | status | machine type | zone |\n'
+            printf '| --- | --- | --- | --- |\n'
+            printf '%s\n' "$entries" | grep -v '^$' | while IFS=, read -r instance status_value machine_type zone_value; do
+              printf '| %s | %s | %s | %s |\n' "$instance" "$status_value" "$machine_type" "$zone_value"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
