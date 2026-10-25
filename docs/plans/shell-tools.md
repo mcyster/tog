@@ -7,14 +7,18 @@ or inspects their output.
 
 Mark accepted independent execution for phase 1, optional shell context selection
 for phase 2, and memory-first output that spills to temporary disk storage.
-This plan records the intended replacement; it does not implement it. The API
-details below remain a proposal for review.
+Phase 1 is implemented: it replaces the former `shell` tool with the
+`shell_execute`, `shell_wait`, `shell_cancel`, and `stream_read` tools in
+`crates/tog-tools/src/shell.rs`. The [tool documentation](../tools.md)
+describes the implemented contracts and lifecycle. Phase 1 contracts below
+reflect the implemented behavior, including decisions recorded during
+implementation. Phase 2 (shell contexts) and phase 3 (stdin) remain proposals
+for review.
 
-The current [shell implementation](../../crates/tog-tools/src/shell.rs) starts
-`/bin/sh -c`, drains both output pipes, and retains at most 64 KiB per stream.
-It returns when execution finishes or times out. Replace that tool and its
-registration rather than offering two competing shell tools. Update
-[tool documentation](../tools.md) when the replacement is implemented.
+The former [shell implementation](../../crates/tog-tools/src/shell.rs) started
+`/bin/sh -c`, drained both output pipes, retained at most 64 KiB per stream, and
+returned when execution finished or timed out. The new tools replace that tool
+and its registration rather than offering a second competing shell tool.
 
 ## Independent execution first
 
@@ -22,7 +26,9 @@ Each call starts a fresh shell with tog's inherited environment. The shell
 interprets pipes, redirects, variable expansion, and command sequences.
 
 - For phase 1, the execution context uses tog's current working directory and
-  inherited environment. A directory override affects one call.
+  inherited environment. A successful command can change its own directory
+  with `cd ... && ...`. A directory override belongs to the phase 2 shell
+  context, not to an execution.
 - Setup commands, `cd`, and `export` affect only that execution.
 - Filesystem changes and other external effects remain shared.
 - Omitted `shell_context_id` always means independent execution, including later.
@@ -30,8 +36,8 @@ interprets pipes, redirects, variable expansion, and command sequences.
 - Keep stdin closed in phase 1. Stdin support is deferred to phase 3.
 - PTYs remain outside this plan.
 
-Retaining `/bin/sh` is the smallest initial interpreter choice. Confirm that
-choice before implementation; Bash-specific setup requires Bash explicitly.
+Retaining `/bin/sh` is the smallest initial interpreter choice. The owner
+confirmed `/bin/sh` for phase 1; Bash-specific setup requires Bash explicitly.
 
 ## Execution and output have separate lifetimes
 
@@ -97,8 +103,9 @@ report that fact explicitly and define whether execution stops or continues to
 drain output. Avoid an unbounded in-memory combined-stream index after spill.
 Sharing storage between stream views is desirable where it stays simple.
 
-Capture raw bytes. Before implementation, define offset units, text decoding,
-invalid UTF-8 handling, and reads that split a multibyte character.
+Capture raw bytes. Implemented offset units are bytes. Returned content decodes
+the requested raw byte range as UTF-8 lossily, so a read may split a multibyte
+character; the model continues from `next_offset` to recover.
 
 ## Temporary output and durable history
 
@@ -111,14 +118,57 @@ is promoted to assets. Do not present temporary paths or stream IDs as durable
 content references. Model-visible output must be recorded in tool responses or
 immutably referenced, as required by [project principles](../principles.md).
 
-Also settle who owns executions after a turn ends, what happens at tog shutdown,
-and what a resumed conversation sees when an execution or stream no longer
-exists. Phase 1 does not promise process recovery or automatic command replay.
-The [durable-execution plan](execute-commands-durably.md) covers that broader work.
+Implemented phase-1 decisions: executions and streams remain identifiable and
+readable for the life of the tog process; completed output is not promoted to
+assets; stream identifiers are transient references, not durable content
+references. A resumed conversation in a new process sees an unknown identifier
+and fails explicitly; tog never reruns a command to reconstruct a missing
+execution. Phase 1 does not promise process recovery or automatic command
+replay. The [durable-execution plan](execute-commands-durably.md) covers that
+broader work.
+
+Execution and stream identifiers follow the conversation's identifier
+conventions: version-7 UUIDs under the `exec_` and `stream_` prefixes. They are
+not reused across service instances or process restarts, so a persisted
+identifier cannot resolve to unrelated newer work.
 
 Use the Conversation API for tool results. Live UI progress through conversation
 events remains a separate choice. Do not introduce a parallel event bus or label
 shell output as model-specific data.
+
+## Service boundary and lifecycle ownership
+
+As implemented, a `ShellService` exposes the four operations—execute, wait,
+cancel, and stream read—behind a focused contract. It owns the execution and
+stream registries and their synchronization privately. Tool adapters only
+decode arguments, call the service, and encode results. No new crate or trait
+is involved.
+
+Each `Execution` has a private implementation and a focused caller contract:
+`standard_output()`, `standard_error()`, and `combined_output()` return the
+read-only captured streams; `status()`, `exit_status()`, and `error()`
+accessors report the process state; `cancel()` requests cancellation; and
+`wait_for_completion` observes state with waiting. Construction happens
+through `Execution::try_new`,
+which starts the work; launching the OS process is a private step of that
+constructor. Callers never
+touch process identifiers, capture tasks, signal flags, locks, or `Arc`
+sharing. Output excerpts and reader offsets are not part of the execution; they
+belong to stream reads, and the service adapter combines a read with the
+process state into each tool response.
+
+Lifecycle ownership is deliberate:
+
+- A supervisor task owns the live child and is the only entity that signals the
+  process group. Cancellation is a request to the supervisor; it terminates the
+  group only while the child is unreaped, when the saved process id cannot yet
+  be reused.
+- Completion is recorded by the same supervisor, so a late cancellation can
+  neither signal a reused group nor overwrite a completed outcome. Cancellation
+  after completion is a no-op.
+- Releasing the service requests cancellation of tracked executions through
+  this owner. `Drop` is a synchronous fallback that only issues the request; it
+  does not await process cleanup.
 
 ## Phase 2: shell contexts
 
@@ -169,32 +219,34 @@ remain proposals for review.
 ## Phase 1 tool contracts
 
 Use explicit time and size units in the final schemas. Select defaults so ordinary
-commands require only the command string.
+commands require only the command string. The implemented schemas use the field
+names below with explicit units: `wait_time_seconds`, `timeout_seconds`,
+`output_limit_bytes`, `offset`, and `limit_bytes`.
 
 ```text
-shell_execute(commands, shell_context_id?, directory?,
-              wait_time?, timeout?, output_limit?)
+shell_execute(commands, shell_context_id?,
+              wait_time_seconds?, timeout_seconds?, output_limit_bytes?)
   -> execution_id
      stdout_stream_id
      stderr_stream_id
      output_stream_id
-     state: ExecutionState
+     state: ExecutionSnapshot
 
-shell_wait(execution_id, offset, wait_time?, output_limit?)
-  -> ExecutionState
+shell_wait(execution_id, offset, wait_time_seconds?, output_limit_bytes?)
+  -> ExecutionSnapshot
 
 shell_cancel(execution_id)
   -> cancellation acknowledgement
 
-ExecutionState
+ExecutionSnapshot
   output
   next_offset
   output_eof
   status          # running | complete
-  exit_code?
-  error?
+  exit_status?    # exited {code} | signaled {signal}, only for natural end
+  error?          # timed_out | cancelled | capture_failed
 
-stream_read(stream_id, offset?, limit?, timeout?)
+stream_read(stream_id, offset?, limit_bytes?, timeout_seconds?)
   -> content
      next_offset
      eof
@@ -206,11 +258,17 @@ stream_read(stream_id, offset?, limit?, timeout?)
 `stream_read` defaults to offset zero. It returns available data immediately.
 At the current end of a live stream, it may wait up to its timeout for more data.
 EOF is true only when the stream is closed and the returned read reaches its end.
-The same rule applies to `ExecutionState.output_eof`.
+The same rule applies to `ExecutionSnapshot.output_eof`.
 
-Before implementation, settle the failure schema and its relationship to the
-existing `OperationFailure` contract. Keep tool-call failures distinct from a
-successfully retrieved execution state that reports a failed command.
+Failure handling is implemented as follows. Tool-call failures remain the
+existing `OperationFailure` problems: invalid arguments (including unknown or
+malformed execution and stream identifiers), launch failure as
+`execution_failed`, and unknown tool names handled by the registry. A failed
+command outcome is a successfully retrieved execution state: `exit_status` for
+a natural end, or an `error` of kind `timed_out`, `cancelled`, or
+`capture_failed`. Timeout and cancellation therefore appear in the state, not
+as tool-call problems. `exit_status` is omitted when tog ended the execution
+for timeout or cancellation.
 
 ## Completion criteria
 
@@ -222,6 +280,10 @@ successfully retrieved execution state that reports a failed command.
 - Inline limits do not silently discard retained output.
 - Completion, unread output, and capture failures remain distinguishable.
 - Retention, shutdown, and cleanup policies are documented and tested.
+
+The criteria are met by phase 1. The behavioral tests live in
+`crates/tog-tools/src/shell/`, and the policies are documented in the
+[tool documentation](../tools.md).
 
 Keep process control, stream storage, and tool adapters focused. Reuse existing
 contracts and libraries where they fit. This plan does not require a new crate,

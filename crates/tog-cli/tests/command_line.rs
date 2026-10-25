@@ -298,8 +298,8 @@ const OPENROUTER_CHAT_STREAM: &str = concat!(
 );
 
 const OPENROUTER_TOOL_CALL_STREAM: &str = concat!(
-    "data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"call_pwd\",\"type\":\"function\",\"function\":{\"name\":\"shell\",\"arguments\":\"\"}}]},\"finish_reason\":null}]}\n\n",
-    "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"command\\\":\\\"pwd\\\"}\"}}]},\"finish_reason\":null}]}\n\n",
+    "data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"call_pwd\",\"type\":\"function\",\"function\":{\"name\":\"shell_execute\",\"arguments\":\"\"}}]},\"finish_reason\":null}]}\n\n",
+    "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"commands\\\":\\\"pwd\\\"}\"}}]},\"finish_reason\":null}]}\n\n",
     "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":2}}\n\n",
     "data: [DONE]\n\n"
 );
@@ -312,18 +312,18 @@ const OPENROUTER_RESPONSES_ANSWER_STREAM: &str = concat!(
 
 const OPENROUTER_RESPONSES_REASONING_TOOL_STREAM: &str = concat!(
     "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"rs_1\",\"type\":\"reasoning\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"Running pwd.\"}]}}\n\n",
-    "data: {\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"call_id\":\"call_pwd\",\"name\":\"shell\",\"arguments\":\"\"}}\n\n",
-    "data: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_1\",\"output_index\":1,\"delta\":\"{\\\"command\\\":\\\"pwd\\\"}\"}\n\n",
+    "data: {\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"call_id\":\"call_pwd\",\"name\":\"shell_execute\",\"arguments\":\"\"}}\n\n",
+    "data: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_1\",\"output_index\":1,\"delta\":\"{\\\"commands\\\":\\\"pwd\\\"}\"}\n\n",
     "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_tool\",\"status\":\"completed\",\"output\":[",
     "{\"type\":\"reasoning\",\"id\":\"rs_1\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"Running pwd.\"}],\"encrypted_content\":\"gAAAA-continue\"},",
-    "{\"type\":\"function_call\",\"id\":\"fc_1\",\"call_id\":\"call_pwd\",\"name\":\"shell\",\"arguments\":\"{\\\"command\\\":\\\"pwd\\\"}\"}",
+    "{\"type\":\"function_call\",\"id\":\"fc_1\",\"call_id\":\"call_pwd\",\"name\":\"shell_execute\",\"arguments\":\"{\\\"commands\\\":\\\"pwd\\\"}\"}",
     "]}}\n\n",
     "data: [DONE]\n\n"
 );
 
 const OPENROUTER_RESPONSES_INTERRUPTED_STREAM: &str = concat!(
-    "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"call_id\":\"call_pwd\",\"name\":\"shell\",\"arguments\":\"\"}}\n\n",
-    "data: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_1\",\"output_index\":0,\"delta\":\"{\\\"command\\\":\\\"pwd\\\"}\"}\n\n",
+    "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"call_id\":\"call_pwd\",\"name\":\"shell_execute\",\"arguments\":\"\"}}\n\n",
+    "data: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_1\",\"output_index\":0,\"delta\":\"{\\\"commands\\\":\\\"pwd\\\"}\"}\n\n",
     "data: [DONE]\n\n"
 );
 
@@ -436,11 +436,24 @@ fn turn_persists_events_and_prints_semantic_output() {
     assert_eq!(user["content"][0]["value"], "say hi");
     let tools_event = &events[2];
     assert_eq!(tools_event["tools"][0]["availability"], "immediate");
-    assert_eq!(tools_event["tools"][0]["definition"]["name"], "shell");
+    assert_eq!(
+        tools_event["tools"][0]["definition"]["name"],
+        "shell_execute"
+    );
     assert!(
-        tools_event["tools"][0]["definition"]["parameters"]["properties"]["command"].is_object()
+        tools_event["tools"][0]["definition"]["parameters"]["properties"]["commands"].is_object()
     );
     assert!(tools_event["tools"][0]["definition"]["result"].is_object());
+    let declared_names = tools_event["tools"]
+        .as_array()
+        .expect("the tools event should list tools")
+        .iter()
+        .map(|tool| tool["definition"]["name"].as_str().unwrap_or_default())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        declared_names,
+        ["shell_execute", "shell_wait", "shell_cancel", "stream_read"]
+    );
     let model_request = &events[3];
     assert_eq!(model_request["source"]["provider"], "openai");
     assert_eq!(model_request["source"]["model"], "gpt-5.6");
@@ -465,8 +478,8 @@ fn turn_persists_events_and_prints_semantic_output() {
     assert_eq!(requests[0]["model"], "gpt-5.6");
     assert_eq!(requests[0]["input"][0]["content"], "say hi");
     assert_eq!(requests[0]["tools"][0]["type"], "function");
-    assert_eq!(requests[0]["tools"][0]["name"], "shell");
-    assert!(requests[0]["tools"][0]["parameters"]["properties"]["command"].is_object());
+    assert_eq!(requests[0]["tools"][0]["name"], "shell_execute");
+    assert!(requests[0]["tools"][0]["parameters"]["properties"]["commands"].is_object());
     assert!(requests[0]["tools"][0].get("result").is_none());
     assert_eq!(requests[0]["reasoning"]["summary"], "auto");
     assert_eq!(requests[0]["stream"], true);
@@ -478,8 +491,8 @@ fn turn_runs_the_shell_tool_and_reports_the_result() {
     let server = MockOpenAiServer::start(vec![
         MockResponse::ToolCall {
             call_id: "call_pwd",
-            name: "shell",
-            arguments: "{\\\"command\\\":\\\"pwd\\\"}",
+            name: "shell_execute",
+            arguments: "{\\\"commands\\\":\\\"pwd\\\"}",
         },
         MockResponse::Success {
             response_id: "resp_final",
@@ -500,12 +513,14 @@ fn turn_runs_the_shell_tool_and_reports_the_result() {
     );
     let requests = server.finish();
     assert_eq!(requests.len(), 2);
-    assert_eq!(requests[1]["tools"][0]["name"], "shell");
+    assert_eq!(requests[1]["tools"][0]["name"], "shell_execute");
     let input = requests[1]["input"]
         .as_array()
         .expect("the follow-up request should contain input");
     assert!(input.iter().any(|item| {
-        item["type"] == "function_call" && item["name"] == "shell" && item["call_id"] == "call_pwd"
+        item["type"] == "function_call"
+            && item["name"] == "shell_execute"
+            && item["call_id"] == "call_pwd"
     }));
     let tool_output = input
         .iter()
@@ -519,12 +534,12 @@ fn turn_runs_the_shell_tool_and_reports_the_result() {
     )
     .expect("the tool output should be JSON");
     assert_eq!(output["type"], "succeeded");
-    assert_eq!(output["value"]["exit_status"]["type"], "exited");
-    assert_eq!(output["value"]["exit_status"]["code"], 0);
-    assert_eq!(output["value"]["stdout_truncated"], false);
-    let reported_directory = output["value"]["stdout"]
+    assert_eq!(output["value"]["state"]["status"], "complete");
+    assert_eq!(output["value"]["state"]["exit_status"]["type"], "exited");
+    assert_eq!(output["value"]["state"]["exit_status"]["code"], 0);
+    let reported_directory = output["value"]["state"]["output"]
         .as_str()
-        .expect("stdout should be a string")
+        .expect("output should be a string")
         .trim();
     assert_eq!(
         fs::canonicalize(reported_directory).expect("pwd should report an existing directory"),
@@ -1266,7 +1281,10 @@ fn openrouter_tool_round_returns_the_result_to_the_model() {
         .find(|message| message["role"] == "assistant")
         .expect("the follow-up request should contain the assistant tool call");
     assert_eq!(tool_call["tool_calls"][0]["id"], "call_pwd");
-    assert_eq!(tool_call["tool_calls"][0]["function"]["name"], "shell");
+    assert_eq!(
+        tool_call["tool_calls"][0]["function"]["name"],
+        "shell_execute"
+    );
     let tool_message = messages
         .iter()
         .find(|message| message["role"] == "tool")
