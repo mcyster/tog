@@ -1,0 +1,169 @@
+#!/usr/bin/env bash
+#
+# Provision the Google Cloud identity that the tog GitHub Actions workflow runs
+# as: a service account plus a Workload Identity Federation pool and provider
+# scoped to one GitHub repository.
+#
+# Run this once per project. It creates what is missing and leaves existing
+# resources untouched, then prints the two values to store as repository
+# secrets (see docs/workstation.md, "Configure the workflow from the
+# repository").
+
+set -o errexit
+set -o nounset
+set -o pipefail
+
+readonly SA_NAME="github-actions"
+readonly POOL_NAME="tog-actions"
+readonly PROVIDER_NAME="github"
+readonly ISSUER_URI="https://token.actions.githubusercontent.com"
+
+usage() {
+  cat <<'EOF'
+tog-workstation-gcloud-identity - provision GitHub Actions identity on GCP
+
+Usage:
+  tog-workstation-gcloud-identity --project PROJECT [--repo OWNER/REPO]
+
+Options:
+  --project PROJECT   Compute Engine project to set up.
+  --repo OWNER/REPO   GitHub repository allowed to act as the service account.
+                      Default: the repository named by `git remote get-url origin`.
+  -h, --help          Show this help.
+
+Creates, when missing:
+  - a service account github-actions@<project>.iam.gserviceaccount.com with
+    roles/compute.admin on the project and iam.serviceAccountUser on the default
+    compute service account;
+  - a workload identity pool `tog-actions` and provider `github` (OIDC, GitHub
+    issuer) scoped to the repository;
+  - the workload identity binding that lets that repo impersonate the service
+    account.
+
+Prints the values to store as the repository secrets
+TOG_GCLOUD_SERVICE_ACCOUNT and TOG_GCLOUD_WORKLOAD_IDENTITY_PROVIDER.
+EOF
+}
+
+die() {
+  printf '%s\n' "tog-workstation-gcloud-identity: $*" >&2
+  exit 1
+}
+
+project=""
+repo=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    --project)
+      [[ $# -ge 2 ]] || die "--project requires a value"
+      project="$2"
+      shift 2
+      ;;
+    --project=*)
+      project="${1#--project=}"
+      shift
+      ;;
+    --repo)
+      [[ $# -ge 2 ]] || die "--repo requires a value"
+      repo="$2"
+      shift 2
+      ;;
+    --repo=*)
+      repo="${1#--repo=}"
+      shift
+      ;;
+    -*)
+      die "unknown option: $1"
+      ;;
+    *)
+      die "unexpected argument: $1"
+      ;;
+  esac
+done
+
+[[ -n "$project" ]] || die "no project given; pass --project PROJECT"
+if [[ ! "$project" =~ ^[a-z0-9][-a-z0-9]*$ ]]; then
+  die "invalid project '$project'"
+fi
+
+if [[ -z "$repo" ]]; then
+  origin="$(git remote get-url origin 2>/dev/null || true)"
+  repo="$(printf '%s\n' "$origin" | sed -E 's#(git@|https://)##' | sed -E 's#github.com[:/]##' | sed -E 's#\.git$##')"
+fi
+if [[ ! "$repo" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+  die "invalid repository '$repo'; pass --repo OWNER/REPO"
+fi
+
+service_account="${SA_NAME}@${project}.iam.gserviceaccount.com"
+pool_attribute="projects/$(gcloud projects describe "$project" --format='value(projectNumber)')/locations/global/workloadIdentityPools/${POOL_NAME}"
+provider_value="${pool_attribute}/providers/${PROVIDER_NAME}"
+principal_set="${pool_attribute}/attribute.repository/${repo}"
+default_compute_service_account="$(gcloud projects describe "$project" --format='value(projectNumber)')-compute@developer.gserviceaccount.com"
+
+printf 'service account: %s\n' "$service_account" >&2
+printf 'workload identity provider: %s\n' "$provider_value" >&2
+printf 'allowed repository: %s\n' "$repo" >&2
+
+create_service_account() {
+  if ! gcloud iam service-accounts describe "$service_account" \
+      --project "$project" >/dev/null 2>&1; then
+    gcloud iam service-accounts create "$SA_NAME" \
+      --project "$project" \
+      --display-name "tog GitHub Actions workflow"
+  fi
+}
+
+bind_project_roles() {
+  gcloud projects add-iam-policy-binding "$project" \
+    --member "serviceAccount:${service_account}" \
+    --role roles/compute.admin >/dev/null
+  gcloud iam service-accounts add-iam-policy-binding \
+    "$default_compute_service_account" \
+    --project "$project" \
+    --member "serviceAccount:${service_account}" \
+    --role roles/iam.serviceAccountUser >/dev/null
+}
+
+create_pool() {
+  if ! gcloud iam workload-identity-pools describe "$POOL_NAME" \
+      --location global --project "$project" >/dev/null 2>&1; then
+    gcloud iam workload-identity-pools create "$POOL_NAME" \
+      --location global --project "$project" \
+      --display-name "tog GitHub Actions" >/dev/null
+  fi
+}
+
+create_provider() {
+  if ! gcloud iam workload-identity-pools providers describe "$PROVIDER_NAME" \
+      --location global --workload-identity-pool "$POOL_NAME" \
+      --project "$project" >/dev/null 2>&1; then
+    gcloud iam workload-identity-pools providers create-oidc "$PROVIDER_NAME" \
+      --location global --workload-identity-pool "$POOL_NAME" \
+      --project "$project" \
+      --issuer-uri "$ISSUER_URI" \
+      --attribute-mapping "google.subject=assertion.sub,attribute.repository=assertion.repository" \
+      --attribute-condition "assertion.repository == '${repo}'" >/dev/null
+  fi
+}
+
+bind_pool_to_service_account() {
+  gcloud iam service-accounts add-iam-policy-binding "$service_account" \
+    --project "$project" \
+    --role roles/iam.workloadIdentityUser \
+    --member "principalSet://iam.googleapis.com/${principal_set}" >/dev/null
+}
+
+create_service_account
+bind_project_roles
+create_pool
+create_provider
+bind_pool_to_service_account
+
+printf 'TOG_GCLOUD_SERVICE_ACCOUNT=%s\n' "$service_account"
+printf 'TOG_GCLOUD_WORKLOAD_IDENTITY_PROVIDER=%s\n' "$provider_value"
+printf 'store these as repository secrets (Settings -> Secrets and variables -> Actions).\n' >&2

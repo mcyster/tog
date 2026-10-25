@@ -210,11 +210,12 @@ The reusable workflow `.github/workflows/tog-workstation.yml` wraps the same
 commands for GitHub Actions. The manual run form asks only for the action and
 workstation name, and installs the web terminal by default; `project`, `zone`,
 and the workload identity credentials come from repository variables and
-secrets (configured once, see `docs/workstation.md`). For `create
---web-terminal`, `start`, and `login` it writes the web terminal URL and freshly
-generated password to the job summary; the password is masked in the step log.
-Retired passwords are deliberately recoverable only by running the workflow
-again, which is an accepted tradeoff for a personal workstation.
+secrets. Provision those once with `scripts/tog-workstation-gcloud-identity`
+(see `docs/workstation.md`). For `create --web-terminal`, `start`, and `login`
+it writes the web terminal URL and freshly generated password to the job
+summary; the password is masked in the step log. Retired passwords are
+deliberately recoverable only by running the workflow again, which is an
+accepted tradeoff for a personal workstation.
 
 ## Development
 
