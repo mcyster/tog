@@ -136,15 +136,17 @@ jobs:
           fi
 
           url="$(sed -n 's/^web terminal: //p' "$output_file" | head -n 1)"
-          secret="$(sed -n 's/^password: //p' "$output_file" | head -n 1)"
+          secret_name="$(sed -n 's/^secret: //p' "$output_file" | head -n 1)"
           rm -f "$output_file"
 
-          if [ -n "$url" ] && [ -n "$secret" ]; then
+          if [ -n "$url" ]; then
+            printf -- '- Web terminal: %s\n' "$url" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [ -n "$secret_name" ]; then
             {
-              printf -- '- Web terminal: %s\n' "$url"
-              printf -- '- Web terminal secret: %s\n' "$secret"
+              printf -- '- Password: stored in Google Cloud Secret Manager (%s)\n' "$secret_name"
+              printf -- '  https://console.cloud.google.com/security/secret-manager/secret/%s?project=%s\n' "$secret_name" "$WORKSTATION_PROJECT"
             } >> "$GITHUB_STEP_SUMMARY"
-            echo "::add-mask::$secret"
           fi
 
       - name: Write job summary
@@ -179,9 +181,9 @@ jobs:
 
           {
             printf '\n### All tog workstations\n\n'
-            printf '| instance | status | machine type | zone |\n'
-            printf '| --- | --- | --- | --- |\n'
-            printf '%s\n' "$entries" | grep -v '^$' | while IFS=, read -r instance status_value machine_type zone_value; do
-              printf '| %s | %s | %s | %s |\n' "$instance" "$status_value" "$machine_type" "$zone_value"
+            printf '| instance | status | machine type | zone | external ip |\n'
+            printf '| --- | --- | --- | --- | --- |\n'
+            printf '%s\n' "$entries" | grep -v '^$' | while IFS=, read -r instance status_value machine_type zone_value external_ip_value; do
+              printf '| %s | %s | %s | %s | %s |\n' "$instance" "$status_value" "$machine_type" "$zone_value" "$external_ip_value"
             done
           } >> "$GITHUB_STEP_SUMMARY"

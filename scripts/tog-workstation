@@ -22,6 +22,7 @@ readonly WORKSTATION_LABEL_FILTER="labels.tog-workstation=true"
 readonly CODE_SERVER_TAG="tog-workstation-code-server"
 readonly CODE_SERVER_PORT="8443"
 readonly CODE_FIREWALL_RULE="tog-workstation-code-server"
+readonly WEB_TERMINAL_SECRET_NAME="tog-web-terminal-password"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly SCRIPT_DIR
 readonly PROVISION_SCRIPT="$SCRIPT_DIR/provision-code-server"
@@ -282,11 +283,23 @@ generate_password() {
   printf '%s\n' "${random_bytes:0:32}"
 }
 
+store_web_terminal_password() {
+  local password="$1"
+  if ! printf '%s' "$password" | gcloud secrets versions add "$WEB_TERMINAL_SECRET_NAME" \
+      --project "$project" --data-file=- >/dev/null 2>&1; then
+    die "failed to store the web terminal password in Secret Manager"
+  fi
+}
+
 print_web_terminal_credentials() {
   local external_ip
   external_ip="$(instance_external_ip)"
+  store_web_terminal_password "$1"
   printf 'web terminal: https://%s:%s\n' "$external_ip" "$CODE_SERVER_PORT"
-  printf 'password: %s\n' "$1"
+  printf 'secret: %s\n' "$WEB_TERMINAL_SECRET_NAME"
+  printf 'open %s in the Google Cloud console to see the password:\n' "$WEB_TERMINAL_SECRET_NAME" >&2
+  printf '  https://console.cloud.google.com/security/secret-manager/secret/%s?project=%s\n' \
+    "$WEB_TERMINAL_SECRET_NAME" "$project" >&2
   printf 'accept the self-signed certificate warning in the browser.\n' >&2
 }
 

@@ -17,6 +17,7 @@ readonly SA_NAME="github-actions"
 readonly POOL_NAME="tog-actions"
 readonly PROVIDER_NAME="github"
 readonly ISSUER_URI="https://token.actions.githubusercontent.com"
+readonly WEB_TERMINAL_SECRET_NAME="tog-web-terminal-password"
 
 usage() {
   cat <<'EOF'
@@ -38,10 +39,13 @@ Creates, when missing:
   - a workload identity pool `tog-actions` and provider `github` (OIDC, GitHub
     issuer) scoped to the repository;
   - the workload identity binding that lets that repo impersonate the service
-    account.
+    account;
+  - the Secret Manager secret `tog-web-terminal-password` where the web terminal
+    password is stored, with the service account allowed to add versions.
 
 Prints the values to store as the repository secrets
-TOG_GCLOUD_SERVICE_ACCOUNT and TOG_GCLOUD_WORKLOAD_IDENTITY_PROVIDER.
+TOG_GCLOUD_SERVICE_ACCOUNT and TOG_GCLOUD_WORKLOAD_IDENTITY_PROVIDER, and the
+Secret Manager secret name (TOG_WEB_TERMINAL_SECRET).
 EOF
 }
 
@@ -158,12 +162,29 @@ bind_pool_to_service_account() {
     --member "principalSet://iam.googleapis.com/${principal_set}" >/dev/null
 }
 
+create_web_terminal_secret() {
+  if ! gcloud secrets describe "$WEB_TERMINAL_SECRET_NAME" \
+      --project "$project" >/dev/null 2>&1; then
+    gcloud secrets create "$WEB_TERMINAL_SECRET_NAME" \
+      --project "$project" \
+      --replication-policy automatic >/dev/null
+  fi
+  # The service account only needs to add versions; reading stays with the
+  # human owner, who uses the Google Cloud console.
+  gcloud secrets add-iam-policy-binding "$WEB_TERMINAL_SECRET_NAME" \
+    --project "$project" \
+    --member "serviceAccount:${service_account}" \
+    --role roles/secretmanager.secretVersionAdder >/dev/null
+}
+
 create_service_account
 bind_project_roles
 create_pool
 create_provider
 bind_pool_to_service_account
+create_web_terminal_secret
 
 printf 'TOG_GCLOUD_SERVICE_ACCOUNT=%s\n' "$service_account"
 printf 'TOG_GCLOUD_WORKLOAD_IDENTITY_PROVIDER=%s\n' "$provider_value"
+printf 'TOG_WEB_TERMINAL_SECRET=%s\n' "$WEB_TERMINAL_SECRET_NAME"
 printf 'store these as repository secrets (Settings -> Secrets and variables -> Actions).\n' >&2
