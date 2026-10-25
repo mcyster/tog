@@ -236,8 +236,9 @@ command_create() {
   local machine_type
   machine_type="${machine_type_option:-$DEFAULT_MACHINE_TYPE}"
   printf 'validating machine type %s in zone %s...\n' "$machine_type" "$zone" >&2
-  if ! gcloud compute machine-types describe "$machine_type" \
-    --project "$project" --zone "$zone" >/dev/null 2>&1; then
+  if ! validation_output="$(gcloud compute machine-types describe "$machine_type" \
+      --project "$project" --zone "$zone" 2>&1)"; then
+    printf '%s\n' "$validation_output" >&2
     die "machine type '$machine_type' is not available in zone '$zone'"
   fi
 
