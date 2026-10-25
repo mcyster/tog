@@ -34,7 +34,7 @@ tog-workstation - manage GCE workstations with persistent boot disks
 Usage:
   tog-workstation [OPTIONS] create [NAME] [--machine-type TYPE] [--web-terminal]
   tog-workstation [OPTIONS] start [NAME]
-  tog-workstation [OPTIONS] login [NAME]
+  tog-workstation [OPTIONS] web-terminal [NAME]
   tog-workstation [OPTIONS] stop [NAME]
   tog-workstation [OPTIONS] shell [NAME]
   tog-workstation [OPTIONS] config-ssh [NAME]
@@ -44,12 +44,14 @@ Usage:
 Commands:
   create   Create the workstation if it does not exist. Creating an existing
            workstation changes nothing, including its machine type. With
-           --web-terminal, installs a browser code editor and web terminal.
+           --web-terminal, creates the workstation then enables and rotates
+           the web terminal.
   start    Start the workstation when stopped. A workstation with a web
            terminal issues fresh login credentials once the service is up.
-  login    Rotate the web terminal password on a running workstation and store
-           the fresh password in Secret Manager. The previous password stops
-           working.
+  web-terminal
+           Enable the web terminal if it is not installed, rotate its password
+           to a fresh one, and store it in Secret Manager. The previous
+           password stops working.
   stop     Stop the workstation, halting compute charges. The persistent boot
            disk is kept.
   shell    Open an interactive SSH session on the running workstation.
@@ -68,18 +70,16 @@ Options:
   --project PROJECT    Compute Engine project.
   --zone ZONE          Compute Engine zone; the workstation is provisioned here.
   --machine-type TYPE  Machine type used by create. Default: e2-standard-2.
-  --web-terminal       After create, install code-server (VS Code and a
-                       terminal in the browser), print its URL, and store a
-                       fresh password in Secret Manager. When omitted, the
-                       workstation stays ssh-only.
+  --web-terminal       With create, also enable the web terminal on the created
+                       workstation. When omitted, create stays ssh-only.
   --yes                Skip the destroy confirmation.
   -h, --help           Show this help.
 
 Web terminal passwords are random and rotated: a fresh password is stored by
-create --web-terminal, login, and start in the Secret Manager secret
+create --web-terminal, web-terminal, and start in the Secret Manager secret
 tog-web-terminal-password, where it is read from the Google Cloud console. The
 workstation keeps only an argon2 hash and nothing is stored in Google Cloud
-metadata. Forgot a password? Run login again. A requested machine type is
+metadata. Forgot a password? Run web-terminal again. A requested machine type is
 validated against the zone before provisioning. The default project and zone
 come from your gcloud configuration.
 EOF
@@ -139,7 +139,7 @@ while [[ $# -gt 0 ]]; do
       assume_yes=true
       shift
       ;;
-    create | start | login | stop | shell | config-ssh | destroy | list)
+    create | start | web-terminal | stop | shell | config-ssh | destroy | list)
       if [[ -n "$command" ]]; then
         die "duplicate command: $1"
       fi
@@ -343,29 +343,7 @@ web_terminal_status() {
   fi
 }
 
-command_web_terminal_installation() {
-  local status
-  status="$(instance_status)"
-  if [[ -z "$status" ]]; then
-    die "workstation '$name' does not exist; use create first"
-  fi
-  if [[ "$status" != "RUNNING" ]]; then
-    printf 'starting workstation %s to provision it...\n' "$name" >&2
-    gcloud compute instances start "$(instance_name)" \
-      --project "$project" --zone "$zone" >/dev/null 2>&1
-    status="$(instance_status)"
-  fi
-  waits_for_ssh || die "workstation '$name' is not accepting SSH connections"
-  ensure_web_terminal_firewall
-  local password
-  password="$(generate_password)"
-  printf 'setting the web terminal password on workstation %s...\n' "$name" >&2
-  rotate_web_terminal_password "$password"
-  printf 'web terminal ready on workstation %s\n' "$name" >&2
-  print_web_terminal_credentials "$password"
-}
-
-command_login() {
+command_web_terminal() {
   local status
   status="$(instance_status)"
   if [[ -z "$status" ]]; then
@@ -374,15 +352,13 @@ command_login() {
   if [[ "$status" != "RUNNING" ]]; then
     die "workstation '$name' is not running; start it first"
   fi
-  if ! instance_has_tag; then
-    die "workstation '$name' has no web terminal; run create --web-terminal first"
-  fi
   waits_for_ssh || die "workstation '$name' is not accepting SSH connections"
+  ensure_web_terminal_firewall
   local password
   password="$(generate_password)"
-  printf 'rotating the web terminal password on workstation %s...\n' "$name" >&2
+  printf 'setting the web terminal password on workstation %s...\n' "$name" >&2
   rotate_web_terminal_password "$password"
-  printf 'password rotated on workstation %s\n' "$name" >&2
+  printf 'web terminal ready on workstation %s\n' "$name" >&2
   print_web_terminal_credentials "$password"
 }
 
@@ -491,12 +467,12 @@ case "$command" in
   create)
     command_create
     if [[ "$web_terminal" == true ]]; then
-      command_web_terminal_installation
+      command_web_terminal
     fi
     ;;
   stop) command_stop ;;
   start) command_start ;;
-  login) command_login ;;
+  web-terminal) command_web_terminal ;;
   shell) command_shell ;;
   config-ssh) command_config_ssh ;;
   destroy) command_destroy || exit 1 ;;
