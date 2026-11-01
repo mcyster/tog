@@ -21,7 +21,7 @@ use tog_driver_openrouter_completions::OpenRouterCompletionsModelDriver;
 use tog_driver_openrouter_responses::OpenRouterResponsesModelDriver;
 use tog_engine::{ConversationSession, ConversationSessionProgress, ConversationSessionResult};
 use tog_store_local::{FileAssetStore, FileEventStore};
-use tog_tools::ShellTool;
+use tog_tools::ShellTools;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -82,7 +82,7 @@ impl CommandLine {
                     }
                 };
                 let mut tool_registry = ToolRegistry::default();
-                tool_registry.register(ShellTool::new());
+                ShellTools::register(&mut tool_registry);
                 let conversation_session = match arguments.conversation {
                     Some(conversation_id) => ConversationSession::open(
                         conversation_id,
