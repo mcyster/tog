@@ -164,68 +164,6 @@ MIME type from content, falling back to `application/octet-stream`; override
 either with `--name` and `--mime-type`. Standard output carries the added
 asset or a JSON Lines listing. See [Assets](docs/assets.md).
 
-## Workstations
-
-Manage Google Compute Engine workstations backed by a persistent boot disk with
-[`scripts/tog-workstation`](scripts/tog-workstation). It wraps the `gcloud`
-CLI; follow the [Google Cloud setup](docs/workstation.md) for the SDK,
-authentication, and project and zone, then run:
-
-```console
-scripts/tog-workstation create
-scripts/tog-workstation create main --machine-type e2-standard-2
-scripts/tog-workstation list
-scripts/tog-workstation stop
-scripts/tog-workstation start
-scripts/tog-workstation destroy
-```
-
-- The machine type defaults to `e2-standard-2` (2 vCPU, 8 GB RAM). Any machine
-  type available in the zone is accepted; a requested type is validated against
-  the zone before provisioning.
-- The workstation name defaults to `tog`; pass a name to target another
-  workstation.
-- `stop` halts compute charges while keeping the boot disk, which continues to
-  incur storage charges. `start` resumes the same workstation.
-- `shell` opens an interactive SSH session on a running workstation; gcloud
-  manages the key, so no password is needed.
-- `config-ssh` adds an SSH config alias for the workstation so plain `ssh`,
-  `scp`, and `rsync` connect without gcloud flags.
-- `destroy` deletes the workstation and its boot disk after a typed
-  confirmation, or unconditionally with `--yes`.
-- `create` on an existing workstation leaves it unchanged, so its machine type
-  is preserved. There is no resize operation.
-- `create --web-terminal` installs code-server on the workstation: VS Code and a
-  terminal in the browser at `https://EXTERNAL_IP:8443`, behind a password and a
-  firewall rule for that port. Run create without `--web-terminal` to keep the
-  workstation ssh-only.
-- Web terminal passwords are random and never printed or stored on the
-  workstation; the machine keeps only an argon2 hash, and the plaintext lives in
-  Google Cloud Secret Manager under `tog-web-terminal-password`, where the owner
-  reads it from the Google Cloud console. `web-terminal` enables the browser
-  terminal if missing and rotates the password in Secret Manager; `create
-  --web-terminal` and `start` (after a boot) do the same. Password forgotten?
-  Run `web-terminal` again.
-- `create` also injects first-boot host setup (via cloud-init): it creates the
-  `tog` user, installs nix, direnv, nix-direnv, and git, and checks out the tog
-  repository at `/home/tog/tog/main` with direnv allowed. The host setup lives in
-  `infra/scripts/workstation-setup`, which is embedded into the instance at
-  create time; see `docs/workstation.md` for the reusable pattern.
-- No snapshots or backups are created automatically.
-
-The reusable workflow `.github/workflows/tog-workstation.yml` wraps the same
-commands (CLI `scripts/tog-workstation`) for GitHub Actions. The manual run form
-asks only for the action and workstation name, and installs the web terminal by
-default; `project`, `zone`, and the workload identity credentials come from
-repository variables and secrets. Provision those once with
-`infra/scripts/workstation-gcloud-identity` (see `docs/workstation.md`). For
-`create --web-terminal`, `start`, and `web-terminal` it writes the web terminal
-URL to the job summary plus a link to the secret in the Google Cloud console;
-the password itself never appears in GitHub output.
-Retired passwords are deliberately recoverable only by running the workflow
-again and reading the new value from Secret Manager, which is an accepted
-tradeoff for a personal workstation on a public repository.
-
 ## Development
 
 Run the project checks:
